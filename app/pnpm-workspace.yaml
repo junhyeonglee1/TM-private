@@ -1,0 +1,12 @@
+packages:
+  - .
+
+storeDir: ../dist/cache/pnpm-store
+virtualStoreDir: ../dist/cache/pnpm-virtual-store
+strictPeerDependencies: true
+savePrefix: ""
+nodeVersion: 24.14.0
+engineStrict: true
+
+allowBuilds:
+  esbuild: true

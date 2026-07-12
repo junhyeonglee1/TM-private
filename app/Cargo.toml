@@ -1,0 +1,42 @@
+[workspace]
+members = ["crates/tm-core", "crates/tm-cli", "src-tauri"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.5"
+edition = "2024"
+rust-version = "1.97"
+license = "UNLICENSED"
+
+[workspace.dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde", "clock"] }
+chrono-tz = { version = "0.10", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+fs2 = "0.4"
+rusqlite = { version = "0.37", features = ["bundled-full", "backup", "chrono", "uuid", "serde_json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tauri = "2"
+tauri-build = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-single-instance = "2"
+tempfile = "3"
+thiserror = "2"
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+url = "2"
+uuid = { version = "1", features = ["v7", "serde"] }
+walkdir = "2"
+zip = { version = "4", default-features = false, features = ["deflate"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unwrap_used = "deny"

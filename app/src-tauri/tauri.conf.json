@@ -1,0 +1,48 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "TM",
+  "version": "0.1.5",
+  "identifier": "io.local.tm.desktop",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../../dist/frontend"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "TM",
+        "width": 1320,
+        "height": 860,
+        "minWidth": 960,
+        "minHeight": 640,
+        "resizable": true,
+        "fullscreen": false,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: https://asset.localhost data:; connect-src ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "useLocalToolsDir": true,
+    "category": "Productivity",
+    "shortDescription": "개인 Task와 작업 기록을 로컬에서 관리합니다.",
+    "longDescription": "TM은 Task, 오늘 계획, 작업 세션, WorkLog와 Note를 로컬 SQLite에 안전하게 저장하는 개인 생산성 앱입니다.",
+    "windows": {
+      "allowDowngrades": false,
+      "webviewInstallMode": {
+        "type": "skip"
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["Korean"]
+      }
+    }
+  }
+}

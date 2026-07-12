@@ -1,0 +1,14 @@
+# User data and recovery artifacts live outside source control.
+/data/
+/backups/
+/exports/
+
+# Build outputs and packaged executables are reproducible artifacts.
+/dist/
+/tm.exe
+
+# Local editor and OS metadata.
+/.idea/
+/.vscode/
+Thumbs.db
+Desktop.ini
