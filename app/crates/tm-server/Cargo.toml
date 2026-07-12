@@ -1,0 +1,31 @@
+[package]
+name = "tm-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "tm_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tm-server"
+path = "src/main.rs"
+
+[dependencies]
+axum.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tm-core = { path = "../tm-core" }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tower.workspace = true
+
+[lints]
+workspace = true
