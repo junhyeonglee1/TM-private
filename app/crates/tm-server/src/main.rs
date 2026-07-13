@@ -1,7 +1,7 @@
 use std::{error::Error, io};
 
 use tm_core::{TmCore, TmHome};
-use tm_server::{ServerConfig, build_router};
+use tm_server::{ServerConfig, build_router_with_openai, openai::OpenAiClient};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -12,15 +12,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let config = ServerConfig::from_env().map_err(io::Error::other)?;
     let core = TmCore::open(TmHome::new(&config.home))?;
+    let openai = OpenAiClient::new(config.openai.clone()).map_err(io::Error::other)?;
     let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
 
     tracing::info!(
         bind = %config.bind_addr,
         home = %config.home.display(),
+        openai_configured = config.openai.configured(),
+        openai_model = config.openai.model(),
         "tm-server is listening"
     );
 
-    axum::serve(listener, build_router(core))
+    axum::serve(listener, build_router_with_openai(core, openai))
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())

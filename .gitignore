@@ -7,6 +7,12 @@
 /dist/
 /tm.exe
 
+# Secrets must be injected by the local process or a cloud secret manager.
+.env
+.env.*
+!.env.example
+/secrets/
+
 # Local editor and OS metadata.
 /.idea/
 /.vscode/

@@ -8,6 +8,7 @@
 
 - localhost 전용 `tm-server` 뼈대와 liveness/readiness, 구조화 오류, request ID를 추가했다.
 - 서버 실행 시 명시적인 절대 `TM_SERVER_HOME`을 요구해 실제 사용자 DB를 실수로 여는 경계를 추가했다.
+- 서버 환경변수에만 API 키를 보관하는 OpenAI Responses API 연결 경계와 비과금 상태 확인·명시적 최소 probe를 추가했다.
 
 ## [0.1.5]
 
