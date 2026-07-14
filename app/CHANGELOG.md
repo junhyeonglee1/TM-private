@@ -9,6 +9,14 @@
 - localhost 전용 `tm-server` 뼈대와 liveness/readiness, 구조화 오류, request ID를 추가했다.
 - 서버 실행 시 명시적인 절대 `TM_SERVER_HOME`을 요구해 실제 사용자 DB를 실수로 여는 경계를 추가했다.
 - 서버 환경변수에만 API 키를 보관하는 OpenAI Responses API 연결 경계와 비과금 상태 확인·명시적 최소 probe를 추가했다.
+- Railway Hobby용 multi-stage Docker image, Config as Code, Volume entrypoint를 추가했다.
+- Railway 환경과 Volume을 검증하고 health/readiness만 제공하는 `cloud-bootstrap` 서버 프로필을 추가했다.
+- 서버 시작 로그에 SQLite 최초 초기화 시각을 기록해 Volume 영속성을 민감 데이터 노출 없이 확인할 수 있게 했다.
+
+### Verified
+
+- Railway Singapore production에서 새 이미지 배포와 동일 이미지 재시작 후에도 `/var/lib/tm`의 SQLite 최초 초기화 시각이 유지됨을 확인했다.
+- 인증 구현 전 원격 서버에는 공개 도메인과 OpenAI API 키가 없고 health/readiness route만 존재함을 확인했다.
 
 ## [0.1.5]
 

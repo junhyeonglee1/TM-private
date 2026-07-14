@@ -40,12 +40,16 @@ fn seoul_today() -> NaiveDate {
 
 #[test]
 fn initializes_schema_with_uuid_v7_utc_and_wal() -> Result<()> {
-    let (_temporary, core) = fixture()?;
+    let (temporary, core) = fixture()?;
     let health = core.health()?;
     assert!(health.ok);
     assert_eq!(health.schema_version, 3);
     assert_eq!(health.journal_mode.to_ascii_lowercase(), "wal");
     assert!(health.database_path.ends_with("data\\tm.sqlite3"));
+
+    let initialized_at = core.database_initialized_at()?;
+    let reopened = TmCore::open(TmHome::new(temporary.path()))?;
+    assert_eq!(reopened.database_initialized_at()?, initialized_at);
 
     let task = core.create_task(task_input("UUIDv7 확인"))?;
     let parsed = Uuid::parse_str(&task.id)

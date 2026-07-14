@@ -1248,6 +1248,17 @@ impl TmCore {
         export::create_artifacts(&self.database)
     }
 
+    pub fn database_initialized_at(&self) -> Result<String> {
+        let connection = self.database.connect()?;
+        connection
+            .query_row("SELECT MIN(applied_at) FROM schema_migrations", [], |row| {
+                row.get::<_, Option<String>>(0)
+            })?
+            .ok_or_else(|| {
+                Error::Invariant("database initialization timestamp is missing".to_owned())
+            })
+    }
+
     pub fn health(&self) -> Result<HealthReport> {
         let connection = self.database.connect()?;
         let schema_version: i64 =

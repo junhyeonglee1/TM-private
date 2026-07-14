@@ -1,6 +1,6 @@
 # TM AI 비서 시스템 구축 로드맵
 
-마지막 갱신: 2026-07-13
+마지막 갱신: 2026-07-14
 
 진행 원칙: 기능을 먼저 늘리지 않고, 안전한 서버·클라우드·AI 실행 기반을 선행 구축한다.
 
@@ -46,7 +46,7 @@ API 키와 비밀번호는 채팅, Git, 소스 파일 또는 일반 로그에 �
 | 1 | 데이터·소스 백업과 로컬 Git 기준점 확보 | 완료 |
 | 2 | localhost 전용 `tm-server` HTTP 기반 구축 | 완료 |
 | 3 | OpenAI API 비밀키 경계와 실제 연결 확인 | 완료 |
-| 4 | 클라우드 실행 환경 결정과 최소 배포 기반 준비 | 진행 중 |
+| 4 | 클라우드 실행 환경 결정과 최소 배포 기반 준비 | 완료 |
 | 5 | 단일 사용자 인증과 원격 접근 보호 | 대기 |
 | 6 | TM 데이터 API 경계와 동기화 규칙 | 대기 |
 | 7 | AI 비서 오케스트레이터 기본 구조 | 대기 |
@@ -151,7 +151,7 @@ Action Item:
 
 ## STEP 4 — 클라우드 실행 환경과 최소 배포
 
-상태: 진행 중
+상태: 완료
 
 현재 추천안:
 
@@ -163,10 +163,10 @@ Action Item:
 
 사용자 결정:
 
-- [ ] Railway Hobby로 진행할지 확정
-- [ ] Railway 계정 생성과 결제 수단 등록
-- [ ] 서버 지역 선택. 우선 추천은 한국에서 가까운 가용 아시아 지역
-- [ ] 항상 실행할지, 사용하지 않을 때 잠드는 Serverless 모드를 쓸지 결정
+- [x] Railway Hobby로 진행할지 확정
+- [x] Railway 계정 생성과 결제 수단 등록
+- [x] 서버 지역 선택: Southeast Asia Metal, Singapore
+- [x] 항상 실행하고 Serverless 모드는 끄기로 결정
 
 권장 기본값:
 
@@ -179,16 +179,25 @@ Action Item:
 
 Codex Action Item:
 
-- [ ] Linux 컨테이너 호환성 점검
-- [ ] 멀티스테이지 Dockerfile 작성
-- [ ] 빌드 컨텍스트용 `.dockerignore` 작성
-- [ ] Railway의 `PORT`를 사용하는 cloud-bootstrap 실행 모드 구현
-- [ ] cloud-bootstrap 모드에서는 AI 호출과 TM 데이터 API 비활성화
-- [ ] `/healthz` 기반 배포 healthcheck 설정 작성
-- [ ] 영구 Volume 경로와 `TM_SERVER_HOME` 연결
-- [ ] Graceful shutdown과 재시작 정책 확인
-- [ ] 원격 빌드·배포 로그 확인
-- [ ] 공개 도메인 없이 클라우드 서버와 Volume 동작 확인
+- [x] Linux 컨테이너 호환성 점검
+- [x] 멀티스테이지 Dockerfile 작성
+- [x] 빌드 컨텍스트용 `.dockerignore` 작성
+- [x] Railway의 `PORT`를 사용하는 cloud-bootstrap 실행 모드 구현
+- [x] cloud-bootstrap 모드에서는 AI 호출과 TM 데이터 API 비활성화
+- [x] `/readyz` 기반 배포 healthcheck 설정 작성
+- [x] 영구 Volume 경로와 `TM_SERVER_HOME` 연결
+- [x] Graceful shutdown과 재시작 정책 확인
+- [x] 원격 빌드·배포 로그 확인
+- [x] 공개 도메인 없이 클라우드 서버와 Volume 동작 확인
+
+검증 기록:
+
+- 2026-07-14 Singapore production 배포와 `/readyz` healthcheck 성공
+- 새 이미지 재배포와 동일 이미지 재시작 전후 SQLite 최초 초기화 시각 동일
+- 5 GB Volume이 `/var/lib/tm`에서 `Ready`, 공개 도메인 최종 목록은 비어 있음
+- `OPENAI_API_KEY`와 사용자 데이터 API 없이 health/readiness만 제공
+
+상세 절차: [Railway Hobby bootstrap 배포](railway-bootstrap-deploy.md)
 
 완료 조건:
 

@@ -1,4 +1,8 @@
-use std::{env, net::SocketAddr, path::PathBuf};
+use std::{
+    env, fmt,
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
+    path::{Path, PathBuf},
+};
 
 pub mod openai;
 
@@ -18,11 +22,41 @@ use uuid::Uuid;
 use crate::openai::{OpenAiClient, OpenAiConfig, OpenAiError, OpenAiProbeResult};
 
 pub const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8787";
+pub const LOCAL_PROFILE: &str = "local";
+pub const CLOUD_BOOTSTRAP_PROFILE: &str = "cloud-bootstrap";
 const REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-request-id");
 const AI_CONFIRM_HEADER: HeaderName = HeaderName::from_static("x-tm-confirm-ai-call");
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerProfile {
+    Local,
+    CloudBootstrap,
+}
+
+impl ServerProfile {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            LOCAL_PROFILE => Ok(Self::Local),
+            CLOUD_BOOTSTRAP_PROFILE => Ok(Self::CloudBootstrap),
+            _ => Err(format!(
+                "TM_SERVER_PROFILE must be {LOCAL_PROFILE} or {CLOUD_BOOTSTRAP_PROFILE}"
+            )),
+        }
+    }
+}
+
+impl fmt::Display for ServerProfile {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Local => formatter.write_str(LOCAL_PROFILE),
+            Self::CloudBootstrap => formatter.write_str(CLOUD_BOOTSTRAP_PROFILE),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerConfig {
+    pub profile: ServerProfile,
     pub bind_addr: SocketAddr,
     pub home: PathBuf,
     pub openai: OpenAiConfig,
@@ -30,23 +64,45 @@ pub struct ServerConfig {
 
 impl ServerConfig {
     pub fn from_env() -> Result<Self, String> {
-        let home = env::var_os("TM_SERVER_HOME")
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .ok_or_else(|| "TM_SERVER_HOME must be set to an absolute path".to_owned())?;
+        let profile =
+            optional_env("TM_SERVER_PROFILE")?.unwrap_or_else(|| LOCAL_PROFILE.to_owned());
+        let profile = ServerProfile::parse(&profile)?;
+
+        let home = required_path_env("TM_SERVER_HOME")?;
         if !home.is_absolute() {
             return Err("TM_SERVER_HOME must be an absolute path".to_owned());
         }
 
-        let bind_addr = env::var("TM_SERVER_BIND")
-            .unwrap_or_else(|_| DEFAULT_BIND_ADDR.to_owned())
-            .parse::<SocketAddr>()
-            .map_err(|error| format!("TM_SERVER_BIND is invalid: {error}"))?;
-        validate_bind_addr(bind_addr)?;
+        let (bind_addr, openai) = match profile {
+            ServerProfile::Local => {
+                let bind_addr = optional_env("TM_SERVER_BIND")?
+                    .unwrap_or_else(|| DEFAULT_BIND_ADDR.to_owned())
+                    .parse::<SocketAddr>()
+                    .map_err(|error| format!("TM_SERVER_BIND is invalid: {error}"))?;
+                validate_bind_addr(profile, bind_addr)?;
+                (bind_addr, OpenAiConfig::from_env()?)
+            }
+            ServerProfile::CloudBootstrap => {
+                require_railway_environment()?;
+                reject_cloud_bootstrap_overrides()?;
 
-        let openai = OpenAiConfig::from_env()?;
+                let volume_mount = required_path_env("RAILWAY_VOLUME_MOUNT_PATH")?;
+                validate_cloud_home(&home, &volume_mount)?;
+
+                let port = required_env("PORT")?
+                    .parse::<u16>()
+                    .map_err(|error| format!("PORT is invalid: {error}"))?;
+                if port == 0 {
+                    return Err("PORT must be between 1 and 65535".to_owned());
+                }
+                let bind_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port));
+                validate_bind_addr(profile, bind_addr)?;
+                (bind_addr, OpenAiConfig::default())
+            }
+        };
 
         Ok(Self {
+            profile,
             bind_addr,
             home,
             openai,
@@ -144,6 +200,18 @@ pub fn build_router_with_openai(core: TmCore, openai: OpenAiClient) -> Router {
         .route("/api/v1/ai/probe", post(ai_probe))
         .fallback(not_found)
         .with_state(AppState { core, openai })
+        .layer(middleware::from_fn(assign_request_id))
+}
+
+pub fn build_cloud_bootstrap_router(core: TmCore) -> Router {
+    Router::new()
+        .route("/healthz", get(healthz))
+        .route("/readyz", get(readyz))
+        .fallback(not_found)
+        .with_state(AppState {
+            core,
+            openai: OpenAiClient::disabled(),
+        })
         .layer(middleware::from_fn(assign_request_id))
 }
 
@@ -254,14 +322,78 @@ async fn ai_probe(
     }))
 }
 
-fn validate_bind_addr(bind_addr: SocketAddr) -> Result<(), String> {
-    if !bind_addr.ip().is_loopback() {
-        return Err(
+fn validate_bind_addr(profile: ServerProfile, bind_addr: SocketAddr) -> Result<(), String> {
+    match profile {
+        ServerProfile::Local if !bind_addr.ip().is_loopback() => Err(
             "TM_SERVER_BIND must use a loopback address until server authentication is implemented"
                 .to_owned(),
+        ),
+        ServerProfile::CloudBootstrap if !bind_addr.ip().is_unspecified() => Err(
+            "cloud-bootstrap must listen on Railway PORT using an unspecified address".to_owned(),
+        ),
+        _ => Ok(()),
+    }
+}
+
+fn validate_cloud_home(home: &Path, volume_mount: &Path) -> Result<(), String> {
+    if !volume_mount.is_absolute() {
+        return Err("RAILWAY_VOLUME_MOUNT_PATH must be an absolute path".to_owned());
+    }
+    if !home.starts_with(volume_mount) {
+        return Err(
+            "TM_SERVER_HOME must be inside RAILWAY_VOLUME_MOUNT_PATH in cloud-bootstrap".to_owned(),
         );
     }
     Ok(())
+}
+
+fn require_railway_environment() -> Result<(), String> {
+    for name in [
+        "RAILWAY_PROJECT_ID",
+        "RAILWAY_ENVIRONMENT_ID",
+        "RAILWAY_SERVICE_ID",
+    ] {
+        required_env(name)?;
+    }
+    Ok(())
+}
+
+fn reject_cloud_bootstrap_overrides() -> Result<(), String> {
+    let forbidden = [
+        "TM_SERVER_BIND",
+        "OPENAI_API_KEY",
+        "TM_OPENAI_MODEL",
+        "TM_OPENAI_BASE_URL",
+        "TM_OPENAI_TIMEOUT_SECS",
+    ];
+    for name in forbidden {
+        if optional_env(name)?.is_some() {
+            return Err(format!(
+                "{name} must not be set in cloud-bootstrap; AI and custom bind settings are disabled"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn optional_env(name: &str) -> Result<Option<String>, String> {
+    match env::var(name) {
+        Ok(value) if value.trim().is_empty() => Ok(None),
+        Ok(value) => Ok(Some(value)),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => Err(format!("{name} must contain valid Unicode")),
+    }
+}
+
+fn required_env(name: &str) -> Result<String, String> {
+    optional_env(name)?.ok_or_else(|| format!("{name} must be set in cloud-bootstrap"))
+}
+
+fn required_path_env(name: &str) -> Result<PathBuf, String> {
+    env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| format!("{name} must be set to an absolute path"))
 }
 
 fn openai_api_error(error: OpenAiError, request_id: String) -> ApiError {
@@ -369,7 +501,10 @@ mod tests {
     use tm_core::{DEFAULT_TM_HOME, TmCore, TmHome};
     use tower::ServiceExt;
 
-    use super::{build_router, build_router_with_openai, validate_bind_addr};
+    use super::{
+        ServerProfile, build_cloud_bootstrap_router, build_router, build_router_with_openai,
+        validate_bind_addr, validate_cloud_home,
+    };
     use crate::openai::{OpenAiClient, OpenAiConfig};
 
     #[derive(Clone, Default)]
@@ -682,9 +817,86 @@ mod tests {
         assert_eq!(body["error"]["code"], "AI_CALL_CONFIRMATION_REQUIRED");
     }
 
+    #[tokio::test]
+    async fn cloud_bootstrap_exposes_health_but_not_ai_routes() {
+        let (_temporary, core) = test_core();
+        let router = build_cloud_bootstrap_router(core);
+
+        let health_response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .expect("build health request"),
+            )
+            .await
+            .expect("call cloud health route");
+        assert_eq!(health_response.status(), StatusCode::OK);
+
+        for (method, path) in [("GET", "/api/v1/ai/status"), ("POST", "/api/v1/ai/probe")] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(path)
+                        .body(Body::empty())
+                        .expect("build disabled route request"),
+                )
+                .await
+                .expect("call disabled cloud route");
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            let body = response_json(response).await;
+            assert_eq!(body["error"]["code"], "NOT_FOUND");
+        }
+    }
+
     #[test]
     fn public_server_bind_addresses_are_rejected_before_authentication_exists() {
-        assert!(validate_bind_addr("127.0.0.1:8787".parse().expect("parse loopback")).is_ok());
-        assert!(validate_bind_addr("0.0.0.0:8787".parse().expect("parse public bind")).is_err());
+        assert!(
+            validate_bind_addr(
+                ServerProfile::Local,
+                "127.0.0.1:8787".parse().expect("parse loopback")
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_bind_addr(
+                ServerProfile::Local,
+                "0.0.0.0:8787".parse().expect("parse public bind")
+            )
+            .is_err()
+        );
+        assert!(
+            validate_bind_addr(
+                ServerProfile::CloudBootstrap,
+                "0.0.0.0:8787".parse().expect("parse Railway bind")
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_bind_addr(
+                ServerProfile::CloudBootstrap,
+                "127.0.0.1:8787".parse().expect("parse invalid cloud bind")
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn cloud_home_must_be_on_the_railway_volume() {
+        let volume = if cfg!(windows) {
+            Path::new(r"C:\railway\tm")
+        } else {
+            Path::new("/var/lib/tm")
+        };
+        let nested_home = volume.join("app");
+
+        assert!(validate_cloud_home(volume, volume).is_ok());
+        assert!(validate_cloud_home(&nested_home, volume).is_ok());
+        assert!(
+            validate_cloud_home(Path::new("relative-home"), Path::new("relative-volume")).is_err()
+        );
     }
 }

@@ -2,11 +2,14 @@
 
 `tm-core`가 SQLite와 파일 시스템의 유일한 소유자다. Tauri 앱과 `tm-cli`는 같은 공용 서비스를 호출하며 React는 typed command client를 통해서만 데이터를 읽고 쓴다.
 
-`tm-server`는 향후 클라우드 전환을 위한 localhost 전용 HTTP 경계다. 현재 단계에서는 liveness/readiness, OpenAI 연결 상태·명시적 probe, 공통 오류·request ID만 제공하며, 기존 TM command와 사용자 DB는 아직 원격으로 노출하지 않는다. OpenAI 키는 서버 환경변수에서만 읽고 응답 저장은 끈다.
+`tm-server`의 기본 `local` 프로필은 localhost 전용 HTTP 경계다. 로컬에서는 liveness/readiness, OpenAI 연결 상태·명시적 probe, 공통 오류·request ID만 제공하며 기존 TM command와 사용자 DB는 아직 원격으로 노출하지 않는다. OpenAI 키는 서버 환경변수에서만 읽고 응답 저장은 끈다.
+
+Railway STEP 4 배포에는 별도의 `cloud-bootstrap` 프로필을 사용한다. 이 프로필은 Railway ID·`PORT`·Volume 경로를 검증한 뒤 `/healthz`와 `/readyz`만 외부 바인딩하고 AI 및 TM 데이터 route를 등록하지 않는다. 공개 도메인은 사용자 인증을 구현하는 STEP 5 전까지 만들지 않는다.
 
 - [수동 승인 개선 요청 흐름](change-request-workflow.md)
 - [TM AI 비서 시스템 구축 로드맵](../operations/tm-ai-assistant-roadmap.md)
 - [OpenAI 로컬 연결 설정](../operations/openai-local-setup.md)
+- [Railway Hobby bootstrap 배포](../operations/railway-bootstrap-deploy.md)
 
 기본 홈은 `C:\Users\tkfk0\Desktop\codex\TM`이다. 테스트는 프로세스별 임시 `TM_HOME`을 사용한다. 모든 저장 시각은 UTC RFC 3339로 기록하고, 사용자 날짜는 `Asia/Seoul`로 계산한다.
 
