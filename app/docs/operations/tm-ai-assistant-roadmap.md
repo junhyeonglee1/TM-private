@@ -70,7 +70,7 @@ API 키와 비밀번호는 채팅, Git, 소스 파일 또는 일반 로그에 �
 | 4 | 클라우드 실행 환경 결정과 최소 배포 기반 준비 | 완료 |
 | 5 | 단일 사용자 인증과 원격 접근 보호 | 완료 |
 | 6 | 데이터 기준 원본과 migration 안전 설계 | 완료 |
-| 7 | 인증된 read-only TM 데이터 API | 대기 |
+| 7 | 인증된 read-only TM 데이터 API | 진행 중 |
 | 8 | 통제된 write API와 감사 기록 | 대기 |
 | 9 | 백업·복구·모니터링·비용 안전장치 | 대기 |
 | 10 | 데스크톱 cloud mode와 일회성 cutover | 대기 |
@@ -318,7 +318,7 @@ Codex TODO:
 
 ## STEP 7 — 인증된 read-only TM 데이터 API
 
-상태: 대기
+상태: 진행 중
 
 Codex 권장 기본안:
 
@@ -328,19 +328,28 @@ Codex 권장 기본안:
 
 사용자 결정 게이트:
 
-- [ ] 첫 read-only entity 범위 승인
-- [ ] OpenAI에 절대 전달하지 않을 필드와 데이터 유형 승인
+- [x] 첫 read-only entity 범위를 project, task, checklist, tag, note, session, worklog로 제한
+- [x] secret·인증정보·DB/backup/log/파일 경로·첨부 byte를 OpenAI 절대 제외 대상으로 확정
 
 Codex TODO:
 
-- [ ] 내부 model과 분리된 versioned DTO·JSON schema 정의
-- [ ] `tm-core` query만 호출하는 typed GET API 구현
-- [ ] field allowlist와 민감 필드 redaction 적용
-- [ ] pagination, filter allowlist, 정렬, 응답 크기 상한 적용
-- [ ] version/ETag와 일관된 오류 contract 구현
-- [ ] 인증·rate limit·request ID·감사 조회 기록 연결
-- [ ] 합성 데이터 기반 contract·권한·회귀 테스트
+- [x] 내부 model과 분리된 versioned DTO·JSON schema 정의
+- [x] `tm-core` query만 호출하는 typed GET API 구현
+- [x] field allowlist와 민감 필드 redaction 적용
+- [x] pagination, filter allowlist, 정렬, 응답 크기 상한 적용
+- [x] version/ETag와 일관된 오류 contract 구현
+- [x] 인증·rate limit·request ID·metadata-only 감사 조회 기록 연결
+- [x] 합성 데이터 기반 contract·권한·회귀 테스트
 - [ ] production 배포 후 비인증 `401`, 허용 조회 `200`, mutation 부재 확인
+
+계약 문서: [인증된 read-only TM API v1](../architecture/read-only-api-v1.md)
+
+로컬 검증 기록:
+
+- 실제 사용자 DB와 Railway 운영 DB를 사용하지 않고 합성 임시 DB만 사용했다.
+- `tm-server` 24개 테스트에서 인증, 7개 collection, DTO/JSON Schema 일치, query allowlist, ETag, 405, 413을 확인했다.
+- frontend lint·typecheck·17개 테스트와 Rust fmt·workspace clippy·72개 테스트가 모두 통과했다.
+- production 배포와 원격 검증은 STEP 7 소스 업로드 승인 후 수행한다.
 
 완료 게이트:
 

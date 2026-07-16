@@ -6,6 +6,7 @@ use std::{
 
 pub mod auth;
 pub mod openai;
+mod read_api;
 
 use axum::{
     Extension, Json, Router,
@@ -302,7 +303,15 @@ pub fn build_cloud_authenticated_router(core: TmCore, auth: AuthConfig) -> Route
         .route("/healthz", get(cloud_healthz))
         .route("/readyz", get(cloud_readyz))
         .route("/api/v1/auth/status", get(auth_status))
+        .route("/api/v1/projects", get(read_api::projects))
+        .route("/api/v1/tasks", get(read_api::tasks))
+        .route("/api/v1/checklist", get(read_api::checklist))
+        .route("/api/v1/tags", get(read_api::tags))
+        .route("/api/v1/sessions", get(read_api::sessions))
+        .route("/api/v1/worklogs", get(read_api::worklogs))
+        .route("/api/v1/notes", get(read_api::notes))
         .fallback(not_found)
+        .method_not_allowed_fallback(method_not_allowed)
         .with_state(AppState {
             core,
             openai: OpenAiClient::disabled(),
@@ -617,6 +626,15 @@ async fn not_found(Extension(request_id): Extension<RequestId>) -> ApiError {
     }
 }
 
+async fn method_not_allowed(Extension(request_id): Extension<RequestId>) -> ApiError {
+    ApiError {
+        status: StatusCode::METHOD_NOT_ALLOWED,
+        code: "METHOD_NOT_ALLOWED",
+        message: "this API route is read-only and only supports GET".to_owned(),
+        request_id: request_id.0,
+    }
+}
+
 async fn authenticate_cloud_request(
     State(authenticator): State<TokenAuthenticator>,
     Extension(request_id): Extension<RequestId>,
@@ -732,10 +750,13 @@ mod tests {
         response::IntoResponse,
         routing::post,
     };
-    use chrono::{Duration as ChronoDuration, Utc};
+    use chrono::{Duration as ChronoDuration, NaiveDate, Utc};
     use serde_json::{Value, json};
     use tempfile::Builder;
-    use tm_core::{DEFAULT_TM_HOME, TmCore, TmHome};
+    use tm_core::{
+        CreateNoteInput, CreateProjectInput, CreateTaskInput, CreateWorkLogInput, DEFAULT_TM_HOME,
+        NoteType, SessionStatus, StartSessionInput, TaskStatus, TmCore, TmHome,
+    };
     use tower::ServiceExt;
 
     use super::{
@@ -770,6 +791,66 @@ mod tests {
             .expect("create temporary TM home");
         let core = TmCore::open(TmHome::new(temporary.path())).expect("open temporary TM core");
         (temporary, core)
+    }
+
+    fn populated_test_core() -> (tempfile::TempDir, TmCore, String, String) {
+        let (temporary, core) = test_core();
+        let project = core
+            .create_project(CreateProjectInput {
+                name: "Read API Project".to_owned(),
+                description: "allowlisted project description".to_owned(),
+                color: Some("#123456".to_owned()),
+            })
+            .expect("create read API project");
+        let due_date = NaiveDate::from_ymd_opt(2026, 7, 20).expect("valid due date");
+        let task = core
+            .create_task(CreateTaskInput {
+                project_id: Some(project.id.clone()),
+                title: "Read API Todo".to_owned(),
+                description: "allowlisted task description".to_owned(),
+                status: TaskStatus::Todo,
+                priority: 3,
+                due_date: Some(due_date),
+            })
+            .expect("create read API task");
+        core.create_task(CreateTaskInput {
+            project_id: Some(project.id.clone()),
+            title: "Read API Done".to_owned(),
+            description: String::new(),
+            status: TaskStatus::Done,
+            priority: 1,
+            due_date: None,
+        })
+        .expect("create second read API task");
+        core.add_checklist_item(&task.id, "Read API Checklist")
+            .expect("create read API checklist item");
+        core.set_task_tags(&task.id, &["read-api".to_owned()])
+            .expect("create read API tag");
+        let session = core
+            .start_session(StartSessionInput {
+                project_id: Some(project.id.clone()),
+                goal: "Read API Session".to_owned(),
+                task_ids: vec![task.id.clone()],
+            })
+            .expect("create read API session");
+        assert_eq!(session.status, SessionStatus::Running);
+        core.create_worklog(CreateWorkLogInput {
+            session_id: Some(session.id),
+            project_id: Some(project.id.clone()),
+            log_date: Some(due_date),
+            title: "Read API Worklog".to_owned(),
+            body: "allowlisted worklog body".to_owned(),
+            task_ids: vec![task.id.clone()],
+        })
+        .expect("create read API worklog");
+        core.create_note(CreateNoteInput {
+            note_type: NoteType::Decision,
+            title: "Read API Note".to_owned(),
+            body: "allowlisted note body".to_owned(),
+            note_date: Some(due_date),
+        })
+        .expect("create read API note");
+        (temporary, core, project.id, task.id)
     }
 
     async fn response_json(response: axum::response::Response) -> Value {
@@ -1082,7 +1163,11 @@ mod tests {
             .expect("call cloud health route");
         assert_eq!(health_response.status(), StatusCode::OK);
 
-        for (method, path) in [("GET", "/api/v1/ai/status"), ("POST", "/api/v1/ai/probe")] {
+        for (method, path) in [
+            ("GET", "/api/v1/ai/status"),
+            ("POST", "/api/v1/ai/probe"),
+            ("GET", "/api/v1/tasks"),
+        ] {
             let response = router
                 .clone()
                 .oneshot(
@@ -1240,6 +1325,244 @@ mod tests {
             .await
             .expect("call valid request after invalid attempts");
         assert_eq!(valid.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn authenticated_read_collections_return_only_allowlisted_dtos() {
+        let (_temporary, core, _project_id, task_id) = populated_test_core();
+        let router = build_cloud_authenticated_router(core, test_auth_config());
+
+        let unauthenticated = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/tasks")
+                    .body(Body::empty())
+                    .expect("build unauthenticated read request"),
+            )
+            .await
+            .expect("call unauthenticated read route");
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+        let schema: Value = serde_json::from_str(include_str!(
+            "../../../docs/contracts/tm-read-api-v1.schema.json"
+        ))
+        .expect("parse read API JSON Schema");
+        let paths = [
+            ("/api/v1/projects".to_owned(), "Project"),
+            ("/api/v1/tasks".to_owned(), "Task"),
+            (
+                format!("/api/v1/checklist?taskId={task_id}"),
+                "ChecklistItem",
+            ),
+            (format!("/api/v1/tags?taskId={task_id}"), "Tag"),
+            ("/api/v1/sessions".to_owned(), "Session"),
+            ("/api/v1/worklogs".to_owned(), "Worklog"),
+            ("/api/v1/notes".to_owned(), "Note"),
+        ];
+
+        for (path, schema_name) in paths {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .header("authorization", format!("Bearer {}", test_auth_token()))
+                        .body(Body::empty())
+                        .expect("build authenticated read request"),
+                )
+                .await
+                .expect("call authenticated read route");
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(response.headers().get("etag").is_some());
+            let body = response_json(response).await;
+            assert!(
+                body["data"]["items"]
+                    .as_array()
+                    .is_some_and(|items| !items.is_empty())
+            );
+            assert!(
+                body["data"]["page"]["total"]
+                    .as_u64()
+                    .is_some_and(|total| total > 0)
+            );
+            let mut actual_fields = body["data"]["items"][0]
+                .as_object()
+                .expect("read DTO object")
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>();
+            actual_fields.sort();
+            let mut schema_fields = schema["$defs"][schema_name]["required"]
+                .as_array()
+                .expect("schema required fields")
+                .iter()
+                .map(|field| field.as_str().expect("schema field name").to_owned())
+                .collect::<Vec<_>>();
+            schema_fields.sort();
+            assert_eq!(actual_fields, schema_fields);
+            let serialized = body.to_string();
+            for forbidden in [
+                "deletedAt",
+                "relativePath",
+                "databasePath",
+                "beforeJson",
+                "afterJson",
+                "tokenExpiresAt",
+                "schemaMigrations",
+            ] {
+                assert!(!serialized.contains(forbidden));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn read_api_enforces_filter_pagination_and_query_allowlists() {
+        let (_temporary, core, project_id, _task_id) = populated_test_core();
+        let router = build_cloud_authenticated_router(core, test_auth_config());
+        let valid = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/v1/tasks?projectId={project_id}&status=todo&limit=1&offset=0&sort=priority_desc"
+                    ))
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .body(Body::empty())
+                    .expect("build filtered read request"),
+            )
+            .await
+            .expect("call filtered read route");
+        assert_eq!(valid.status(), StatusCode::OK);
+        let body = response_json(valid).await;
+        assert_eq!(body["data"]["page"]["limit"], 1);
+        assert_eq!(body["data"]["page"]["returned"], 1);
+        assert_eq!(body["data"]["page"]["total"], 1);
+        assert_eq!(body["data"]["items"][0]["status"], "todo");
+
+        for path in [
+            "/api/v1/tasks?includeDeleted=true",
+            "/api/v1/tasks?limit=101",
+            "/api/v1/tasks?projectId=not-a-uuid",
+            "/api/v1/worklogs?dateFrom=2026-07-21&dateTo=2026-07-20",
+        ] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .header("authorization", format!("Bearer {}", test_auth_token()))
+                        .body(Body::empty())
+                        .expect("build invalid query request"),
+                )
+                .await
+                .expect("call invalid query route");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = response_json(response).await;
+            assert_eq!(body["error"]["code"], "INVALID_QUERY");
+        }
+    }
+
+    #[tokio::test]
+    async fn read_api_etag_is_content_based_and_supports_not_modified() {
+        let (_temporary, core, _project_id, _task_id) = populated_test_core();
+        let router = build_cloud_authenticated_router(core, test_auth_config());
+        let first = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/tasks")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("x-request-id", "read-etag-first")
+                    .body(Body::empty())
+                    .expect("build initial ETag request"),
+            )
+            .await
+            .expect("call initial ETag route");
+        assert_eq!(first.status(), StatusCode::OK);
+        let etag = first
+            .headers()
+            .get("etag")
+            .expect("read ETag")
+            .to_str()
+            .expect("ETag text")
+            .to_owned();
+
+        let second = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/tasks")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("x-request-id", "read-etag-second")
+                    .header("if-none-match", etag)
+                    .body(Body::empty())
+                    .expect("build conditional ETag request"),
+            )
+            .await
+            .expect("call conditional ETag route");
+        assert_eq!(second.status(), StatusCode::NOT_MODIFIED);
+        assert!(second.headers().get("etag").is_some());
+        assert_eq!(
+            second
+                .headers()
+                .get("cache-control")
+                .expect("cache control"),
+            "no-store"
+        );
+    }
+
+    #[tokio::test]
+    async fn registered_data_routes_reject_mutation_without_changing_tm() {
+        let (_temporary, core, _project_id, _task_id) = populated_test_core();
+        let before = core
+            .list_tasks(false)
+            .expect("list tasks before POST")
+            .len();
+        let response = build_cloud_authenticated_router(core.clone(), test_auth_config())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tasks")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"title":"must not be created"}"#))
+                    .expect("build forbidden mutation request"),
+            )
+            .await
+            .expect("call forbidden mutation route");
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], "METHOD_NOT_ALLOWED");
+        assert_eq!(
+            core.list_tasks(false).expect("list tasks after POST").len(),
+            before
+        );
+    }
+
+    #[tokio::test]
+    async fn read_api_rejects_responses_over_the_size_limit() {
+        let (temporary, core) = test_core();
+        core.create_note(CreateNoteInput {
+            note_type: NoteType::Reference,
+            title: "Oversized synthetic note".to_owned(),
+            body: "x".repeat(520 * 1024),
+            note_date: None,
+        })
+        .expect("create oversized synthetic note");
+        let response = build_cloud_authenticated_router(core, test_auth_config())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/notes?limit=1")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .body(Body::empty())
+                    .expect("build oversized response request"),
+            )
+            .await
+            .expect("call oversized response route");
+        drop(temporary);
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], "RESPONSE_TOO_LARGE");
     }
 
     #[test]

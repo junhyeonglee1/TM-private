@@ -10,8 +10,11 @@ STEP 5의 `cloud-authenticated` 프로필은 공개 health/readiness를 최소 �
 
 STEP 6은 로컬 DB를 STEP 10 전까지 유일한 기준 원본으로 고정한다. `tm-core`의 migration manifest는 schema·migration ledger·무결성·외래키를 검사하고 논리 테이블별 행 개수와 원문을 포함하지 않는 SHA-256을 계산한다. 합성 임시 DB의 online snapshot, read-only preflight, 복구 비교만 수행하며 실제 사용자 DB와 Railway 운영 DB는 이전하지 않는다.
 
+STEP 7의 `/api/v1` 데이터 route는 `cloud-authenticated` profile에만 존재하며 `tm-core` query와 외부 전용 DTO allowlist를 사용한다. GET 외 method, 삭제·내부·파일·감사 데이터, 허용되지 않은 query를 차단하고 pagination·응답 크기 상한·콘텐츠 ETag를 적용한다. 이 경계는 OpenAI 호출을 하지 않는다.
+
 - [수동 승인 개선 요청 흐름](change-request-workflow.md)
 - [데이터 기준 원본과 migration 안전 설계](data-authority-and-migration.md)
+- [인증된 read-only TM API v1](read-only-api-v1.md)
 - [TM AI 비서 시스템 구축 로드맵](../operations/tm-ai-assistant-roadmap.md)
 - [OpenAI 로컬 연결 설정](../operations/openai-local-setup.md)
 - [Railway Hobby bootstrap 배포](../operations/railway-bootstrap-deploy.md)

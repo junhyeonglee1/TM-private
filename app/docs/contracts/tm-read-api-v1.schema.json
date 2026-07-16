@@ -1,0 +1,333 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tm.local/schemas/tm-read-api-v1.schema.json",
+  "title": "TM authenticated read-only API v1 responses",
+  "description": "Response DTO contract for the authenticated TM read-only collections. HTTP 304 has no JSON body.",
+  "anyOf": [
+    { "$ref": "#/$defs/ProjectCollectionResponse" },
+    { "$ref": "#/$defs/TaskCollectionResponse" },
+    { "$ref": "#/$defs/ChecklistCollectionResponse" },
+    { "$ref": "#/$defs/TagCollectionResponse" },
+    { "$ref": "#/$defs/SessionCollectionResponse" },
+    { "$ref": "#/$defs/WorklogCollectionResponse" },
+    { "$ref": "#/$defs/NoteCollectionResponse" },
+    { "$ref": "#/$defs/ErrorResponse" }
+  ],
+  "$defs": {
+    "Uuid": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "NullableUuid": {
+      "oneOf": [
+        { "$ref": "#/$defs/Uuid" },
+        { "type": "null" }
+      ]
+    },
+    "Timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "NullableTimestamp": {
+      "oneOf": [
+        { "$ref": "#/$defs/Timestamp" },
+        { "type": "null" }
+      ]
+    },
+    "Date": {
+      "type": "string",
+      "format": "date"
+    },
+    "NullableDate": {
+      "oneOf": [
+        { "$ref": "#/$defs/Date" },
+        { "type": "null" }
+      ]
+    },
+    "NullableString": {
+      "type": ["string", "null"]
+    },
+    "Envelope": {
+      "type": "object",
+      "required": ["requestId", "data"],
+      "properties": {
+        "requestId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      }
+    },
+    "PageInfo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["limit", "offset", "returned", "total", "nextOffset"],
+      "properties": {
+        "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "offset": { "type": "integer", "minimum": 0, "maximum": 10000 },
+        "returned": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "total": { "type": "integer", "minimum": 0 },
+        "nextOffset": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 10000
+        }
+      }
+    },
+    "Project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "name", "description", "color", "sortOrder",
+        "createdAt", "updatedAt", "archivedAt"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/Uuid" },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "color": { "$ref": "#/$defs/NullableString" },
+        "sortOrder": { "type": "integer" },
+        "createdAt": { "$ref": "#/$defs/Timestamp" },
+        "updatedAt": { "$ref": "#/$defs/Timestamp" },
+        "archivedAt": { "$ref": "#/$defs/NullableTimestamp" }
+      }
+    },
+    "Task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "projectId", "title", "description", "status", "priority",
+        "dueDate", "completedAt", "createdAt", "updatedAt"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/Uuid" },
+        "projectId": { "$ref": "#/$defs/NullableUuid" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "status": {
+          "enum": ["inbox", "todo", "in_progress", "blocked", "done", "cancelled"]
+        },
+        "priority": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "dueDate": { "$ref": "#/$defs/NullableDate" },
+        "completedAt": { "$ref": "#/$defs/NullableTimestamp" },
+        "createdAt": { "$ref": "#/$defs/Timestamp" },
+        "updatedAt": { "$ref": "#/$defs/Timestamp" }
+      }
+    },
+    "ChecklistItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "taskId", "body", "isDone", "sortOrder",
+        "createdAt", "updatedAt", "completedAt"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/Uuid" },
+        "taskId": { "$ref": "#/$defs/Uuid" },
+        "body": { "type": "string" },
+        "isDone": { "type": "boolean" },
+        "sortOrder": { "type": "integer" },
+        "createdAt": { "$ref": "#/$defs/Timestamp" },
+        "updatedAt": { "$ref": "#/$defs/Timestamp" },
+        "completedAt": { "$ref": "#/$defs/NullableTimestamp" }
+      }
+    },
+    "Tag": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "color", "createdAt"],
+      "properties": {
+        "id": { "$ref": "#/$defs/Uuid" },
+        "name": { "type": "string" },
+        "color": { "$ref": "#/$defs/NullableString" },
+        "createdAt": { "$ref": "#/$defs/Timestamp" }
+      }
+    },
+    "Session": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "projectId", "goal", "status", "startedAt", "endedAt",
+        "result", "blockers", "nextAction", "createdAt", "updatedAt"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/Uuid" },
+        "projectId": { "$ref": "#/$defs/NullableUuid" },
+        "goal": { "type": "string" },
+        "status": { "enum": ["running", "completed", "cancelled"] },
+        "startedAt": { "$ref": "#/$defs/Timestamp" },
+        "endedAt": { "$ref": "#/$defs/NullableTimestamp" },
+        "result": { "type": "string" },
+        "blockers": { "type": "string" },
+        "nextAction": { "type": "string" },
+        "createdAt": { "$ref": "#/$defs/Timestamp" },
+        "updatedAt": { "$ref": "#/$defs/Timestamp" }
+      }
+    },
+    "Worklog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "sessionId", "projectId", "logDate", "title", "body",
+        "createdAt", "updatedAt"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/Uuid" },
+        "sessionId": { "$ref": "#/$defs/NullableUuid" },
+        "projectId": { "$ref": "#/$defs/NullableUuid" },
+        "logDate": { "$ref": "#/$defs/Date" },
+        "title": { "type": "string" },
+        "body": { "type": "string" },
+        "createdAt": { "$ref": "#/$defs/Timestamp" },
+        "updatedAt": { "$ref": "#/$defs/Timestamp" }
+      }
+    },
+    "Note": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "noteType", "title", "body", "sourceWorklogId",
+        "noteDate", "createdAt", "updatedAt"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/Uuid" },
+        "noteType": { "enum": ["concept", "howto", "decision", "reference", "daily"] },
+        "title": { "type": "string" },
+        "body": { "type": "string" },
+        "sourceWorklogId": { "$ref": "#/$defs/NullableUuid" },
+        "noteDate": { "$ref": "#/$defs/NullableDate" },
+        "createdAt": { "$ref": "#/$defs/Timestamp" },
+        "updatedAt": { "$ref": "#/$defs/Timestamp" }
+      }
+    },
+    "ProjectCollection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "page"],
+      "properties": {
+        "items": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/Project" } },
+        "page": { "$ref": "#/$defs/PageInfo" }
+      }
+    },
+    "TaskCollection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "page"],
+      "properties": {
+        "items": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/Task" } },
+        "page": { "$ref": "#/$defs/PageInfo" }
+      }
+    },
+    "ChecklistCollection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "page"],
+      "properties": {
+        "items": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/ChecklistItem" } },
+        "page": { "$ref": "#/$defs/PageInfo" }
+      }
+    },
+    "TagCollection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "page"],
+      "properties": {
+        "items": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/Tag" } },
+        "page": { "$ref": "#/$defs/PageInfo" }
+      }
+    },
+    "SessionCollection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "page"],
+      "properties": {
+        "items": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/Session" } },
+        "page": { "$ref": "#/$defs/PageInfo" }
+      }
+    },
+    "WorklogCollection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "page"],
+      "properties": {
+        "items": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/Worklog" } },
+        "page": { "$ref": "#/$defs/PageInfo" }
+      }
+    },
+    "NoteCollection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "page"],
+      "properties": {
+        "items": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/Note" } },
+        "page": { "$ref": "#/$defs/PageInfo" }
+      }
+    },
+    "ProjectCollectionResponse": {
+      "allOf": [
+        { "$ref": "#/$defs/Envelope" },
+        { "type": "object", "properties": { "data": { "$ref": "#/$defs/ProjectCollection" } } }
+      ],
+      "unevaluatedProperties": false
+    },
+    "TaskCollectionResponse": {
+      "allOf": [
+        { "$ref": "#/$defs/Envelope" },
+        { "type": "object", "properties": { "data": { "$ref": "#/$defs/TaskCollection" } } }
+      ],
+      "unevaluatedProperties": false
+    },
+    "ChecklistCollectionResponse": {
+      "allOf": [
+        { "$ref": "#/$defs/Envelope" },
+        { "type": "object", "properties": { "data": { "$ref": "#/$defs/ChecklistCollection" } } }
+      ],
+      "unevaluatedProperties": false
+    },
+    "TagCollectionResponse": {
+      "allOf": [
+        { "$ref": "#/$defs/Envelope" },
+        { "type": "object", "properties": { "data": { "$ref": "#/$defs/TagCollection" } } }
+      ],
+      "unevaluatedProperties": false
+    },
+    "SessionCollectionResponse": {
+      "allOf": [
+        { "$ref": "#/$defs/Envelope" },
+        { "type": "object", "properties": { "data": { "$ref": "#/$defs/SessionCollection" } } }
+      ],
+      "unevaluatedProperties": false
+    },
+    "WorklogCollectionResponse": {
+      "allOf": [
+        { "$ref": "#/$defs/Envelope" },
+        { "type": "object", "properties": { "data": { "$ref": "#/$defs/WorklogCollection" } } }
+      ],
+      "unevaluatedProperties": false
+    },
+    "NoteCollectionResponse": {
+      "allOf": [
+        { "$ref": "#/$defs/Envelope" },
+        { "type": "object", "properties": { "data": { "$ref": "#/$defs/NoteCollection" } } }
+      ],
+      "unevaluatedProperties": false
+    },
+    "ErrorResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requestId", "error"],
+      "properties": {
+        "requestId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "error": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message"],
+          "properties": {
+            "code": { "type": "string", "minLength": 1 },
+            "message": { "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}

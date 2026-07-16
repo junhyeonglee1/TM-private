@@ -16,6 +16,8 @@
 - 256-bit 토큰을 화면·파일에 남기지 않고 생성하고 서버용 SHA-256 해시와 만료 시각만 출력하는 PowerShell 도구를 추가했다.
 - 비인증 API 은닉, 토큰 만료, 인증 실패·정상 요청 rate limit, CORS 차단과 공통 보안 header를 추가했다.
 - schema·migration ledger·무결성·외래키를 검사하고 테이블별 행 개수와 논리 SHA-256을 비교하는 migration manifest와 합성 DB dry-run 경계를 추가했다.
+- 인증된 cloud profile에 project·task·checklist·tag·session·worklog·note의 versioned GET API와 DTO allowlist를 추가했다.
+- read-only API에 제한된 filter·정렬, pagination, 512KiB 응답 상한, 콘텐츠 ETag와 구조화된 query·method 오류를 추가했다.
 
 ### Changed
 
@@ -29,6 +31,7 @@
 - HTTPS 공개 health/readiness는 `200`, 토큰 없음·잘못된 토큰·비인증 미등록 경로는 `401`이며 공통 보안 header가 적용됨을 확인했다.
 - 비밀번호 관리자에 보관한 원문 토큰으로 production `/api/v1/auth/status`가 `200`과 `authenticated: true`를 반환함을 확인했다.
 - 합성 SQLite DB에서 migration manifest 원문 비노출, read-only snapshot 비교, 지원하지 않는 schema 거부, rollback 후 논리 일치를 확인했다.
+- 합성 cloud DB에서 read-only API 인증·DTO Schema·filter·pagination·ETag·응답 상한·mutation 차단 contract를 확인했다.
 
 ## [0.1.5]
 
