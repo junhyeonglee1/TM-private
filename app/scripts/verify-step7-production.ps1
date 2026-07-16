@@ -1,9 +1,9 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [ValidatePattern('^https://')]
     [string]$BaseUri = 'https://tm-server-production-5573.up.railway.app',
 
-    [string]$OutputPath = (Join-Path $PSScriptRoot '..\dist\manual-step7-production-verification\result.json'),
+    [string]$OutputPath,
 
     [Security.SecureString]$ProvidedSecureToken
 )
@@ -11,6 +11,10 @@ param(
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 Add-Type -AssemblyName System.Net.Http
+
+if ([string]::IsNullOrWhiteSpace($OutputPath)) {
+    $OutputPath = Join-Path $PSScriptRoot '..\dist\manual-step7-production-verification\result.json'
+}
 
 function Invoke-TmRequest {
     param(

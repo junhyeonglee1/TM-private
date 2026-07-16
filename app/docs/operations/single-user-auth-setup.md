@@ -102,10 +102,20 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File '.\scripts\verify-step7-
 
 도구는 인증 상태, tasks 조회, ETag `304`, mutation `405`와 보안 header를 확인한다. 토큰 원문은 저장하지 않으며 결과 파일에는 상태 코드와 반환 개수만 기록한다.
 
+STEP 8 write API 배포 후 실제 데이터를 만들지 않고 인증·precondition·금지 동작을 검증하려면 다음 도구를 실행한다.
+
+```powershell
+Set-Location 'C:\Users\tkfk0\Desktop\codex\TM\app'
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File '.\scripts\verify-step8-production.ps1'
+```
+
+이 도구는 유효한 token으로 Task·Note·Checklist write route까지 도달하되, 누락 precondition·잘못된 확인·존재하지 않는 UUID만 사용한다. 검사 전후 Task·Note 개수와 ETag가 같은지도 확인하며 성공 mutation은 수행하지 않는다.
+
 ## 2026-07-16 production 검증
 
 - 인증 기반 배포 ID: `b49163c3-d882-41c0-9f98-e9e77d0ecae0`, 상태 `SUCCESS`
 - STEP 7 read-only API 배포 ID: `d229020e-8d50-47d8-bcc8-782ac5909a49`, 상태 `SUCCESS`
+- STEP 8 controlled write API 배포 ID: `9e3701df-acb7-4d89-b39a-ab665323a496`, 상태 `SUCCESS`
 - 실행 프로필: `cloud-authenticated`
 - 실행 구성: `multiRegionConfig: null`, singleton 인스턴스 1개
 - Volume: `/var/lib/tm`, 5 GB, `Ready`
@@ -117,6 +127,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File '.\scripts\verify-step7-
 - 인증된 `/api/v1/tasks`는 빈 cloud DB에서 `200`, `returned: 0`, `total: 0` 반환
 - 동일 ETag의 `If-None-Match` 요청은 `304`, 인증된 `POST /api/v1/tasks`는 `405 METHOD_NOT_ALLOWED` 반환
 - STEP 7 재배포 전후 SQLite 최초 초기화 시각 `2026-07-14T01:51:35.117Z` 유지
+- STEP 8 `/readyz`가 schema 4·WAL·외래키·무결성 내부 검사 통과 후 `200` 반환
+- 인증된 write precondition·operation 확인 오류는 `428`, 누락 resource 수정은 `404`, Task 삭제는 `405` 반환
+- 비파괴 write 검사 전후 Task·Note 0건과 collection ETag 불변을 확인했으며 성공 mutation과 token 저장은 수행하지 않음
 
 ## 회전과 긴급 폐기
 

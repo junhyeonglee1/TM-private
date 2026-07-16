@@ -71,7 +71,7 @@ API 키와 비밀번호는 채팅, Git, 소스 파일 또는 일반 로그에 �
 | 5 | 단일 사용자 인증과 원격 접근 보호 | 완료 |
 | 6 | 데이터 기준 원본과 migration 안전 설계 | 완료 |
 | 7 | 인증된 read-only TM 데이터 API | 완료 |
-| 8 | 통제된 write API와 감사 기록 | 진행 중 |
+| 8 | 통제된 write API와 감사 기록 | 완료 |
 | 9 | 백업·복구·모니터링·비용 안전장치 | 대기 |
 | 10 | 데스크톱 cloud mode와 일회성 cutover | 대기 |
 | 11 | Cloud OpenAI와 read-only 오케스트레이터 | 대기 |
@@ -363,7 +363,7 @@ Codex TODO:
 
 ## STEP 8 — 통제된 write API와 감사 기록
 
-상태: 진행 중 — 로컬 구현·검증 완료, production 배포 대기
+상태: 완료
 
 Codex 권장 기본안:
 
@@ -385,7 +385,7 @@ Codex TODO:
 - [x] actor, request ID, before/after, 결과를 append-only 감사 이벤트로 기록
 - [x] transaction rollback·동시 요청·중복 제출 통합 테스트
 - [x] mutation별 향후 승인 정책을 연결할 hook 정의
-- [ ] production 배포 후 허용 mutation·중복·충돌·금지 동작 검증
+- [x] production 배포 후 인증·precondition·금지 동작을 비파괴 방식으로 검증
 
 계약 문서: [통제된 TM write API v1](../architecture/controlled-write-api-v1.md)
 
@@ -398,7 +398,17 @@ Codex TODO:
 - 합성 DB에서 동일 key 동시 요청은 실제 변경 1회, stale version은 `409`, 실패는 전체 rollback되는 것을 확인했다.
 - 감사·idempotency 행의 update/delete와 오래된 backup을 통한 ledger rewind를 차단했다.
 - frontend lint·typecheck·17개 테스트와 Rust fmt·clippy·81개 테스트가 통과했다. 실행 중인 TM이 desktop test binary를 잠가 desktop library 4개와 나머지 workspace를 분리 검증했다.
-- 실제 사용자 DB와 Railway 운영 DB에는 migration이나 mutation을 실행하지 않았다.
+- 실제 사용자 DB에는 migration이나 mutation을 실행하지 않았다.
+
+Production 검증 기록:
+
+- Railway production 배포 `9e3701df-acb7-4d89-b39a-ab665323a496`가 `SUCCESS`로 완료됐다.
+- `/readyz`의 schema 4·WAL·외래키·무결성 내부 검사가 통과하고 `200`을 반환했다.
+- 사용자 보안 입력 토큰으로 인증 `200`을 확인했으며 토큰 원문은 파일·로그에 저장하지 않았다.
+- Task 생성의 누락 precondition과 Note 생성의 잘못된 operation 확인은 domain mutation 전에 각각 `428`로 거부됐다.
+- 존재하지 않는 Task·Note·Checklist의 완전한 수정 요청은 각각 `404`, Task 삭제는 `405 METHOD_NOT_ALLOWED`로 거부됐다.
+- 검사 전후 Task·Note는 모두 0건이고 collection ETag도 동일했다. 실제 성공 mutation은 수행하지 않았다.
+- 허용 mutation 성공, idempotency replay, stale version 충돌은 합성 로컬 DB에서 검증했다. 실제 HTTPS 성공 mutation smoke test는 STEP 9 staging에서 수행한다.
 
 완료 게이트:
 
@@ -426,7 +436,7 @@ Codex TODO:
 - [ ] 일관된 SQLite backup과 외부 암호화 저장 구현
 - [ ] 일·주·월 retention과 자동 무결성 검사 구현
 - [ ] 빈 환경에서 backup restore 훈련과 checksum 검증
-- [ ] staging environment와 배포 승격 절차 구축
+- [ ] staging environment와 배포 승격 절차를 구축하고 성공 mutation·idempotency·충돌 smoke test 수행
 - [ ] API latency·오류율·rate limit·Volume 사용량 관측
 - [ ] OpenAI 요청별 token·비용 기록 schema와 예산 차단 장치 준비
 - [ ] 로그 redaction과 request ID 기반 추적 검증
