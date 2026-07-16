@@ -69,7 +69,7 @@ API 키와 비밀번호는 채팅, Git, 소스 파일 또는 일반 로그에 �
 | 3 | OpenAI API 비밀키 경계와 실제 연결 확인 | 완료 |
 | 4 | 클라우드 실행 환경 결정과 최소 배포 기반 준비 | 완료 |
 | 5 | 단일 사용자 인증과 원격 접근 보호 | 완료 |
-| 6 | 데이터 기준 원본과 migration 안전 설계 | 대기 |
+| 6 | 데이터 기준 원본과 migration 안전 설계 | 완료 |
 | 7 | 인증된 read-only TM 데이터 API | 대기 |
 | 8 | 통제된 write API와 감사 기록 | 대기 |
 | 9 | 백업·복구·모니터링·비용 안전장치 | 대기 |
@@ -276,7 +276,7 @@ Codex Action Item:
 
 ## STEP 6 — 데이터 기준 원본과 migration 안전 설계
 
-상태: 대기
+상태: 완료
 
 Codex 권장 기본안:
 
@@ -288,19 +288,28 @@ Codex 권장 기본안:
 
 사용자 결정 게이트:
 
-- [ ] SQLite Volume singleton 유지 승인
-- [ ] `로컬 기준 → 일회성 cloud cutover → cloud 기준` 정책 승인
-- [ ] STEP 6에서는 실데이터를 복사하지 않고 dry-run만 수행하는 범위 승인
+- [x] SQLite Volume singleton 유지 승인
+- [x] `로컬 기준 → 일회성 cloud cutover → cloud 기준` 정책 승인
+- [x] STEP 6에서는 실데이터를 복사하지 않고 dry-run만 수행하는 범위 승인
 
 Codex TODO:
 
-- [ ] 현재 schema, aggregate, 관계, 불변 조건 inventory 작성
-- [ ] 개인정보·민감정보·운영 metadata 분류표 작성
-- [ ] schema version, row count, 논리 checksum을 포함한 migration manifest 설계
-- [ ] 일관된 SQLite snapshot과 무결성 검사 절차 구현
-- [ ] import 전 preflight와 import 후 비교 검증 구현
-- [ ] 합성 fixture로 export/import/rollback 반복 테스트
-- [ ] cutover 실패 시 로컬 DB로 복귀하는 runbook 작성
+- [x] 현재 schema, aggregate, 관계, 불변 조건 inventory 작성
+- [x] 개인정보·민감정보·운영 metadata 분류표 작성
+- [x] schema version, row count, 논리 checksum을 포함한 migration manifest 설계
+- [x] 일관된 SQLite snapshot과 무결성 검사 절차 구현
+- [x] import 전 preflight와 import 후 비교 검증 구현
+- [x] 합성 fixture로 export/import/rollback 반복 테스트
+- [x] cutover 실패 시 로컬 DB로 복귀하는 runbook 작성
+
+구현 문서: [데이터 기준 원본과 migration 안전 설계](../architecture/data-authority-and-migration.md)
+
+검증 기록:
+
+- 실제 사용자 DB와 Railway 운영 DB에 접근하거나 데이터를 복사하지 않았다.
+- 합성 DB migration 집중 테스트 4개가 모두 통과했다.
+- frontend lint·typecheck·17개 테스트와 Rust fmt·clippy가 통과했다.
+- 기존 build cache의 Windows 실행 파일 잠금을 분리한 새 target에서 Rust workspace 67개 테스트가 모두 통과했다.
 
 완료 게이트:
 

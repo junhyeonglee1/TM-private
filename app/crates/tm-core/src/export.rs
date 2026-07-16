@@ -14,7 +14,7 @@ use crate::{
     database::{Database, SCHEMA_VERSION, now_utc},
 };
 
-const EXPORTED_TABLES: &[&str] = &[
+pub(crate) const EXPORTED_TABLES: &[&str] = &[
     "schema_migrations",
     "projects",
     "tasks",

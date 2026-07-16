@@ -12,15 +12,15 @@ use crate::{
     CreateLinkInput, CreateNoteAggregateInput, CreateNoteInput, CreateProjectInput,
     CreateTaskAggregateInput, CreateTaskInput, CreateWorkLogInput, DigestDelivery, DigestKind,
     DigestPreparation, EndSessionInput, EntityLink, EntityType, Error, ExportArtifact,
-    HealthReport, LinkTargetType, Note, NoteAggregate, NoteType, Project, Result, SearchHit,
-    SessionCompletion, SessionStatus, StartSessionInput, Tag, Task, TaskAggregate, TaskDayEntry,
-    TaskDayStatus, TaskEvent, TaskPatch, TaskStatus, TmHome, TrashEntityType, TrashItem,
-    UpdateChangeRequestInput, UpdateTaskAggregateInput, WorkLog, WorkSession, backup,
-    change_request,
+    HealthReport, LinkTargetType, MigrationDryRun, MigrationManifest, Note, NoteAggregate,
+    NoteType, Project, Result, SearchHit, SessionCompletion, SessionStatus, StartSessionInput, Tag,
+    Task, TaskAggregate, TaskDayEntry, TaskDayStatus, TaskEvent, TaskPatch, TaskStatus, TmHome,
+    TrashEntityType, TrashItem, UpdateChangeRequestInput, UpdateTaskAggregateInput, WorkLog,
+    WorkSession, backup, change_request,
     database::{Database, SCHEMA_VERSION, new_id, now_utc, today_seoul},
     digest,
     error::{invalid, not_found},
-    export,
+    export, migration,
 };
 
 #[derive(Debug, Clone)]
@@ -1246,6 +1246,18 @@ impl TmCore {
 
     pub fn create_export(&self) -> Result<ExportArtifact> {
         export::create_artifacts(&self.database)
+    }
+
+    pub fn migration_manifest(&self) -> Result<MigrationManifest> {
+        migration::manifest(&self.database)
+    }
+
+    pub fn migration_dry_run(&self) -> Result<MigrationDryRun> {
+        migration::dry_run(&self.database)
+    }
+
+    pub fn inspect_migration_database(path: impl AsRef<Path>) -> Result<MigrationManifest> {
+        migration::inspect_database(path.as_ref())
     }
 
     pub fn database_initialized_at(&self) -> Result<String> {
