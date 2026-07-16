@@ -71,7 +71,7 @@ API 키와 비밀번호는 채팅, Git, 소스 파일 또는 일반 로그에 �
 | 5 | 단일 사용자 인증과 원격 접근 보호 | 완료 |
 | 6 | 데이터 기준 원본과 migration 안전 설계 | 완료 |
 | 7 | 인증된 read-only TM 데이터 API | 완료 |
-| 8 | 통제된 write API와 감사 기록 | 대기 |
+| 8 | 통제된 write API와 감사 기록 | 진행 중 |
 | 9 | 백업·복구·모니터링·비용 안전장치 | 대기 |
 | 10 | 데스크톱 cloud mode와 일회성 cutover | 대기 |
 | 11 | Cloud OpenAI와 read-only 오케스트레이터 | 대기 |
@@ -363,7 +363,7 @@ Codex TODO:
 
 ## STEP 8 — 통제된 write API와 감사 기록
 
-상태: 대기
+상태: 진행 중 — 로컬 구현·검증 완료, production 배포 대기
 
 Codex 권장 기본안:
 
@@ -373,18 +373,32 @@ Codex 권장 기본안:
 
 사용자 결정 게이트:
 
-- [ ] 첫 mutation entity·동작 범위 승인
-- [ ] 삭제·금전·외부 전송·권한 변경 기본 금지 승인
+- [x] 첫 mutation entity·동작 범위 승인
+- [x] 삭제·금전·외부 전송·권한 변경 기본 금지 승인
 
 Codex TODO:
 
-- [ ] `tm-core` command만 호출하는 typed mutation API 구현
-- [ ] 입력 길이·개수·형식·상태 전이 validation 적용
-- [ ] idempotency key 저장과 중복 결과 재사용 구현
-- [ ] optimistic concurrency와 conflict 응답 구현
-- [ ] actor, request ID, before/after, 결과를 append-only 감사 이벤트로 기록
-- [ ] transaction rollback·동시 요청·중복 제출 통합 테스트
-- [ ] mutation별 향후 승인 정책을 연결할 hook 정의
+- [x] `tm-core` command만 호출하는 typed mutation API 구현
+- [x] 입력 길이·개수·형식·상태 전이 validation 적용
+- [x] idempotency key 저장과 중복 결과 재사용 구현
+- [x] optimistic concurrency와 conflict 응답 구현
+- [x] actor, request ID, before/after, 결과를 append-only 감사 이벤트로 기록
+- [x] transaction rollback·동시 요청·중복 제출 통합 테스트
+- [x] mutation별 향후 승인 정책을 연결할 hook 정의
+- [ ] production 배포 후 허용 mutation·중복·충돌·금지 동작 검증
+
+계약 문서: [통제된 TM write API v1](../architecture/controlled-write-api-v1.md)
+
+로컬 검증 기록:
+
+- `STEP 8 수행` 요청을 권장 기본안의 entity 범위와 금지 동작 승인으로 적용했다.
+- schema 4에 Task·Note·Checklist 정수 version과 append-only mutation 감사·idempotency ledger를 추가했다.
+- `POST` Task·Note, `PATCH` Task·Note·Checklist 완료 상태만 등록하고 삭제·금전·외부 전송·계정·권한 route는 만들지 않았다.
+- 모든 mutation은 bearer 인증 외에 `Idempotency-Key`, version precondition, operation 확인을 요구한다.
+- 합성 DB에서 동일 key 동시 요청은 실제 변경 1회, stale version은 `409`, 실패는 전체 rollback되는 것을 확인했다.
+- 감사·idempotency 행의 update/delete와 오래된 backup을 통한 ledger rewind를 차단했다.
+- frontend lint·typecheck·17개 테스트와 Rust fmt·clippy·81개 테스트가 통과했다. 실행 중인 TM이 desktop test binary를 잠가 desktop library 4개와 나머지 workspace를 분리 검증했다.
+- 실제 사용자 DB와 Railway 운영 DB에는 migration이나 mutation을 실행하지 않았다.
 
 완료 게이트:
 

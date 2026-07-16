@@ -30,16 +30,17 @@ cutover 뒤 cloud에 새 쓰기가 발생한 다음에는 과거 로컬 DB로 �
 | 첨부 원본 | TM 홈의 `attachments` 디렉터리 | 고위험 파일 데이터 | SQLite 밖의 별도 이전 lane. STEP 10에서 파일별 크기·checksum 검증 필요 |
 | 전달 이력 | `digest_deliveries` | 운영·외부 참조 metadata | 중복 전송 방지를 위해 이전·복원 시 보존 |
 | 승인·실행 감사 | `change_requests`, `change_request_events` | 보안·감사 데이터 | 이전 대상. 모델 입력에서 기본 제외하고 append-only 의미 보존 |
+| 원격 mutation 통제 | `mutation_idempotency_records`, `mutation_audit_events` | 보안·감사 데이터 | 이전 대상. API·모델 입력에서 제외하고 append-only·중복 방지 의미 보존 |
 | 검색 index | SQLite FTS `search_index` | 파생 데이터 | SQLite snapshot에는 포함되지만 논리 manifest에서 제외. 기준 테이블로 재생성 가능한 데이터 |
 
 API 키, 인증 토큰 원문, 로그, DB 백업 파일, source snapshot은 TM 데이터 manifest와 실제 데이터 이전 대상에 넣지 않는다. secret은 Railway 환경변수와 사용자 비밀번호 관리자에만 둔다.
 
 ## 보존해야 하는 불변 조건
 
-- SQLite `user_version`과 `schema_migrations` ledger가 현재 schema 3, migration `1, 2, 3`과 정확히 일치한다.
+- SQLite `user_version`과 `schema_migrations` ledger가 현재 schema 4, migration `1, 2, 3, 4`와 정확히 일치한다.
 - `PRAGMA integrity_check`가 `ok`이며 `PRAGMA foreign_key_check` 결과가 없다.
 - Task, checklist, tag, day entry, session 관계와 Note 다중 링크의 외래키가 유지된다.
-- `task_events`와 `change_request_events`의 append-only 의미가 유지된다.
+- `task_events`, `change_request_events`, `mutation_audit_events`의 append-only 의미와 idempotency ledger가 유지된다.
 - 확정된 day entry, 발송 완료 digest, 처리 이력이 생긴 change request를 과거 상태로 되감지 않는다.
 - 실행 중 work session은 최대 한 건이고 entity link 중복·소유자 종류 제약이 유지된다.
 - UUID, UTC RFC 3339 timestamp, `Asia/Seoul` 사용자 날짜 의미가 바뀌지 않는다.

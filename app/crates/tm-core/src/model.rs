@@ -227,6 +227,7 @@ pub struct Task {
     pub created_at: String,
     pub updated_at: String,
     pub deleted_at: Option<String>,
+    pub version: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -252,6 +253,7 @@ pub struct ChecklistItem {
     pub created_at: String,
     pub updated_at: String,
     pub completed_at: Option<String>,
+    pub version: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -319,6 +321,7 @@ pub struct Note {
     pub created_at: String,
     pub updated_at: String,
     pub deleted_at: Option<String>,
+    pub version: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -543,6 +546,17 @@ pub struct CreateNoteInput {
     #[serde(default)]
     pub body: String,
     pub note_date: Option<NaiveDate>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NotePatch {
+    pub note_type: Option<NoteType>,
+    pub title: Option<String>,
+    pub body: Option<String>,
+    pub note_date: Option<NaiveDate>,
+    #[serde(default)]
+    pub clear_note_date: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

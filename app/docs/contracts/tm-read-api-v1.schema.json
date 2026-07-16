@@ -97,7 +97,7 @@
       "additionalProperties": false,
       "required": [
         "id", "projectId", "title", "description", "status", "priority",
-        "dueDate", "completedAt", "createdAt", "updatedAt"
+        "dueDate", "completedAt", "createdAt", "updatedAt", "version"
       ],
       "properties": {
         "id": { "$ref": "#/$defs/Uuid" },
@@ -107,11 +107,12 @@
         "status": {
           "enum": ["inbox", "todo", "in_progress", "blocked", "done", "cancelled"]
         },
-        "priority": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "priority": { "type": "integer", "minimum": 0, "maximum": 4 },
         "dueDate": { "$ref": "#/$defs/NullableDate" },
         "completedAt": { "$ref": "#/$defs/NullableTimestamp" },
         "createdAt": { "$ref": "#/$defs/Timestamp" },
-        "updatedAt": { "$ref": "#/$defs/Timestamp" }
+        "updatedAt": { "$ref": "#/$defs/Timestamp" },
+        "version": { "type": "integer", "minimum": 1 }
       }
     },
     "ChecklistItem": {
@@ -119,7 +120,7 @@
       "additionalProperties": false,
       "required": [
         "id", "taskId", "body", "isDone", "sortOrder",
-        "createdAt", "updatedAt", "completedAt"
+        "createdAt", "updatedAt", "completedAt", "version"
       ],
       "properties": {
         "id": { "$ref": "#/$defs/Uuid" },
@@ -129,7 +130,8 @@
         "sortOrder": { "type": "integer" },
         "createdAt": { "$ref": "#/$defs/Timestamp" },
         "updatedAt": { "$ref": "#/$defs/Timestamp" },
-        "completedAt": { "$ref": "#/$defs/NullableTimestamp" }
+        "completedAt": { "$ref": "#/$defs/NullableTimestamp" },
+        "version": { "type": "integer", "minimum": 1 }
       }
     },
     "Tag": {
@@ -187,7 +189,7 @@
       "additionalProperties": false,
       "required": [
         "id", "noteType", "title", "body", "sourceWorklogId",
-        "noteDate", "createdAt", "updatedAt"
+        "noteDate", "createdAt", "updatedAt", "version"
       ],
       "properties": {
         "id": { "$ref": "#/$defs/Uuid" },
@@ -197,7 +199,8 @@
         "sourceWorklogId": { "$ref": "#/$defs/NullableUuid" },
         "noteDate": { "$ref": "#/$defs/NullableDate" },
         "createdAt": { "$ref": "#/$defs/Timestamp" },
-        "updatedAt": { "$ref": "#/$defs/Timestamp" }
+        "updatedAt": { "$ref": "#/$defs/Timestamp" },
+        "version": { "type": "integer", "minimum": 1 }
       }
     },
     "ProjectCollection": {

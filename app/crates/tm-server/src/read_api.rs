@@ -183,7 +183,7 @@ impl From<Project> for ProjectDto {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct TaskDto {
+pub(super) struct TaskDto {
     id: String,
     project_id: Option<String>,
     title: String,
@@ -194,6 +194,7 @@ struct TaskDto {
     completed_at: Option<String>,
     created_at: String,
     updated_at: String,
+    version: u64,
 }
 
 impl From<Task> for TaskDto {
@@ -209,13 +210,14 @@ impl From<Task> for TaskDto {
             completed_at: value.completed_at,
             created_at: value.created_at,
             updated_at: value.updated_at,
+            version: value.version,
         }
     }
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ChecklistItemDto {
+pub(super) struct ChecklistItemDto {
     id: String,
     task_id: String,
     body: String,
@@ -224,6 +226,7 @@ struct ChecklistItemDto {
     created_at: String,
     updated_at: String,
     completed_at: Option<String>,
+    version: u64,
 }
 
 impl From<ChecklistItem> for ChecklistItemDto {
@@ -237,6 +240,7 @@ impl From<ChecklistItem> for ChecklistItemDto {
             created_at: value.created_at,
             updated_at: value.updated_at,
             completed_at: value.completed_at,
+            version: value.version,
         }
     }
 }
@@ -325,7 +329,7 @@ impl From<WorkLog> for WorklogDto {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct NoteDto {
+pub(super) struct NoteDto {
     id: String,
     note_type: NoteType,
     title: String,
@@ -334,6 +338,7 @@ struct NoteDto {
     note_date: Option<NaiveDate>,
     created_at: String,
     updated_at: String,
+    version: u64,
 }
 
 impl From<Note> for NoteDto {
@@ -347,6 +352,7 @@ impl From<Note> for NoteDto {
             note_date: value.note_date,
             created_at: value.created_at,
             updated_at: value.updated_at,
+            version: value.version,
         }
     }
 }

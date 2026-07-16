@@ -43,7 +43,7 @@ fn initializes_schema_with_uuid_v7_utc_and_wal() -> Result<()> {
     let (temporary, core) = fixture()?;
     let health = core.health()?;
     assert!(health.ok);
-    assert_eq!(health.schema_version, 3);
+    assert_eq!(health.schema_version, 4);
     assert_eq!(health.journal_mode.to_ascii_lowercase(), "wal");
     assert!(health.database_path.ends_with("data\\tm.sqlite3"));
 

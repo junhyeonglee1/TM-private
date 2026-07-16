@@ -7,6 +7,7 @@ use std::{
 pub mod auth;
 pub mod openai;
 mod read_api;
+mod write_api;
 
 use axum::{
     Extension, Json, Router,
@@ -304,18 +305,37 @@ pub fn build_cloud_authenticated_router(core: TmCore, auth: AuthConfig) -> Route
         .route("/readyz", get(cloud_readyz))
         .route("/api/v1/auth/status", get(auth_status))
         .route("/api/v1/projects", get(read_api::projects))
-        .route("/api/v1/tasks", get(read_api::tasks))
+        .route(
+            "/api/v1/tasks",
+            get(read_api::tasks).post(write_api::create_task),
+        )
+        .route(
+            "/api/v1/tasks/{id}",
+            axum::routing::patch(write_api::update_task),
+        )
         .route("/api/v1/checklist", get(read_api::checklist))
+        .route(
+            "/api/v1/checklist/{id}",
+            axum::routing::patch(write_api::set_checklist_done),
+        )
         .route("/api/v1/tags", get(read_api::tags))
         .route("/api/v1/sessions", get(read_api::sessions))
         .route("/api/v1/worklogs", get(read_api::worklogs))
-        .route("/api/v1/notes", get(read_api::notes))
+        .route(
+            "/api/v1/notes",
+            get(read_api::notes).post(write_api::create_note),
+        )
+        .route(
+            "/api/v1/notes/{id}",
+            axum::routing::patch(write_api::update_note),
+        )
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .with_state(AppState {
             core,
             openai: OpenAiClient::disabled(),
         })
+        .layer(write_api::body_limit())
         .layer(middleware::from_fn_with_state(
             authenticator,
             authenticate_cloud_request,
@@ -630,7 +650,7 @@ async fn method_not_allowed(Extension(request_id): Extension<RequestId>) -> ApiE
     ApiError {
         status: StatusCode::METHOD_NOT_ALLOWED,
         code: "METHOD_NOT_ALLOWED",
-        message: "this API route is read-only and only supports GET".to_owned(),
+        message: "this method is not allowed for the requested API route".to_owned(),
         request_id: request_id.0,
     }
 }
@@ -941,7 +961,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
         assert_eq!(body["data"]["status"], "ready");
-        assert_eq!(body["data"]["schemaVersion"], 3);
+        assert_eq!(body["data"]["schemaVersion"], 4);
         assert_eq!(body["data"]["journalMode"], "wal");
     }
 
@@ -1269,6 +1289,20 @@ mod tests {
             .expect("call hidden route without authentication");
         assert_eq!(hidden_route.status(), StatusCode::UNAUTHORIZED);
 
+        let unauthenticated_mutation = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tasks")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"title":"hidden mutation"}"#))
+                    .expect("build unauthenticated mutation request"),
+            )
+            .await
+            .expect("call unauthenticated mutation route");
+        assert_eq!(unauthenticated_mutation.status(), StatusCode::UNAUTHORIZED);
+
         let authenticated_missing_route = router
             .oneshot(
                 Request::builder()
@@ -1512,12 +1546,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn registered_data_routes_reject_mutation_without_changing_tm() {
-        let (_temporary, core, _project_id, _task_id) = populated_test_core();
-        let before = core
-            .list_tasks(false)
-            .expect("list tasks before POST")
-            .len();
+    async fn mutation_requires_all_preconditions_before_changing_tm() {
+        let (_temporary, core) = test_core();
         let response = build_cloud_authenticated_router(core.clone(), test_auth_config())
             .oneshot(
                 Request::builder()
@@ -1525,17 +1555,284 @@ mod tests {
                     .uri("/api/v1/tasks")
                     .header("authorization", format!("Bearer {}", test_auth_token()))
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"title":"must not be created"}"#))
-                    .expect("build forbidden mutation request"),
+                    .body(Body::from(r#"{"title":"missing preconditions"}"#))
+                    .expect("build unconfirmed mutation request"),
             )
             .await
-            .expect("call forbidden mutation route");
-        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+            .expect("call unconfirmed mutation route");
+        assert_eq!(response.status(), StatusCode::PRECONDITION_REQUIRED);
         let body = response_json(response).await;
-        assert_eq!(body["error"]["code"], "METHOD_NOT_ALLOWED");
+        assert_eq!(body["error"]["code"], "MUTATION_PRECONDITION_REQUIRED");
+        assert!(core.list_tasks(false).expect("list tasks").is_empty());
+        assert!(
+            core.list_mutation_audit_events()
+                .expect("list mutation audit")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn task_mutation_http_contract_is_idempotent_versioned_and_redacted() {
+        let (_temporary, core) = test_core();
+        let router = build_cloud_authenticated_router(core.clone(), test_auth_config());
+        let create_body = r#"{"title":"HTTP controlled task","status":"todo"}"#;
+        let created = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tasks")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "http-task-create-0001")
+                    .header("if-none-match", "*")
+                    .header("x-tm-confirm-mutation", "task.create")
+                    .header("x-request-id", "http-task-create-request")
+                    .body(Body::from(create_body))
+                    .expect("build task create request"),
+            )
+            .await
+            .expect("call task create route");
+        assert_eq!(created.status(), StatusCode::CREATED);
+        assert_eq!(created.headers().get("etag").expect("create ETag"), "\"1\"");
+        let created_body = response_json(created).await;
+        let task_id = created_body["data"]["resourceId"]
+            .as_str()
+            .expect("task resource ID")
+            .to_owned();
+        assert_eq!(created_body["data"]["version"], 1);
+        assert_eq!(created_body["data"]["replayed"], false);
+        assert!(created_body["data"]["item"].get("deletedAt").is_none());
+        assert_eq!(created_body["data"]["item"]["version"], 1);
+
+        let replay = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tasks")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "http-task-create-0001")
+                    .header("if-none-match", "*")
+                    .header("x-tm-confirm-mutation", "task.create")
+                    .header("x-request-id", "http-task-create-retry")
+                    .body(Body::from(create_body))
+                    .expect("build task create replay"),
+            )
+            .await
+            .expect("call task create replay");
+        assert_eq!(replay.status(), StatusCode::CREATED);
         assert_eq!(
-            core.list_tasks(false).expect("list tasks after POST").len(),
-            before
+            replay
+                .headers()
+                .get("x-tm-idempotency-replayed")
+                .expect("idempotency replay header"),
+            "true"
+        );
+        assert_eq!(response_json(replay).await["data"]["replayed"], true);
+        assert_eq!(core.list_tasks(false).expect("list tasks").len(), 1);
+
+        let updated = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/api/v1/tasks/{task_id}"))
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "http-task-update-0001")
+                    .header("if-match", "\"1\"")
+                    .header("x-tm-confirm-mutation", "task.update")
+                    .body(Body::from(r#"{"title":"HTTP task updated"}"#))
+                    .expect("build task update request"),
+            )
+            .await
+            .expect("call task update route");
+        assert_eq!(updated.status(), StatusCode::OK);
+        assert_eq!(updated.headers().get("etag").expect("update ETag"), "\"2\"");
+        assert_eq!(response_json(updated).await["data"]["version"], 2);
+
+        let stale = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/api/v1/tasks/{task_id}"))
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "http-task-update-0002")
+                    .header("if-match", "\"1\"")
+                    .header("x-tm-confirm-mutation", "task.update")
+                    .body(Body::from(r#"{"title":"stale overwrite"}"#))
+                    .expect("build stale task update"),
+            )
+            .await
+            .expect("call stale task update");
+        assert_eq!(stale.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response_json(stale).await["error"]["code"],
+            "MUTATION_CONFLICT"
+        );
+
+        let forbidden_delete = router
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/tasks/{task_id}"))
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .body(Body::empty())
+                    .expect("build forbidden delete"),
+            )
+            .await
+            .expect("call forbidden delete");
+        assert_eq!(forbidden_delete.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(
+            core.get_task(&task_id)
+                .expect("get task after stale request")
+                .title,
+            "HTTP task updated"
+        );
+        assert_eq!(
+            core.list_mutation_audit_events()
+                .expect("list mutation audit")
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn note_and_checklist_mutations_use_the_same_controlled_contract() {
+        let (_temporary, core, _project_id, task_id) = populated_test_core();
+        let checklist = core
+            .list_checklist_items(&task_id)
+            .expect("list checklist")
+            .remove(0);
+        let router = build_cloud_authenticated_router(core.clone(), test_auth_config());
+
+        let note_created = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/notes")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "http-note-create-0001")
+                    .header("if-none-match", "*")
+                    .header("x-tm-confirm-mutation", "note.create")
+                    .body(Body::from(
+                        r#"{"noteType":"decision","title":"HTTP note","body":"safe"}"#,
+                    ))
+                    .expect("build note create request"),
+            )
+            .await
+            .expect("call note create route");
+        assert_eq!(note_created.status(), StatusCode::CREATED);
+        let note_body = response_json(note_created).await;
+        let note_id = note_body["data"]["resourceId"]
+            .as_str()
+            .expect("note resource ID");
+
+        let note_updated = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/api/v1/notes/{note_id}"))
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "http-note-update-0001")
+                    .header("if-match", "\"1\"")
+                    .header("x-tm-confirm-mutation", "note.update")
+                    .body(Body::from(r#"{"body":"updated safely"}"#))
+                    .expect("build note update request"),
+            )
+            .await
+            .expect("call note update route");
+        assert_eq!(note_updated.status(), StatusCode::OK);
+        assert_eq!(response_json(note_updated).await["data"]["version"], 2);
+
+        let checklist_updated = router
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/api/v1/checklist/{}", checklist.id))
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "http-check-update-0001")
+                    .header("if-match", format!("\"{}\"", checklist.version))
+                    .header("x-tm-confirm-mutation", "checklist.set_done")
+                    .body(Body::from(r#"{"isDone":true}"#))
+                    .expect("build checklist update request"),
+            )
+            .await
+            .expect("call checklist update route");
+        assert_eq!(checklist_updated.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(checklist_updated).await["data"]["item"]["isDone"],
+            true
+        );
+        assert_eq!(
+            core.list_mutation_audit_events()
+                .expect("list mutation audit")
+                .len(),
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn mutation_json_is_strict_and_size_limited() {
+        let (_temporary, core) = test_core();
+        let router = build_cloud_authenticated_router(core.clone(), test_auth_config());
+        let unknown_field = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tasks")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "strict-json-key-00001")
+                    .header("if-none-match", "*")
+                    .header("x-tm-confirm-mutation", "task.create")
+                    .body(Body::from(r#"{"title":"strict","deletedAt":"forbidden"}"#))
+                    .expect("build unknown-field mutation"),
+            )
+            .await
+            .expect("call unknown-field mutation");
+        assert_eq!(unknown_field.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response_json(unknown_field).await["error"]["code"],
+            "INVALID_MUTATION_JSON"
+        );
+
+        let oversized_json = format!(r#"{{"title":"{}"}}"#, "x".repeat(70 * 1024));
+        let oversized = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tasks")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "large-json-key-000001")
+                    .header("if-none-match", "*")
+                    .header("x-tm-confirm-mutation", "task.create")
+                    .body(Body::from(oversized_json))
+                    .expect("build oversized mutation"),
+            )
+            .await
+            .expect("call oversized mutation");
+        assert_eq!(oversized.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            response_json(oversized).await["error"]["code"],
+            "MUTATION_REQUEST_TOO_LARGE"
+        );
+        assert!(core.list_tasks(false).expect("list tasks").is_empty());
+        assert!(
+            core.list_mutation_audit_events()
+                .expect("list mutation audit")
+                .is_empty()
         );
     }
 

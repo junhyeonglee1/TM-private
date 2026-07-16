@@ -9,11 +9,11 @@ STEP 7의 API는 Railway `cloud-authenticated` profile에서만 활성화한다.
 ## 공통 계약
 
 - base path: `/api/v1`
-- 허용 method: `GET`만 허용하며 등록 route의 다른 method는 구조화된 `405 METHOD_NOT_ALLOWED`를 반환한다.
+- 이 문서의 collection 조회는 `GET`만 다룬다. STEP 8의 명시된 POST·PATCH는 [통제된 write API 계약](controlled-write-api-v1.md)을 따르며 그 밖의 method는 `405 METHOD_NOT_ALLOWED`다.
 - pagination: `limit` 기본 50, 최소 1, 최대 100. `offset` 기본 0, 최대 10,000.
 - 응답 상한: JSON envelope 전체 512KiB. 초과하면 `413 RESPONSE_TOO_LARGE`를 반환한다.
 - versioning: URL major version과 [JSON Schema](../contracts/tm-read-api-v1.schema.json)로 DTO를 고정한다.
-- cache/version: 콘텐츠 기반 strong `ETag`를 반환하고 `If-None-Match` 일치 시 `304`를 반환한다. 개인 데이터 응답은 계속 `Cache-Control: no-store`다.
+- cache/version: collection 콘텐츠 기반 strong `ETag`를 반환하고 `If-None-Match` 일치 시 `304`를 반환한다. Task·Note·Checklist의 정수 `version`은 write API의 optimistic concurrency에 사용하며 collection ETag와 별개다. 개인 데이터 응답은 계속 `Cache-Control: no-store`다.
 - 오류: query, filter, sort가 허용 목록 밖이거나 형식이 틀리면 구조화된 `400 INVALID_QUERY`를 반환한다.
 - DB 오류: client 응답에는 DB 경로, SQL, 내부 오류를 노출하지 않는다.
 - 접근 로그: request ID, resource 이름, 전체·반환 행 수, offset만 기록한다. token, query 값, 제목, 본문은 기록하지 않는다.
@@ -55,12 +55,12 @@ collection 응답의 공통 형태:
 | DTO | 반환 필드 |
 |---|---|
 | Project | `id`, `name`, `description`, `color`, `sortOrder`, `createdAt`, `updatedAt`, `archivedAt` |
-| Task | `id`, `projectId`, `title`, `description`, `status`, `priority`, `dueDate`, `completedAt`, `createdAt`, `updatedAt` |
-| Checklist | `id`, `taskId`, `body`, `isDone`, `sortOrder`, `createdAt`, `updatedAt`, `completedAt` |
+| Task | `id`, `projectId`, `title`, `description`, `status`, `priority`, `dueDate`, `completedAt`, `createdAt`, `updatedAt`, `version` |
+| Checklist | `id`, `taskId`, `body`, `isDone`, `sortOrder`, `createdAt`, `updatedAt`, `completedAt`, `version` |
 | Tag | `id`, `name`, `color`, `createdAt` |
 | Session | `id`, `projectId`, `goal`, `status`, `startedAt`, `endedAt`, `result`, `blockers`, `nextAction`, `createdAt`, `updatedAt` |
 | Worklog | `id`, `sessionId`, `projectId`, `logDate`, `title`, `body`, `createdAt`, `updatedAt` |
-| Note | `id`, `noteType`, `title`, `body`, `sourceWorklogId`, `noteDate`, `createdAt`, `updatedAt` |
+| Note | `id`, `noteType`, `title`, `body`, `sourceWorklogId`, `noteDate`, `createdAt`, `updatedAt`, `version` |
 
 내부 Rust model을 그대로 serialize하지 않고 위 DTO로 복사한다. 따라서 model에 새 필드가 생겨도 명시적으로 DTO와 Schema를 변경하기 전에는 외부 API에 노출되지 않는다.
 
@@ -86,7 +86,7 @@ collection 응답의 공통 형태:
 - DTO에 삭제·파일·DB·인증·감사 필드가 없음
 - filter, pagination, sort allowlist와 잘못된 query `400`
 - request ID와 무관한 콘텐츠 ETag 및 조건부 `304`
-- 등록 route의 POST `405`와 DB 미변경
+- 허용되지 않은 method의 `405`와 DB 미변경
 - 512KiB 초과 `413`
 - `cloud-bootstrap`에서 데이터 route `404`
 

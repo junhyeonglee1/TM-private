@@ -19,10 +19,16 @@
 - 인증된 cloud profile에 project·task·checklist·tag·session·worklog·note의 versioned GET API와 DTO allowlist를 추가했다.
 - read-only API에 제한된 filter·정렬, pagination, 512KiB 응답 상한, 콘텐츠 ETag와 구조화된 query·method 오류를 추가했다.
 - 원문 토큰을 파일이나 명령 기록에 저장하지 않고 production 인증·조회·ETag·mutation 차단을 확인하는 PowerShell 검증 도구를 추가했다.
+- Task·Note 생성/수정과 Checklist 완료 상태 변경만 허용하는 인증된 typed write API를 추가했다.
+- mutation마다 idempotency key, 정수 version precondition, operation 확인 header와 64KiB body 상한을 요구하는 통제 경계를 추가했다.
+- domain 변경, 중복 응답, actor·request ID·before/after를 한 transaction에 기록하는 append-only mutation 감사·idempotency ledger를 추가했다.
+- 통제된 write API v1 계약 문서와 JSON Schema를 추가했다.
 
 ### Changed
 
 - Railway Volume 서비스가 replica 구성으로 해석되지 않도록 Config as Code의 `multiRegionConfig`를 `null`로 명시했다.
+- SQLite schema 4에서 Task·Note·Checklist에 optimistic concurrency용 정수 `version`을 추가하고 read DTO에도 노출했다.
+- 현재 mutation ledger와 일치하지 않는 backup 복원을 거부해 감사·idempotency 이력의 rewind를 차단했다.
 
 ### Verified
 
@@ -34,6 +40,7 @@
 - 합성 SQLite DB에서 migration manifest 원문 비노출, read-only snapshot 비교, 지원하지 않는 schema 거부, rollback 후 논리 일치를 확인했다.
 - 합성 cloud DB에서 read-only API 인증·DTO Schema·filter·pagination·ETag·응답 상한·mutation 차단 contract를 확인했다.
 - Railway production에서 인증된 tasks 조회 `200`, ETag 재검증 `304`, mutation 요청 `405 METHOD_NOT_ALLOWED`, 빈 cloud DB 유지를 확인했다.
+- 합성 DB에서 mutation 중복 제출 1회 실행, stale version 충돌, 실패 rollback, append-only 감사, strict JSON·입력 상한·금지 method를 확인했다.
 
 ## [0.1.5]
 

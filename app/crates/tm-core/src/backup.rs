@@ -123,6 +123,7 @@ pub(crate) fn restore_database(
     current.busy_timeout(Duration::from_secs(15))?;
     let delivery_ledger = read_delivery_ledger(&current)?;
     let change_request_ledger = read_change_request_ledger(&current)?;
+    let mutation_ledger = read_mutation_ledger(&current)?;
     let safety_backup = online_backup_connection_inner(
         &current,
         backup_directory,
@@ -136,6 +137,7 @@ pub(crate) fn restore_database(
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_FULL_MUTEX,
     )?;
     validate_change_request_restore_source(&source, &change_request_ledger)?;
+    validate_mutation_restore_source(&source, &mutation_ledger)?;
     let mut destination = Connection::open(database_path)?;
     destination.busy_timeout(Duration::from_secs(15))?;
     register_runtime_functions(&destination)?;
@@ -475,6 +477,81 @@ fn merge_delivery_ledger(connection: &Connection, preserved: &[DeliveryLedgerRow
                 ],
             )?;
         }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct MutationLedger {
+    idempotency_rows: Vec<String>,
+    audit_rows: Vec<String>,
+}
+
+fn read_mutation_ledger(connection: &Connection) -> Result<MutationLedger> {
+    let has_idempotency: bool = connection.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM sqlite_schema
+            WHERE type = 'table' AND name = 'mutation_idempotency_records'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    let has_audit: bool = connection.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM sqlite_schema
+            WHERE type = 'table' AND name = 'mutation_audit_events'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_idempotency && !has_audit {
+        return Ok(MutationLedger::default());
+    }
+    if !has_idempotency || !has_audit {
+        return Err(Error::Invariant(
+            "mutation ledger tables must exist together".to_owned(),
+        ));
+    }
+
+    let idempotency_rows = canonical_json_rows(
+        connection,
+        "SELECT json_array(
+            idempotency_key, operation, request_sha256, actor, request_id,
+            resource_type, resource_id, resource_version, response_json, created_at
+         )
+         FROM mutation_idempotency_records ORDER BY idempotency_key",
+    )?;
+    let audit_rows = canonical_json_rows(
+        connection,
+        "SELECT json_array(
+            id, idempotency_key, actor, request_id, operation, resource_type,
+            resource_id, expected_version, resulting_version, before_json,
+            after_json, result, approval_policy, created_at
+         )
+         FROM mutation_audit_events ORDER BY id",
+    )?;
+    Ok(MutationLedger {
+        idempotency_rows,
+        audit_rows,
+    })
+}
+
+fn canonical_json_rows(connection: &Connection, sql: &str) -> Result<Vec<String>> {
+    let mut statement = connection.prepare(sql)?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn validate_mutation_restore_source(source: &Connection, current: &MutationLedger) -> Result<()> {
+    if current.idempotency_rows.is_empty() && current.audit_rows.is_empty() {
+        return Ok(());
+    }
+    let restored = read_mutation_ledger(source)?;
+    if &restored != current {
+        return Err(Error::Conflict(
+            "restore would alter the append-only mutation and idempotency ledger".to_owned(),
+        ));
     }
     Ok(())
 }

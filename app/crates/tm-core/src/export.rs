@@ -32,6 +32,8 @@ pub(crate) const EXPORTED_TABLES: &[&str] = &[
     "digest_deliveries",
     "change_requests",
     "change_request_events",
+    "mutation_idempotency_records",
+    "mutation_audit_events",
     "app_state",
 ];
 

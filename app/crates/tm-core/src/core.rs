@@ -13,10 +13,10 @@ use crate::{
     CreateTaskAggregateInput, CreateTaskInput, CreateWorkLogInput, DigestDelivery, DigestKind,
     DigestPreparation, EndSessionInput, EntityLink, EntityType, Error, ExportArtifact,
     HealthReport, LinkTargetType, MigrationDryRun, MigrationManifest, Note, NoteAggregate,
-    NoteType, Project, Result, SearchHit, SessionCompletion, SessionStatus, StartSessionInput, Tag,
-    Task, TaskAggregate, TaskDayEntry, TaskDayStatus, TaskEvent, TaskPatch, TaskStatus, TmHome,
-    TrashEntityType, TrashItem, UpdateChangeRequestInput, UpdateTaskAggregateInput, WorkLog,
-    WorkSession, backup, change_request,
+    NotePatch, NoteType, Project, Result, SearchHit, SessionCompletion, SessionStatus,
+    StartSessionInput, Tag, Task, TaskAggregate, TaskDayEntry, TaskDayStatus, TaskEvent, TaskPatch,
+    TaskStatus, TmHome, TrashEntityType, TrashItem, UpdateChangeRequestInput,
+    UpdateTaskAggregateInput, WorkLog, WorkSession, backup, change_request,
     database::{Database, SCHEMA_VERSION, new_id, now_utc, today_seoul},
     digest,
     error::{invalid, not_found},
@@ -25,7 +25,7 @@ use crate::{
 
 #[derive(Debug, Clone)]
 pub struct TmCore {
-    database: Database,
+    pub(crate) database: Database,
 }
 
 impl TmCore {
@@ -100,7 +100,7 @@ impl TmCore {
         let connection = self.database.connect()?;
         let mut statement = connection.prepare(
             "SELECT id, project_id, title, description, status, priority, due_date,
-                    completed_at, created_at, updated_at, deleted_at
+                    completed_at, created_at, updated_at, deleted_at, version
              FROM tasks
              WHERE (?1 = 1 OR deleted_at IS NULL)
              ORDER BY
@@ -180,32 +180,13 @@ impl TmCore {
     ) -> Result<ChecklistItem> {
         self.database
             .transaction(TransactionBehavior::Immediate, |transaction| {
-                let current = query_checklist_item(transaction, item_id)?;
-                let next_body = body
-                    .map(|value| required_text("checklist item", value))
-                    .transpose()?
-                    .unwrap_or(current.body);
-                let next_done = is_done.unwrap_or(current.is_done);
-                let completed_at = if next_done {
-                    current.completed_at.or_else(|| Some(now_utc()))
-                } else {
-                    None
-                };
-                transaction.execute(
-                    "UPDATE checklist_items
-                 SET body = ?2, is_done = ?3, sort_order = ?4,
-                     completed_at = ?5, updated_at = ?6
-                 WHERE id = ?1",
-                    params![
-                        item_id,
-                        next_body,
-                        i64::from(next_done),
-                        sort_order.unwrap_or(current.sort_order),
-                        completed_at,
-                        now_utc(),
-                    ],
-                )?;
-                query_checklist_item(transaction, item_id)
+                update_checklist_item_in_transaction(
+                    transaction,
+                    item_id,
+                    body,
+                    is_done,
+                    sort_order,
+                )
             })
     }
 
@@ -221,7 +202,7 @@ impl TmCore {
     pub fn list_checklist_items(&self, task_id: &str) -> Result<Vec<ChecklistItem>> {
         let connection = self.database.connect()?;
         let mut statement = connection.prepare(
-            "SELECT id, task_id, body, is_done, sort_order, created_at, updated_at, completed_at
+            "SELECT id, task_id, body, is_done, sort_order, created_at, updated_at, completed_at, version
              FROM checklist_items WHERE task_id = ?1 ORDER BY sort_order ASC, created_at ASC",
         )?;
         let rows = statement.query_map([task_id], map_checklist_item)?;
@@ -339,7 +320,8 @@ impl TmCore {
                 if status == TaskDayStatus::Done {
                     transaction.execute(
                         "UPDATE tasks
-                     SET status = 'done', completed_at = coalesce(completed_at, ?2), updated_at = ?2
+                     SET status = 'done', completed_at = coalesce(completed_at, ?2),
+                         updated_at = ?2, version = version + 1
                      WHERE id = ?1 AND status NOT IN ('done', 'cancelled')",
                         params![current.task_id, now],
                     )?;
@@ -630,6 +612,18 @@ impl TmCore {
             })
     }
 
+    pub fn get_note(&self, note_id: &str) -> Result<Note> {
+        let connection = self.database.connect()?;
+        query_note(&connection, note_id)
+    }
+
+    pub fn update_note(&self, note_id: &str, patch: NotePatch) -> Result<Note> {
+        self.database
+            .transaction(TransactionBehavior::Immediate, |transaction| {
+                update_note_in_transaction(transaction, note_id, patch)
+            })
+    }
+
     pub fn create_note_aggregate(&self, input: CreateNoteAggregateInput) -> Result<NoteAggregate> {
         self.database
             .transaction(TransactionBehavior::Immediate, |transaction| {
@@ -750,7 +744,7 @@ impl TmCore {
         let connection = self.database.connect()?;
         let mut statement = connection.prepare(
             "SELECT id, note_type, title, body, source_worklog_id, note_date,
-                    created_at, updated_at, deleted_at
+                    created_at, updated_at, deleted_at, version
              FROM notes WHERE (?1 = 1 OR deleted_at IS NULL)
              ORDER BY created_at DESC",
         )?;
@@ -949,16 +943,16 @@ impl TmCore {
         id: &str,
         deleted_at: Option<String>,
     ) -> Result<()> {
-        let (table, title_column) = match entity_type {
-            TrashEntityType::Task => ("tasks", "title"),
-            TrashEntityType::Note => ("notes", "title"),
-            TrashEntityType::Project => ("projects", "name"),
-            TrashEntityType::Worklog => ("worklogs", "title"),
-            TrashEntityType::Session => ("work_sessions", "goal"),
+        let (table, title_column, version_update) = match entity_type {
+            TrashEntityType::Task => ("tasks", "title", ", version = version + 1"),
+            TrashEntityType::Note => ("notes", "title", ", version = version + 1"),
+            TrashEntityType::Project => ("projects", "name", ""),
+            TrashEntityType::Worklog => ("worklogs", "title", ""),
+            TrashEntityType::Session => ("work_sessions", "goal", ""),
         };
         let connection = self.database.connect()?;
         let sql = format!(
-            "UPDATE {table} SET deleted_at = ?2, updated_at = ?3 WHERE id = ?1 AND {title_column} IS NOT NULL"
+            "UPDATE {table} SET deleted_at = ?2, updated_at = ?3{version_update} WHERE id = ?1 AND {title_column} IS NOT NULL"
         );
         let changed = connection.execute(&sql, params![id, deleted_at, now_utc()])?;
         if changed == 0 {
@@ -1307,7 +1301,7 @@ fn required_text(field: &str, value: &str) -> Result<String> {
     Ok(value.to_owned())
 }
 
-fn update_task_in_transaction(
+pub(crate) fn update_task_in_transaction(
     transaction: &Transaction<'_>,
     task_id: &str,
     patch: TaskPatch,
@@ -1355,7 +1349,8 @@ fn update_task_in_transaction(
     transaction.execute(
         "UPDATE tasks
          SET project_id = ?2, title = ?3, description = ?4, status = ?5,
-             priority = ?6, due_date = ?7, completed_at = ?8, updated_at = ?9
+             priority = ?6, due_date = ?7, completed_at = ?8, updated_at = ?9,
+             version = version + 1
          WHERE id = ?1",
         params![
             task_id,
@@ -1493,7 +1488,7 @@ fn sync_checklist_in_transaction(
             let changed = transaction.execute(
                 "UPDATE checklist_items
                  SET body = ?3, is_done = ?4, sort_order = ?5,
-                     completed_at = ?6, updated_at = ?7
+                     completed_at = ?6, updated_at = ?7, version = version + 1
                  WHERE id = ?1 AND task_id = ?2",
                 params![
                     item_id,
@@ -1533,7 +1528,7 @@ fn sync_checklist_in_transaction(
     list_checklist_for_connection(transaction, task_id)
 }
 
-fn create_note_in_transaction(
+pub(crate) fn create_note_in_transaction(
     transaction: &Transaction<'_>,
     input: &CreateNoteInput,
 ) -> Result<Note> {
@@ -1554,6 +1549,48 @@ fn create_note_in_transaction(
         ],
     )?;
     query_note(transaction, &id)
+}
+
+pub(crate) fn update_note_in_transaction(
+    transaction: &Transaction<'_>,
+    note_id: &str,
+    patch: NotePatch,
+) -> Result<Note> {
+    if patch.clear_note_date && patch.note_date.is_some() {
+        return Err(invalid("note date cannot be both set and cleared"));
+    }
+    let current = query_note(transaction, note_id)?;
+    if current.deleted_at.is_some() {
+        return Err(Error::Conflict(format!(
+            "note {note_id} is in the trash; restore it before editing"
+        )));
+    }
+    let title = patch
+        .title
+        .as_deref()
+        .map(|value| required_text("note title", value))
+        .transpose()?
+        .unwrap_or(current.title);
+    let note_date = if patch.clear_note_date {
+        None
+    } else {
+        patch.note_date.or(current.note_date)
+    };
+    transaction.execute(
+        "UPDATE notes
+         SET note_type = ?2, title = ?3, body = ?4, note_date = ?5,
+             updated_at = ?6, version = version + 1
+         WHERE id = ?1",
+        params![
+            note_id,
+            patch.note_type.unwrap_or(current.note_type).as_str(),
+            title,
+            patch.body.unwrap_or(current.body).trim(),
+            note_date,
+            now_utc(),
+        ],
+    )?;
+    query_note(transaction, note_id)
 }
 
 fn create_note_link_in_transaction(
@@ -1607,7 +1644,7 @@ fn validate_link_target(
     Ok(())
 }
 
-fn create_task_in_transaction(
+pub(crate) fn create_task_in_transaction(
     transaction: &Transaction<'_>,
     input: &CreateTaskInput,
 ) -> Result<Task> {
@@ -1638,7 +1675,7 @@ fn create_task_in_transaction(
     query_task(transaction, &id, true)
 }
 
-fn query_project(connection: &Connection, id: &str) -> Result<Project> {
+pub(crate) fn query_project(connection: &Connection, id: &str) -> Result<Project> {
     connection
         .query_row(
             "SELECT id, name, description, color, sort_order, created_at, updated_at,
@@ -1665,11 +1702,11 @@ fn map_project(row: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
     })
 }
 
-fn query_task(connection: &Connection, id: &str, include_deleted: bool) -> Result<Task> {
+pub(crate) fn query_task(connection: &Connection, id: &str, include_deleted: bool) -> Result<Task> {
     connection
         .query_row(
             "SELECT id, project_id, title, description, status, priority, due_date,
-                    completed_at, created_at, updated_at, deleted_at
+                    completed_at, created_at, updated_at, deleted_at, version
              FROM tasks WHERE id = ?1 AND (?2 = 1 OR deleted_at IS NULL)",
             params![id, i64::from(include_deleted)],
             map_task,
@@ -1695,6 +1732,7 @@ fn map_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
         created_at: row.get(8)?,
         updated_at: row.get(9)?,
         deleted_at: row.get(10)?,
+        version: integer_version(row, 11)?,
     })
 }
 
@@ -1712,10 +1750,10 @@ fn map_task_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskEvent> {
     })
 }
 
-fn query_checklist_item(connection: &Connection, id: &str) -> Result<ChecklistItem> {
+pub(crate) fn query_checklist_item(connection: &Connection, id: &str) -> Result<ChecklistItem> {
     connection
         .query_row(
-            "SELECT id, task_id, body, is_done, sort_order, created_at, updated_at, completed_at
+            "SELECT id, task_id, body, is_done, sort_order, created_at, updated_at, completed_at, version
              FROM checklist_items WHERE id = ?1",
             [id],
             map_checklist_item,
@@ -1724,12 +1762,47 @@ fn query_checklist_item(connection: &Connection, id: &str) -> Result<ChecklistIt
         .ok_or_else(|| not_found("checklist item", id))
 }
 
+pub(crate) fn update_checklist_item_in_transaction(
+    transaction: &Transaction<'_>,
+    item_id: &str,
+    body: Option<&str>,
+    is_done: Option<bool>,
+    sort_order: Option<i64>,
+) -> Result<ChecklistItem> {
+    let current = query_checklist_item(transaction, item_id)?;
+    let next_body = body
+        .map(|value| required_text("checklist item", value))
+        .transpose()?
+        .unwrap_or(current.body);
+    let next_done = is_done.unwrap_or(current.is_done);
+    let completed_at = if next_done {
+        current.completed_at.or_else(|| Some(now_utc()))
+    } else {
+        None
+    };
+    transaction.execute(
+        "UPDATE checklist_items
+         SET body = ?2, is_done = ?3, sort_order = ?4,
+             completed_at = ?5, updated_at = ?6, version = version + 1
+         WHERE id = ?1",
+        params![
+            item_id,
+            next_body,
+            i64::from(next_done),
+            sort_order.unwrap_or(current.sort_order),
+            completed_at,
+            now_utc(),
+        ],
+    )?;
+    query_checklist_item(transaction, item_id)
+}
+
 fn list_checklist_for_connection(
     connection: &Connection,
     task_id: &str,
 ) -> Result<Vec<ChecklistItem>> {
     let mut statement = connection.prepare(
-        "SELECT id, task_id, body, is_done, sort_order, created_at, updated_at, completed_at
+        "SELECT id, task_id, body, is_done, sort_order, created_at, updated_at, completed_at, version
          FROM checklist_items WHERE task_id = ?1 ORDER BY sort_order ASC, created_at ASC",
     )?;
     let rows = statement.query_map([task_id], map_checklist_item)?;
@@ -1747,6 +1820,7 @@ fn map_checklist_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChecklistItem
         created_at: row.get(5)?,
         updated_at: row.get(6)?,
         completed_at: row.get(7)?,
+        version: integer_version(row, 8)?,
     })
 }
 
@@ -1863,11 +1937,11 @@ fn map_worklog(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkLog> {
     })
 }
 
-fn query_note(connection: &Connection, id: &str) -> Result<Note> {
+pub(crate) fn query_note(connection: &Connection, id: &str) -> Result<Note> {
     connection
         .query_row(
             "SELECT id, note_type, title, body, source_worklog_id, note_date,
-                    created_at, updated_at, deleted_at
+                    created_at, updated_at, deleted_at, version
              FROM notes WHERE id = ?1",
             [id],
             map_note,
@@ -1888,6 +1962,7 @@ fn map_note(row: &rusqlite::Row<'_>) -> rusqlite::Result<Note> {
         created_at: row.get(6)?,
         updated_at: row.get(7)?,
         deleted_at: row.get(8)?,
+        version: integer_version(row, 9)?,
     })
 }
 
@@ -2025,6 +2100,13 @@ fn enum_conversion_error(index: usize, value: String) -> rusqlite::Error {
         Type::Text,
         Box::new(Error::Invariant(format!("unknown enum value: {value}"))),
     )
+}
+
+fn integer_version(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<u64> {
+    let value: i64 = row.get(index)?;
+    u64::try_from(value).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(index, Type::Integer, Box::new(error))
+    })
 }
 
 fn collect_rows<T>(rows: impl Iterator<Item = rusqlite::Result<T>>) -> Result<Vec<T>> {
