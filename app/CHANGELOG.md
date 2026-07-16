@@ -18,6 +18,7 @@
 - schema·migration ledger·무결성·외래키를 검사하고 테이블별 행 개수와 논리 SHA-256을 비교하는 migration manifest와 합성 DB dry-run 경계를 추가했다.
 - 인증된 cloud profile에 project·task·checklist·tag·session·worklog·note의 versioned GET API와 DTO allowlist를 추가했다.
 - read-only API에 제한된 filter·정렬, pagination, 512KiB 응답 상한, 콘텐츠 ETag와 구조화된 query·method 오류를 추가했다.
+- 원문 토큰을 파일이나 명령 기록에 저장하지 않고 production 인증·조회·ETag·mutation 차단을 확인하는 PowerShell 검증 도구를 추가했다.
 
 ### Changed
 
@@ -32,6 +33,7 @@
 - 비밀번호 관리자에 보관한 원문 토큰으로 production `/api/v1/auth/status`가 `200`과 `authenticated: true`를 반환함을 확인했다.
 - 합성 SQLite DB에서 migration manifest 원문 비노출, read-only snapshot 비교, 지원하지 않는 schema 거부, rollback 후 논리 일치를 확인했다.
 - 합성 cloud DB에서 read-only API 인증·DTO Schema·filter·pagination·ETag·응답 상한·mutation 차단 contract를 확인했다.
+- Railway production에서 인증된 tasks 조회 `200`, ETag 재검증 `304`, mutation 요청 `405 METHOD_NOT_ALLOWED`, 빈 cloud DB 유지를 확인했다.
 
 ## [0.1.5]
 

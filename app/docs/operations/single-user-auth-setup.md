@@ -93,9 +93,19 @@ finally {
 
 명령 기록에는 토큰 원문이 남지 않는다.
 
+STEP 7 read-only API까지 한 번에 검증하려면 저장소에 포함된 도구를 실행한다.
+
+```powershell
+Set-Location 'C:\Users\tkfk0\Desktop\codex\TM\app'
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File '.\scripts\verify-step7-production.ps1'
+```
+
+도구는 인증 상태, tasks 조회, ETag `304`, mutation `405`와 보안 header를 확인한다. 토큰 원문은 저장하지 않으며 결과 파일에는 상태 코드와 반환 개수만 기록한다.
+
 ## 2026-07-16 production 검증
 
-- 배포 ID: `b49163c3-d882-41c0-9f98-e9e77d0ecae0`, 상태 `SUCCESS`
+- 인증 기반 배포 ID: `b49163c3-d882-41c0-9f98-e9e77d0ecae0`, 상태 `SUCCESS`
+- STEP 7 read-only API 배포 ID: `d229020e-8d50-47d8-bcc8-782ac5909a49`, 상태 `SUCCESS`
 - 실행 프로필: `cloud-authenticated`
 - 실행 구성: `multiRegionConfig: null`, singleton 인스턴스 1개
 - Volume: `/var/lib/tm`, 5 GB, `Ready`
@@ -104,6 +114,9 @@ finally {
 - 토큰 없음, 잘못된 토큰, 비인증 미등록 경로: `401`
 - `Cache-Control: no-store`, CSP, HSTS, `nosniff`, frame·referrer 차단 header 확인
 - 원문 토큰을 사용자 보안 입력으로 전달해 `/api/v1/auth/status`의 `200`과 `authenticated: true` 확인
+- 인증된 `/api/v1/tasks`는 빈 cloud DB에서 `200`, `returned: 0`, `total: 0` 반환
+- 동일 ETag의 `If-None-Match` 요청은 `304`, 인증된 `POST /api/v1/tasks`는 `405 METHOD_NOT_ALLOWED` 반환
+- STEP 7 재배포 전후 SQLite 최초 초기화 시각 `2026-07-14T01:51:35.117Z` 유지
 
 ## 회전과 긴급 폐기
 

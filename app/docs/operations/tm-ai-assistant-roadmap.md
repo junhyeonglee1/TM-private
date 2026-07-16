@@ -70,7 +70,7 @@ API 키와 비밀번호는 채팅, Git, 소스 파일 또는 일반 로그에 �
 | 4 | 클라우드 실행 환경 결정과 최소 배포 기반 준비 | 완료 |
 | 5 | 단일 사용자 인증과 원격 접근 보호 | 완료 |
 | 6 | 데이터 기준 원본과 migration 안전 설계 | 완료 |
-| 7 | 인증된 read-only TM 데이터 API | 진행 중 |
+| 7 | 인증된 read-only TM 데이터 API | 완료 |
 | 8 | 통제된 write API와 감사 기록 | 대기 |
 | 9 | 백업·복구·모니터링·비용 안전장치 | 대기 |
 | 10 | 데스크톱 cloud mode와 일회성 cutover | 대기 |
@@ -318,7 +318,7 @@ Codex TODO:
 
 ## STEP 7 — 인증된 read-only TM 데이터 API
 
-상태: 진행 중
+상태: 완료
 
 Codex 권장 기본안:
 
@@ -340,16 +340,22 @@ Codex TODO:
 - [x] version/ETag와 일관된 오류 contract 구현
 - [x] 인증·rate limit·request ID·metadata-only 감사 조회 기록 연결
 - [x] 합성 데이터 기반 contract·권한·회귀 테스트
-- [ ] production 배포 후 비인증 `401`, 허용 조회 `200`, mutation 부재 확인
+- [x] production 배포 후 비인증 `401`, 허용 조회 `200`, mutation 부재 확인
 
 계약 문서: [인증된 read-only TM API v1](../architecture/read-only-api-v1.md)
 
-로컬 검증 기록:
+검증 기록:
 
 - 실제 사용자 DB와 Railway 운영 DB를 사용하지 않고 합성 임시 DB만 사용했다.
 - `tm-server` 24개 테스트에서 인증, 7개 collection, DTO/JSON Schema 일치, query allowlist, ETag, 405, 413을 확인했다.
 - frontend lint·typecheck·17개 테스트와 Rust fmt·workspace clippy·72개 테스트가 모두 통과했다.
-- production 배포와 원격 검증은 STEP 7 소스 업로드 승인 후 수행한다.
+- 2026-07-16 Railway production 배포 `d229020e-8d50-47d8-bcc8-782ac5909a49`가 `SUCCESS`로 완료됐다.
+- `/var/lib/tm` Volume은 `Ready`이며 이전 배포와 SQLite 최초 초기화 시각이 같아 재배포 중 데이터가 유지됐다.
+- 공개 health/readiness는 `200`, 토큰 없음·잘못된 토큰은 `401`을 반환했다.
+- 사용자 보안 입력 토큰으로 인증 상태와 빈 cloud DB의 tasks 조회가 `200`을 반환했다.
+- 동일 ETag 재조회는 `304`, 인증된 `POST /api/v1/tasks`는 `405 METHOD_NOT_ALLOWED`를 반환했다.
+- read-only 응답의 `Cache-Control: no-store`와 HSTS를 확인했고 토큰 원문은 파일·로그에 저장하지 않았다.
+- 실제 사용자 데이터 이동과 OpenAI 호출은 수행하지 않았다.
 
 완료 게이트:
 
