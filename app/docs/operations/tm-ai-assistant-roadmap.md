@@ -1,6 +1,6 @@
 # TM AI 비서 시스템 구축 로드맵
 
-마지막 갱신: 2026-07-14
+마지막 갱신: 2026-07-16
 
 진행 원칙: 기능을 먼저 늘리지 않고, 안전한 서버·클라우드·AI 실행 기반을 선행 구축한다.
 
@@ -40,6 +40,25 @@ TM을 일정, 운동, 소비, 자산 등의 개인 정보를 다루는 단일 �
 
 API 키와 비밀번호는 채팅, Git, 소스 파일 또는 일반 로그에 기록하지 않는다.
 
+## 2026-07-16 개편 기준
+
+- 한 STEP에는 하나의 주요 위험과 하나의 Git 체크포인트만 둔다.
+- 읽기 경계를 먼저 완성한 뒤 쓰기 권한을 추가한다.
+- 로컬 DB는 통제된 cutover 전까지 기준 원본으로 유지한다.
+- 양방향 동기화와 dual-write는 초기 기본안에서 제외한다.
+- 실데이터를 클라우드로 옮기기 전에 백업·복구·모니터링을 준비한다.
+- OpenAI 오케스트레이터는 데이터 API와 비용 제한이 완성된 뒤 연결한다.
+- 사용자는 결정 게이트만 승인하고 구현·배포·검증·커밋은 Codex가 수행한다.
+
+## 구축 Phase
+
+| Phase | STEP | 목표 |
+| --- | --- | --- |
+| A. 기반 | 0–5 | 로컬 서버, OpenAI 연결 경계, Railway, 단일 사용자 인증 |
+| B. 데이터 | 6–10 | 기준 원본, 읽기·쓰기 API, 운영 안전장치, 데스크톱 cloud cutover |
+| C. AI | 11–14 | read-only 오케스트레이터, 실행 승인, 기억, 스케줄러 |
+| D. 사용 | 15–17 | 모바일·기기 인증, 최종 보안 강화, 첫 실제 비서 기능 |
+
 ## 전체 상태
 
 | STEP | 내용 | 상태 |
@@ -50,16 +69,18 @@ API 키와 비밀번호는 채팅, Git, 소스 파일 또는 일반 로그에 �
 | 3 | OpenAI API 비밀키 경계와 실제 연결 확인 | 완료 |
 | 4 | 클라우드 실행 환경 결정과 최소 배포 기반 준비 | 완료 |
 | 5 | 단일 사용자 인증과 원격 접근 보호 | 완료 |
-| 6 | TM 데이터 API 경계와 동기화 규칙 | 대기 |
-| 7 | AI 비서 오케스트레이터 기본 구조 | 대기 |
-| 8 | 도구 실행·승인·취소 정책 | 대기 |
-| 9 | 장기 기억·요약·컨텍스트 관리 | 대기 |
-| 10 | 스케줄러·작업 큐·정기 실행 기반 | 대기 |
-| 11 | 모바일·원격 클라이언트 연결 | 대기 |
-| 12 | 사용량·비용·로그·모니터링 | 대기 |
-| 13 | 클라우드 백업·복구·재해 대응 | 대기 |
-| 14 | 보안 강화와 운영 전 점검 | 대기 |
-| 15 | 프로덕션 전환과 첫 실제 비서 기능 선정 | 대기 |
+| 6 | 데이터 기준 원본과 migration 안전 설계 | 대기 |
+| 7 | 인증된 read-only TM 데이터 API | 대기 |
+| 8 | 통제된 write API와 감사 기록 | 대기 |
+| 9 | 백업·복구·모니터링·비용 안전장치 | 대기 |
+| 10 | 데스크톱 cloud mode와 일회성 cutover | 대기 |
+| 11 | Cloud OpenAI와 read-only 오케스트레이터 | 대기 |
+| 12 | 실행 승인·취소·도구 정책 | 대기 |
+| 13 | 장기 기억·검색·컨텍스트 예산 | 대기 |
+| 14 | 스케줄러·작업 큐·정기 실행 기반 | 대기 |
+| 15 | 모바일·원격 클라이언트와 기기 인증 | 대기 |
+| 16 | 보안 강화·사고 대응·운영 준비 | 대기 |
+| 17 | 첫 실제 AI 비서 기능 | 대기 |
 
 ## STEP 0 — 현재 기준선 확인
 
@@ -253,229 +274,374 @@ Codex Action Item:
 - 등록된 사용자와 기기만 TM 서버에 접근할 수 있다.
 - URL을 아는 것만으로는 어떤 개인 데이터나 AI 호출에도 접근할 수 없다.
 
-## STEP 6 — TM 데이터 API 경계
+## STEP 6 — 데이터 기준 원본과 migration 안전 설계
 
 상태: 대기
 
-사용자 결정:
+Codex 권장 기본안:
 
-- [ ] 첫 원격 공개 데이터 범위 선택
-- [ ] 읽기와 쓰기 권한을 기능별로 분리
-- [ ] 삭제·금전·외부 전송 작업은 기본 차단할지 확정
-- [ ] 로컬 DB와 클라우드 DB의 기준 원본을 선택
+- 단일 사용자·singleton 구조에서는 Railway Volume의 SQLite를 유지하고 Postgres 전환은 보류한다.
+- STEP 10의 통제된 cutover 전까지 현재 로컬 DB를 기준 원본으로 유지한다.
+- 초기에는 양방향 동기화와 dual-write를 구현하지 않는다.
+- 실데이터 이동 없이 합성 fixture와 복제본으로 migration을 먼저 검증한다.
+- OpenAI와 TM 데이터 route는 이 STEP에서 production에 활성화하지 않는다.
 
-Codex Action Item:
+사용자 결정 게이트:
 
-- [ ] `tm-core` 서비스만 호출하는 typed API 구현
-- [ ] SQL 직접 노출 금지
-- [ ] 최소 필드·페이지네이션·입력 크기 제한 적용
-- [ ] 낙관적 잠금과 중복 요청 방지 키 구현
-- [ ] 변경 이력과 감사 이벤트 기록
-- [ ] 로컬·클라우드 동기화 충돌 정책 구현
+- [ ] SQLite Volume singleton 유지 승인
+- [ ] `로컬 기준 → 일회성 cloud cutover → cloud 기준` 정책 승인
+- [ ] STEP 6에서는 실데이터를 복사하지 않고 dry-run만 수행하는 범위 승인
 
-완료 조건:
+Codex TODO:
 
-- 허용된 데이터만 인증된 API로 읽고 쓸 수 있고 모든 변경을 추적할 수 있다.
+- [ ] 현재 schema, aggregate, 관계, 불변 조건 inventory 작성
+- [ ] 개인정보·민감정보·운영 metadata 분류표 작성
+- [ ] schema version, row count, 논리 checksum을 포함한 migration manifest 설계
+- [ ] 일관된 SQLite snapshot과 무결성 검사 절차 구현
+- [ ] import 전 preflight와 import 후 비교 검증 구현
+- [ ] 합성 fixture로 export/import/rollback 반복 테스트
+- [ ] cutover 실패 시 로컬 DB로 복귀하는 runbook 작성
 
-## STEP 7 — AI 비서 오케스트레이터
+완료 게이트:
+
+- 실데이터를 이동하지 않고도 migration과 rollback이 반복 검증된다.
+- 기준 원본이 동시에 두 곳에 존재하지 않는 전환 정책이 문서화된다.
+
+## STEP 7 — 인증된 read-only TM 데이터 API
 
 상태: 대기
 
-사용자 결정:
+Codex 권장 기본안:
 
-- [ ] AI가 자동으로 판단할 수 있는 범위 결정
-- [ ] 답변만 하는 요청과 실행 가능한 요청 구분
-- [ ] 기본 응답 스타일과 리포트 길이 결정
+- 첫 읽기 범위는 project, task, checklist, tag, note, session, worklog로 제한한다.
+- DB 파일, SQL, 파일 경로, backup 원문, 내부 인증·감사 정보는 노출하지 않는다.
+- production은 빈 cloud DB로 검증하고 실제 사용자 데이터는 아직 복사하지 않는다.
 
-Codex Action Item:
+사용자 결정 게이트:
 
-- [ ] 사용자 요청 분류기 구현
-- [ ] 읽기·계획·실행 단계를 분리한 오케스트레이터 구현
-- [ ] 필요한 TM 도구만 선택적으로 모델에 제공
-- [ ] 도구 입력·출력 JSON schema 고정
-- [ ] 반복 호출·무한 루프·과도한 비용 제한
-- [ ] 실패 시 안전한 중단과 사용자 설명 구현
+- [ ] 첫 read-only entity 범위 승인
+- [ ] OpenAI에 절대 전달하지 않을 필드와 데이터 유형 승인
 
-완료 조건:
+Codex TODO:
 
-- AI가 직접 DB를 수정하지 않고, 허용된 TM 도구를 통해서만 작업한다.
+- [ ] 내부 model과 분리된 versioned DTO·JSON schema 정의
+- [ ] `tm-core` query만 호출하는 typed GET API 구현
+- [ ] field allowlist와 민감 필드 redaction 적용
+- [ ] pagination, filter allowlist, 정렬, 응답 크기 상한 적용
+- [ ] version/ETag와 일관된 오류 contract 구현
+- [ ] 인증·rate limit·request ID·감사 조회 기록 연결
+- [ ] 합성 데이터 기반 contract·권한·회귀 테스트
+- [ ] production 배포 후 비인증 `401`, 허용 조회 `200`, mutation 부재 확인
 
-## STEP 8 — 실행 승인과 안전 정책
+완료 게이트:
+
+- 허용된 필드만 인증된 API에서 읽을 수 있고 원격 mutation은 존재하지 않는다.
+
+## STEP 8 — 통제된 write API와 감사 기록
+
+상태: 대기
+
+Codex 권장 기본안:
+
+- 첫 쓰기 범위는 task·note 생성/수정과 checklist 상태 변경으로 제한한다.
+- 영구 삭제, 금전, 외부 전송, 계정·권한 변경은 구현하지 않는다.
+- 모든 mutation은 idempotency key와 예상 version을 요구한다.
+
+사용자 결정 게이트:
+
+- [ ] 첫 mutation entity·동작 범위 승인
+- [ ] 삭제·금전·외부 전송·권한 변경 기본 금지 승인
+
+Codex TODO:
+
+- [ ] `tm-core` command만 호출하는 typed mutation API 구현
+- [ ] 입력 길이·개수·형식·상태 전이 validation 적용
+- [ ] idempotency key 저장과 중복 결과 재사용 구현
+- [ ] optimistic concurrency와 conflict 응답 구현
+- [ ] actor, request ID, before/after, 결과를 append-only 감사 이벤트로 기록
+- [ ] transaction rollback·동시 요청·중복 제출 통합 테스트
+- [ ] mutation별 향후 승인 정책을 연결할 hook 정의
+
+완료 게이트:
+
+- 허용된 mutation만 실행되며 중복·충돌·실패가 데이터 불일치를 만들지 않는다.
+- 모든 원격 변경의 주체와 전후 상태를 추적할 수 있다.
+
+## STEP 9 — 백업·복구·모니터링·비용 안전장치
+
+상태: 대기
+
+Codex 권장 기본안:
+
+- 실데이터 cutover 전에 Volume 외부 백업과 실제 복구 훈련을 완료한다.
+- staging과 production을 분리한 뒤 production에 실데이터를 넣는다.
+- OpenAI 연결 전부터 요청량·오류율·지연·저장소 사용량을 관측한다.
+
+사용자 결정 게이트:
+
+- [ ] 외부 backup 저장소와 필요한 결제 승인
+- [ ] backup 보존 기간과 허용 가능한 데이터 손실 시간 승인
+- [ ] Railway·OpenAI 월 비용 경고선과 hard stop 기준 승인
+
+Codex TODO:
+
+- [ ] 일관된 SQLite backup과 외부 암호화 저장 구현
+- [ ] 일·주·월 retention과 자동 무결성 검사 구현
+- [ ] 빈 환경에서 backup restore 훈련과 checksum 검증
+- [ ] staging environment와 배포 승격 절차 구축
+- [ ] API latency·오류율·rate limit·Volume 사용량 관측
+- [ ] OpenAI 요청별 token·비용 기록 schema와 예산 차단 장치 준비
+- [ ] 로그 redaction과 request ID 기반 추적 검증
+- [ ] 장애·비용 초과 알림 경로 구성
+
+완료 게이트:
+
+- Volume이나 배포 환경이 사라져도 검증된 backup으로 복구할 수 있다.
+- 비용과 장애를 감지하고 설정한 기준에서 알림 또는 중단할 수 있다.
+
+## STEP 10 — 데스크톱 cloud mode와 일회성 cutover
+
+상태: 대기
+
+Codex 권장 기본안:
+
+- 데스크톱에 명시적인 local/cloud mode를 두고 자동 background sync는 만들지 않는다.
+- 전환 중 로컬 쓰기를 잠시 멈추고 snapshot을 cloud로 한 번만 import한다.
+- 검증 후 cloud DB를 기준 원본으로 전환하고 기존 로컬 DB는 read-only archive로 보존한다.
+- 실패하면 maintenance window 안에서 local mode로 복귀한다.
+
+사용자 결정 게이트:
+
+- [ ] 실제 TM 데이터를 Railway로 복사하는 것 승인
+- [ ] cloud DB를 새 기준 원본으로 전환하는 것 승인
+- [ ] cutover 시간과 허용 가능한 일시 중단 시간 승인
+- [ ] cloud에서 제외할 민감 데이터가 있는지 확정
+
+Codex TODO:
+
+- [ ] 인증된 HTTPS desktop client와 오류 contract 구현
+- [ ] 인증 토큰을 OS 보안 저장소에 보관하고 로그·UI 노출 차단
+- [ ] local/cloud mode 전환 UI와 잘못된 동시 실행 차단
+- [ ] 최종 local backup·무결성 검사·write freeze 수행
+- [ ] migration manifest로 cloud import와 row/checksum 비교
+- [ ] 기존 TM 기능 전체를 cloud mode에서 회귀 검증
+- [ ] rollback 훈련 후 cloud 기준 전환과 local archive 생성
+
+완료 게이트:
+
+- 현재 데스크톱 기능이 cloud 기준 DB에서 정상 동작한다.
+- local/cloud 양쪽에 서로 다른 최신 데이터가 생기지 않는다.
+
+## STEP 11 — Cloud OpenAI와 read-only 오케스트레이터
+
+상태: 대기
+
+Codex 권장 기본안:
+
+- OpenAI API key는 Railway sealed variable로만 입력하고 DB·응답·로그에 저장하지 않는다.
+- Responses API, `store: false`, model allowlist와 요청별 token·비용 상한을 유지한다.
+- 첫 오케스트레이터에는 read-only TM 도구만 제공하고 mutation 도구는 등록하지 않는다.
+- 전체 DB 대신 필요한 최소 레코드와 요약만 모델에 전달한다.
+
+사용자 결정 게이트:
+
+- [ ] OpenAI에 전달 가능한 데이터 범위 승인
+- [ ] 기본 model과 요청별·일별·월별 비용 상한 승인
+- [ ] 답변 스타일과 기본 리포트 길이 승인
+- [ ] Railway에 OpenAI API key 입력
+
+Codex TODO:
+
+- [ ] cloud 전용 OpenAI client와 sealed secret 검증 경계 구현
+- [ ] 사용자 요청을 답변·조회·계획으로 구분하는 intent contract 구현
+- [ ] read-only tool schema와 결과 크기 제한 정의
+- [ ] 계획과 실행을 분리하고 실행 요청은 무조건 보류 상태로 반환
+- [ ] prompt version, model, token usage, 비용 추정, request ID 기록
+- [ ] 반복 tool call·무한 루프·timeout·예산 초과 차단
+- [ ] prompt injection과 tool output 오염에 대한 격리 테스트
+- [ ] production 최소 비용 end-to-end probe 수행
+
+완료 게이트:
+
+- AI가 TM 데이터를 최소 범위로 읽고 설명할 수 있지만 어떤 데이터도 변경할 수 없다.
+
+## STEP 12 — 실행 승인·취소·도구 정책
 
 상태: 대기
 
 권장 권한 등급:
 
 1. 자동 허용: 검색, 조회, 요약, 분석
-2. 사전 승인: 일정 추가, 메모 작성, 상태 변경
-3. 강화 승인: 외부 메시지 전송, 금전 관련 작업, 민감정보 공유
-4. 기본 금지: 영구 삭제, 결제, 계정 권한 변경
+2. 사전 승인: task·note 생성, 상태 변경
+3. 강화 승인: 외부 메시지, 민감정보 공유, 금전 관련 준비
+4. 기본 금지: 영구 삭제, 결제 실행, 계정·권한 변경
 
-Action Item:
+사용자 결정 게이트:
 
-- [ ] 실행 전 미리보기와 영향 범위 표시
-- [ ] 승인·거절·취소·만료 상태 구현
-- [ ] 동일 요청 중복 실행 차단
-- [ ] 실행 결과와 되돌리기 가능 여부 표시
-- [ ] 감사 로그와 비가역 이벤트 기록
+- [ ] 권한 등급과 각 동작의 배치 승인
+- [ ] 첫 실행 도구 1개와 승인 유효 시간 승인
+- [ ] 자동 실행을 허용할 read-only 범위 승인
 
-완료 조건:
+Codex TODO:
 
-- AI가 중요한 작업을 사용자 모르게 실행할 수 없다.
+- [ ] preview, 영향 범위, 비용, 되돌리기 가능 여부 표시
+- [ ] approval 요청·승인·거절·취소·만료 상태 machine 구현
+- [ ] 승인 revision과 실행 payload를 해시로 고정
+- [ ] 동일 승인·요청의 중복 실행 차단
+- [ ] 실행 전 권한과 최신 version 재검증
+- [ ] 결과·실패·부분 실행·rollback metadata 감사 기록
+- [ ] 첫 low-risk mutation tool을 end-to-end로 검증
 
-## STEP 9 — 장기 기억과 컨텍스트 관리
+완료 게이트:
 
-상태: 대기
+- AI가 중요한 작업을 사용자 모르게 실행하거나 승인 후 내용을 바꿀 수 없다.
 
-사용자 결정:
-
-- [ ] 장기 기억으로 저장할 정보 범위
-- [ ] 자동 저장과 명시적 저장 구분
-- [ ] 기억 보존 기간과 삭제 정책
-- [ ] OpenAI로 전송하지 않을 민감정보 범위
-
-Codex Action Item:
-
-- [ ] 원본 데이터와 AI용 요약 분리
-- [ ] 전체 기록 대신 관련 항목만 검색하는 retrieval 구현
-- [ ] 일·주·월 요약 계층 구현
-- [ ] 컨텍스트 토큰 상한 적용
-- [ ] 기억 조회·수정·삭제 UI와 감사 기록 구현
-
-완료 조건:
-
-- 데이터가 늘어도 매 요청마다 전체 이력을 보내지 않으며 비용과 개인정보 노출이 통제된다.
-
-## STEP 10 — 스케줄러와 정기 실행
+## STEP 13 — 장기 기억·검색·컨텍스트 예산
 
 상태: 대기
 
-사용자 결정:
+Codex 권장 기본안:
 
-- [ ] 하루 1회 또는 3~4회 등 기본 실행 빈도
-- [ ] 시간대와 방해 금지 시간
-- [ ] 실패 시 재시도와 알림 기준
+- 원본 데이터와 AI용 기억·요약을 별도 schema로 분리한다.
+- 초기 retrieval은 SQLite FTS와 구조화 filter를 사용하고 별도 vector 서비스는 보류한다.
+- 자동 장기 기억보다 명시적 저장을 먼저 제공한다.
+- 요청마다 전체 이력을 보내지 않고 token budget 안에서 관련 항목만 선택한다.
 
-Codex Action Item:
+사용자 결정 게이트:
 
-- [ ] 지속 실행 worker 또는 cron 구조 선택
-- [ ] 작업 큐·lease·중복 방지 구현
-- [ ] 실패 재시도와 dead-letter 상태 구현
-- [ ] Asia/Seoul 일정과 UTC 저장 규칙 검증
-- [ ] 테스트용 단일 정기 작업 구현
+- [ ] 장기 기억으로 저장할 정보 범위 승인
+- [ ] 자동 저장과 명시적 저장 정책 승인
+- [ ] 보존 기간·삭제 정책과 OpenAI 전송 금지 정보 승인
 
-완료 조건:
+Codex TODO:
 
-- 서버 재시작과 중복 실행 상황에서도 정기 작업이 한 번만 안전하게 처리된다.
+- [ ] memory source, provenance, sensitivity, retention schema 구현
+- [ ] 구조화 filter와 FTS 기반 retrieval 구현
+- [ ] 일·주·월 요약 계층과 재생성 규칙 구현
+- [ ] 요청 종류별 context·token 상한과 truncation 정책 적용
+- [ ] 기억 조회·수정·삭제와 감사 이벤트 구현
+- [ ] 삭제된 원본의 파생 기억 정리와 retention job 구현
+- [ ] 장기 데이터 규모와 비용 회귀 테스트
 
-## STEP 11 — 모바일·원격 클라이언트
+완료 게이트:
+
+- 데이터가 늘어도 관련 정보만 제한된 비용으로 사용하고 기억의 출처·수정·삭제를 추적할 수 있다.
+
+## STEP 14 — 스케줄러·작업 큐·정기 실행 기반
 
 상태: 대기
 
-사용자 결정:
+Codex 권장 기본안:
 
-- [ ] PWA, 모바일 앱 또는 기존 TM 확장 중 첫 클라이언트 선택
-- [ ] 알림 채널 선택
-- [ ] 오프라인 사용 범위 결정
+- Volume singleton 제약에 맞춰 같은 서버 안의 DB-backed scheduler부터 시작한다.
+- job, attempt, lease, idempotency, dead-letter 상태를 SQLite에 기록한다.
+- 시각은 UTC로 저장하고 사용자 일정은 `Asia/Seoul`로 계산한다.
+- 실제 비서 알림 대신 비용이 없는 내부 검증 job으로 먼저 시험한다.
 
-Codex Action Item:
+사용자 결정 게이트:
 
-- [ ] 인증된 HTTPS API client 구현
-- [ ] 기기 등록·해제와 세션 관리
+- [ ] 기본 실행 빈도와 방해 금지 시간 승인
+- [ ] 실패 재시도·dead-letter·사용자 알림 기준 승인
+- [ ] 서버 재시작 후 놓친 작업 처리 방식 승인
+
+Codex TODO:
+
+- [ ] durable job·attempt·lease schema 구현
+- [ ] 중복 claim 방지와 lease 만료 복구 구현
+- [ ] exponential backoff와 dead-letter 상태 구현
+- [ ] UTC/KST·DST 경계와 missed-run 정책 테스트
+- [ ] 배포·재시작·장애 상황의 exactly-once effect 검증
+- [ ] queue depth·실패율·지연 모니터링 연결
+- [ ] 무과금 내부 정기 작업을 production에서 검증
+
+완료 게이트:
+
+- 서버 재시작과 중복 실행 상황에서도 정기 작업의 효과가 한 번만 안전하게 반영된다.
+
+## STEP 15 — 모바일·원격 클라이언트와 기기 인증
+
+상태: 대기
+
+Codex 권장 기본안:
+
+- 첫 원격 클라이언트는 설치 부담이 낮은 PWA로 시작한다.
+- 하나의 공용 장기 토큰 대신 기기별 토큰 해시·만료·폐기 기록으로 확장한다.
+- 초기 PWA는 온라인 전용으로 두고 offline mutation은 보류한다.
+- CORS는 배포된 PWA origin 하나만 정확히 허용한다.
+
+사용자 결정 게이트:
+
+- [ ] PWA, native mobile 또는 다른 hardware client 선택
+- [ ] 기기 등록 승인 방식과 분실 기기 폐기 방식 승인
+- [ ] 알림 채널과 offline 사용 범위 승인
+
+Codex TODO:
+
+- [ ] 기기 등록·목록·폐기·만료 API와 감사 기록 구현
+- [ ] OS/browser 보안 저장소에 token을 저장하고 UI·로그 노출 차단
+- [ ] exact-origin CORS와 CSRF·replay 경계 검증
 - [ ] 네트워크 끊김·재시도·중복 제출 처리
-- [ ] 민감 데이터 로컬 저장 최소화
-- [ ] 작은 화면용 최소 비서 인터페이스 구현
+- [ ] 작은 화면용 최소 비서 UI 구현
+- [ ] 원격 기기 폐기와 token rotation end-to-end 훈련
+- [ ] 로컬 PC가 꺼진 상태에서 cloud 접근 검증
 
-완료 조건:
+완료 게이트:
 
-- 로컬 PC가 꺼져 있어도 모바일 또는 다른 하드웨어에서 클라우드 TM에 접근할 수 있다.
+- 등록된 기기만 cloud TM에 접근하고 분실 기기를 독립적으로 즉시 폐기할 수 있다.
 
-## STEP 12 — 비용과 모니터링
-
-상태: 대기
-
-Action Item:
-
-- [ ] 요청별 모델·입력·출력·캐시 토큰 기록
-- [ ] 일·월 API 비용 추정과 한도 설정
-- [ ] 클라우드 사용량 알림과 hard limit 설정
-- [ ] latency·오류율·재시도·queue depth 관측
-- [ ] 로그에 API 키·개인 원문·인증 토큰이 없는지 검사
-- [ ] request ID로 TM 요청과 OpenAI 요청 추적
-
-완료 조건:
-
-- 비용 증가와 장애를 사용자가 확인할 수 있고 설정한 한도를 넘기기 전에 알림 또는 중단이 작동한다.
-
-## STEP 13 — 클라우드 백업과 복구
+## STEP 16 — 보안 강화·사고 대응·운영 준비
 
 상태: 대기
 
-사용자 결정:
+사용자 결정 게이트:
 
-- [ ] 백업 보존 기간
-- [ ] 별도 저장소와 암호화 방식
-- [ ] 허용 가능한 데이터 손실 시간과 복구 시간
+- [ ] 장애·침해·비용 초과 알림 수신 채널 승인
+- [ ] 허용 가능한 복구 시간과 서비스 중단 기준 승인
 
-Codex Action Item:
+Codex TODO:
 
-- [ ] SQLite 일관성 백업 구현
-- [ ] Volume 외부의 별도 저장소에 암호화 백업
-- [ ] 일·주·월 retention 적용
-- [ ] 자동 무결성 검사
-- [ ] 새 서버에서 실제 복구 훈련
-- [ ] API 키와 인증 토큰은 DB 백업과 분리
+- [ ] 최신 위협 model과 데이터 흐름 검토
+- [ ] 의존성 취약점·컨테이너 이미지·secret scan 자동화
+- [ ] TLS·header·rate limit·입력 제한·권한 우회 재검증
+- [ ] API key·인증 token·기기 token 회전 훈련
+- [ ] CSRF·replay·중복 실행·prompt injection 공격 테스트
+- [ ] backup restore와 production rollback 모의훈련
+- [ ] 사고 시 domain 차단·secret 폐기·복구 runbook 작성
+- [ ] 운영 dashboard, SLO, 비용 ceiling, 배포 checklist 확정
 
-완료 조건:
+완료 게이트:
 
-- 클라우드 프로젝트나 Volume이 사라져도 새 환경에서 검증된 절차로 복구할 수 있다.
+- 알려진 주요 위험과 장애 시나리오가 테스트되고 중지·폐기·복구 절차가 실제로 작동한다.
 
-## STEP 14 — 보안 강화와 운영 점검
-
-상태: 대기
-
-Action Item:
-
-- [ ] 위협 모델과 데이터 흐름 검토
-- [ ] 의존성 취약점·컨테이너 이미지 검사
-- [ ] TLS·보안 헤더·rate limit·입력 제한 검증
-- [ ] API 키·인증 토큰 회전 훈련
-- [ ] 권한 우회·CSRF·중복 실행·prompt injection 테스트
-- [ ] 장애·침해 발생 시 중지·폐기·복구 절차 작성
-- [ ] 프로덕션 체크리스트와 롤백 검증
-
-완료 조건:
-
-- 공개 운영 전에 알려진 주요 위험이 테스트되고 대응 절차가 문서화된다.
-
-## STEP 15 — 프로덕션 전환과 첫 기능
+## STEP 17 — 첫 실제 AI 비서 기능
 
 상태: 대기
-
-사용자 결정:
-
-- [ ] 첫 실제 비서 기능 하나 선택
-- [ ] 성공 기준과 허용 비용 설정
-- [ ] 자동화 수준 결정
 
 첫 기능 후보:
 
+- 오늘 할 일 우선순위 제안
 - 하루 일정 브리핑
 - 운동 기록 요약
 - 소비 내역 주간 분석
-- 오늘 할 일 우선순위 제안
 
-Codex Action Item:
+사용자 결정 게이트:
 
-- [ ] staging과 production 환경 분리
-- [ ] 최종 배포·복구·비용·보안 점검
-- [ ] 첫 기능을 최소 범위로 구현
-- [ ] 실제 사용 결과와 비용 측정
-- [ ] 다음 기능 추가 여부 결정
+- [ ] 첫 기능 1개와 성공 기준 승인
+- [ ] 허용 비용·실행 빈도·자동화 수준 승인
+- [ ] 사용할 실제 데이터 범위와 알림 채널 승인
 
-완료 조건:
+Codex TODO:
 
-- 시스템 기반을 유지한 채 실제 비서 기능 하나가 안전하게 운영되고, 품질·비용·편의성을 측정할 수 있다.
+- [ ] 기존 API·오케스트레이터·승인·스케줄러만 이용해 최소 기능 구현
+- [ ] 기능 전용 권한·prompt·tool·비용 상한 정의
+- [ ] staging 검증 후 production 점진 활성화
+- [ ] 실제 품질·비용·실패·사용 편의성 측정
+- [ ] rollback과 기능 kill switch 검증
+- [ ] 측정 결과에 따라 다음 기능 추가 여부 보고
+
+완료 게이트:
+
+- 시스템 기반을 유지한 채 실제 비서 기능 하나가 안전하게 운영되고 품질·비용·편의성을 측정할 수 있다.
 
 ## 단계 진행 규칙
 
@@ -486,6 +652,6 @@ Codex Action Item:
 3. Codex가 코드, 클라우드 설정, 배포, 자동 테스트와 운영 검증을 수행한다.
 4. 사용자 기기의 비밀값이 필요한 동작만 사용자가 직접 확인한다.
 5. Codex가 문서를 갱신하고 로컬 Git 커밋으로 체크포인트를 만든다.
-7. 완료 조건을 충족한 뒤에만 다음 STEP을 시작한다.
+6. 완료 조건을 충족한 뒤에만 다음 STEP을 시작한다.
 
 인증·백업·비용 제한보다 실제 자동 실행 기능을 먼저 공개하지 않는다.
