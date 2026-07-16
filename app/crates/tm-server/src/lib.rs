@@ -4,6 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub mod auth;
 pub mod openai;
 
 use axum::{
@@ -19,18 +20,33 @@ use serde::Serialize;
 use tm_core::{HealthReport, TmCore};
 use uuid::Uuid;
 
+use crate::auth::{
+    AUTH_TOKEN_EXPIRY_ENV, AUTH_TOKEN_HASH_ENV, AuthConfig, AuthDecision, TokenAuthenticator,
+};
 use crate::openai::{OpenAiClient, OpenAiConfig, OpenAiError, OpenAiProbeResult};
 
 pub const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8787";
 pub const LOCAL_PROFILE: &str = "local";
 pub const CLOUD_BOOTSTRAP_PROFILE: &str = "cloud-bootstrap";
+pub const CLOUD_AUTHENTICATED_PROFILE: &str = "cloud-authenticated";
 const REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-request-id");
 const AI_CONFIRM_HEADER: HeaderName = HeaderName::from_static("x-tm-confirm-ai-call");
+const CACHE_CONTROL_HEADER: HeaderName = HeaderName::from_static("cache-control");
+const CONTENT_SECURITY_POLICY_HEADER: HeaderName =
+    HeaderName::from_static("content-security-policy");
+const REFERRER_POLICY_HEADER: HeaderName = HeaderName::from_static("referrer-policy");
+const RETRY_AFTER_HEADER: HeaderName = HeaderName::from_static("retry-after");
+const STRICT_TRANSPORT_SECURITY_HEADER: HeaderName =
+    HeaderName::from_static("strict-transport-security");
+const WWW_AUTHENTICATE_HEADER: HeaderName = HeaderName::from_static("www-authenticate");
+const X_CONTENT_TYPE_OPTIONS_HEADER: HeaderName = HeaderName::from_static("x-content-type-options");
+const X_FRAME_OPTIONS_HEADER: HeaderName = HeaderName::from_static("x-frame-options");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServerProfile {
     Local,
     CloudBootstrap,
+    CloudAuthenticated,
 }
 
 impl ServerProfile {
@@ -38,8 +54,9 @@ impl ServerProfile {
         match value {
             LOCAL_PROFILE => Ok(Self::Local),
             CLOUD_BOOTSTRAP_PROFILE => Ok(Self::CloudBootstrap),
+            CLOUD_AUTHENTICATED_PROFILE => Ok(Self::CloudAuthenticated),
             _ => Err(format!(
-                "TM_SERVER_PROFILE must be {LOCAL_PROFILE} or {CLOUD_BOOTSTRAP_PROFILE}"
+                "TM_SERVER_PROFILE must be {LOCAL_PROFILE}, {CLOUD_BOOTSTRAP_PROFILE}, or {CLOUD_AUTHENTICATED_PROFILE}"
             )),
         }
     }
@@ -50,6 +67,7 @@ impl fmt::Display for ServerProfile {
         match self {
             Self::Local => formatter.write_str(LOCAL_PROFILE),
             Self::CloudBootstrap => formatter.write_str(CLOUD_BOOTSTRAP_PROFILE),
+            Self::CloudAuthenticated => formatter.write_str(CLOUD_AUTHENTICATED_PROFILE),
         }
     }
 }
@@ -60,6 +78,7 @@ pub struct ServerConfig {
     pub bind_addr: SocketAddr,
     pub home: PathBuf,
     pub openai: OpenAiConfig,
+    pub auth: Option<AuthConfig>,
 }
 
 impl ServerConfig {
@@ -73,18 +92,18 @@ impl ServerConfig {
             return Err("TM_SERVER_HOME must be an absolute path".to_owned());
         }
 
-        let (bind_addr, openai) = match profile {
+        let (bind_addr, openai, auth) = match profile {
             ServerProfile::Local => {
                 let bind_addr = optional_env("TM_SERVER_BIND")?
                     .unwrap_or_else(|| DEFAULT_BIND_ADDR.to_owned())
                     .parse::<SocketAddr>()
                     .map_err(|error| format!("TM_SERVER_BIND is invalid: {error}"))?;
                 validate_bind_addr(profile, bind_addr)?;
-                (bind_addr, OpenAiConfig::from_env()?)
+                (bind_addr, OpenAiConfig::from_env()?, None)
             }
             ServerProfile::CloudBootstrap => {
                 require_railway_environment()?;
-                reject_cloud_bootstrap_overrides()?;
+                reject_cloud_overrides(true)?;
 
                 let volume_mount = required_path_env("RAILWAY_VOLUME_MOUNT_PATH")?;
                 validate_cloud_home(&home, &volume_mount)?;
@@ -97,7 +116,28 @@ impl ServerConfig {
                 }
                 let bind_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port));
                 validate_bind_addr(profile, bind_addr)?;
-                (bind_addr, OpenAiConfig::default())
+                (bind_addr, OpenAiConfig::default(), None)
+            }
+            ServerProfile::CloudAuthenticated => {
+                require_railway_environment()?;
+                reject_cloud_overrides(false)?;
+
+                let volume_mount = required_path_env("RAILWAY_VOLUME_MOUNT_PATH")?;
+                validate_cloud_home(&home, &volume_mount)?;
+
+                let port = required_env("PORT")?
+                    .parse::<u16>()
+                    .map_err(|error| format!("PORT is invalid: {error}"))?;
+                if port == 0 {
+                    return Err("PORT must be between 1 and 65535".to_owned());
+                }
+                let bind_addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port));
+                validate_bind_addr(profile, bind_addr)?;
+                (
+                    bind_addr,
+                    OpenAiConfig::default(),
+                    Some(AuthConfig::from_env()?),
+                )
             }
         };
 
@@ -106,6 +146,7 @@ impl ServerConfig {
             bind_addr,
             home,
             openai,
+            auth,
         })
     }
 }
@@ -149,6 +190,7 @@ struct ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        let status = self.status;
         let body = ErrorEnvelope {
             request_id: self.request_id,
             error: ErrorBody {
@@ -156,7 +198,19 @@ impl IntoResponse for ApiError {
                 message: self.message,
             },
         };
-        (self.status, Json(body)).into_response()
+        let mut response = (status, Json(body)).into_response();
+        if status == StatusCode::UNAUTHORIZED {
+            response.headers_mut().insert(
+                WWW_AUTHENTICATE_HEADER,
+                HeaderValue::from_static("Bearer realm=\"tm\", charset=\"UTF-8\""),
+            );
+        }
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            response
+                .headers_mut()
+                .insert(RETRY_AFTER_HEADER, HeaderValue::from_static("60"));
+        }
+        response
     }
 }
 
@@ -169,6 +223,11 @@ struct Liveness {
 }
 
 #[derive(Debug, Serialize)]
+struct CloudLiveness {
+    status: &'static str,
+}
+
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Readiness {
     status: &'static str,
@@ -176,6 +235,26 @@ struct Readiness {
     sqlite_version: String,
     journal_mode: String,
     checked_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CloudReadiness {
+    status: &'static str,
+    checked_at: String,
+}
+
+#[derive(Debug, Clone)]
+struct AuthenticatedSession {
+    token_expires_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AuthStatus {
+    authenticated: bool,
+    subject: &'static str,
+    token_expires_at: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -200,18 +279,39 @@ pub fn build_router_with_openai(core: TmCore, openai: OpenAiClient) -> Router {
         .route("/api/v1/ai/probe", post(ai_probe))
         .fallback(not_found)
         .with_state(AppState { core, openai })
+        .layer(middleware::from_fn(security_headers))
         .layer(middleware::from_fn(assign_request_id))
 }
 
 pub fn build_cloud_bootstrap_router(core: TmCore) -> Router {
     Router::new()
-        .route("/healthz", get(healthz))
-        .route("/readyz", get(readyz))
+        .route("/healthz", get(cloud_healthz))
+        .route("/readyz", get(cloud_readyz))
         .fallback(not_found)
         .with_state(AppState {
             core,
             openai: OpenAiClient::disabled(),
         })
+        .layer(middleware::from_fn(security_headers))
+        .layer(middleware::from_fn(assign_request_id))
+}
+
+pub fn build_cloud_authenticated_router(core: TmCore, auth: AuthConfig) -> Router {
+    let authenticator = TokenAuthenticator::new(auth);
+    Router::new()
+        .route("/healthz", get(cloud_healthz))
+        .route("/readyz", get(cloud_readyz))
+        .route("/api/v1/auth/status", get(auth_status))
+        .fallback(not_found)
+        .with_state(AppState {
+            core,
+            openai: OpenAiClient::disabled(),
+        })
+        .layer(middleware::from_fn_with_state(
+            authenticator,
+            authenticate_cloud_request,
+        ))
+        .layer(middleware::from_fn(security_headers))
         .layer(middleware::from_fn(assign_request_id))
 }
 
@@ -223,6 +323,13 @@ async fn healthz(Extension(request_id): Extension<RequestId>) -> impl IntoRespon
             service: "tm-server",
             version: env!("CARGO_PKG_VERSION"),
         },
+    })
+}
+
+async fn cloud_healthz(Extension(request_id): Extension<RequestId>) -> impl IntoResponse {
+    Json(ApiEnvelope {
+        request_id: request_id.0,
+        data: CloudLiveness { status: "ok" },
     })
 }
 
@@ -272,6 +379,58 @@ fn readiness_error(health: HealthReport, request_id: String) -> ApiError {
         ),
         request_id,
     }
+}
+
+async fn cloud_readyz(
+    State(state): State<AppState>,
+    Extension(request_id): Extension<RequestId>,
+) -> Result<Json<ApiEnvelope<CloudReadiness>>, ApiError> {
+    let error_request_id = request_id.0.clone();
+    let health = tokio::task::spawn_blocking(move || state.core.health())
+        .await
+        .map_err(|_| ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "READINESS_WORKER_FAILED",
+            message: "service readiness check failed".to_owned(),
+            request_id: error_request_id.clone(),
+        })?
+        .map_err(|_| ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "SERVICE_UNAVAILABLE",
+            message: "service is not ready".to_owned(),
+            request_id: error_request_id.clone(),
+        })?;
+
+    if !health.ok {
+        return Err(ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "SERVICE_NOT_READY",
+            message: "service is not ready".to_owned(),
+            request_id: error_request_id,
+        });
+    }
+
+    Ok(Json(ApiEnvelope {
+        request_id: request_id.0,
+        data: CloudReadiness {
+            status: "ready",
+            checked_at: health.checked_at,
+        },
+    }))
+}
+
+async fn auth_status(
+    Extension(request_id): Extension<RequestId>,
+    Extension(session): Extension<AuthenticatedSession>,
+) -> Json<ApiEnvelope<AuthStatus>> {
+    Json(ApiEnvelope {
+        request_id: request_id.0,
+        data: AuthStatus {
+            authenticated: true,
+            subject: "single-user",
+            token_expires_at: session.token_expires_at,
+        },
+    })
 }
 
 async fn ai_status(
@@ -324,13 +483,17 @@ async fn ai_probe(
 
 fn validate_bind_addr(profile: ServerProfile, bind_addr: SocketAddr) -> Result<(), String> {
     match profile {
-        ServerProfile::Local if !bind_addr.ip().is_loopback() => Err(
-            "TM_SERVER_BIND must use a loopback address until server authentication is implemented"
-                .to_owned(),
-        ),
-        ServerProfile::CloudBootstrap if !bind_addr.ip().is_unspecified() => Err(
-            "cloud-bootstrap must listen on Railway PORT using an unspecified address".to_owned(),
-        ),
+        ServerProfile::Local if !bind_addr.ip().is_loopback() => {
+            Err("the local profile must use a loopback TM_SERVER_BIND address".to_owned())
+        }
+        ServerProfile::CloudBootstrap | ServerProfile::CloudAuthenticated
+            if !bind_addr.ip().is_unspecified() =>
+        {
+            Err(
+                "cloud profiles must listen on Railway PORT using an unspecified address"
+                    .to_owned(),
+            )
+        }
         _ => Ok(()),
     }
 }
@@ -358,19 +521,20 @@ fn require_railway_environment() -> Result<(), String> {
     Ok(())
 }
 
-fn reject_cloud_bootstrap_overrides() -> Result<(), String> {
-    let forbidden = [
+fn reject_cloud_overrides(forbid_auth: bool) -> Result<(), String> {
+    let mut forbidden = vec![
         "TM_SERVER_BIND",
         "OPENAI_API_KEY",
         "TM_OPENAI_MODEL",
         "TM_OPENAI_BASE_URL",
         "TM_OPENAI_TIMEOUT_SECS",
     ];
+    if forbid_auth {
+        forbidden.extend([AUTH_TOKEN_HASH_ENV, AUTH_TOKEN_EXPIRY_ENV]);
+    }
     for name in forbidden {
         if optional_env(name)?.is_some() {
-            return Err(format!(
-                "{name} must not be set in cloud-bootstrap; AI and custom bind settings are disabled"
-            ));
+            return Err(format!("{name} must not be set for this cloud profile"));
         }
     }
     Ok(())
@@ -386,7 +550,7 @@ fn optional_env(name: &str) -> Result<Option<String>, String> {
 }
 
 fn required_env(name: &str) -> Result<String, String> {
-    optional_env(name)?.ok_or_else(|| format!("{name} must be set in cloud-bootstrap"))
+    optional_env(name)?.ok_or_else(|| format!("{name} must be set"))
 }
 
 fn required_path_env(name: &str) -> Result<PathBuf, String> {
@@ -453,6 +617,78 @@ async fn not_found(Extension(request_id): Extension<RequestId>) -> ApiError {
     }
 }
 
+async fn authenticate_cloud_request(
+    State(authenticator): State<TokenAuthenticator>,
+    Extension(request_id): Extension<RequestId>,
+    mut request: Request<Body>,
+    next: Next,
+) -> Response {
+    if matches!(request.uri().path(), "/healthz" | "/readyz") {
+        return next.run(request).await;
+    }
+
+    match authenticator.authorize(request.headers()) {
+        AuthDecision::Authenticated { expires_at } => {
+            request.extensions_mut().insert(AuthenticatedSession {
+                token_expires_at: expires_at.to_rfc3339(),
+            });
+            next.run(request).await
+        }
+        AuthDecision::AuthenticationRequired => ApiError {
+            status: StatusCode::UNAUTHORIZED,
+            code: "AUTHENTICATION_REQUIRED",
+            message: "a valid TM bearer token is required".to_owned(),
+            request_id: request_id.0,
+        }
+        .into_response(),
+        AuthDecision::TokenExpired => ApiError {
+            status: StatusCode::UNAUTHORIZED,
+            code: "AUTH_TOKEN_EXPIRED",
+            message: "the TM bearer token has expired".to_owned(),
+            request_id: request_id.0,
+        }
+        .into_response(),
+        AuthDecision::FailedAttemptRateLimited => ApiError {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "AUTHENTICATION_RATE_LIMITED",
+            message: "too many failed authentication attempts".to_owned(),
+            request_id: request_id.0,
+        }
+        .into_response(),
+        AuthDecision::RequestRateLimited => ApiError {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "API_RATE_LIMITED",
+            message: "authenticated request rate limit exceeded".to_owned(),
+            request_id: request_id.0,
+        }
+        .into_response(),
+    }
+}
+
+async fn security_headers(request: Request<Body>, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(CACHE_CONTROL_HEADER, HeaderValue::from_static("no-store"));
+    headers.insert(
+        CONTENT_SECURITY_POLICY_HEADER,
+        HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'"),
+    );
+    headers.insert(
+        REFERRER_POLICY_HEADER,
+        HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(
+        STRICT_TRANSPORT_SECURITY_HEADER,
+        HeaderValue::from_static("max-age=31536000"),
+    );
+    headers.insert(
+        X_CONTENT_TYPE_OPTIONS_HEADER,
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(X_FRAME_OPTIONS_HEADER, HeaderValue::from_static("DENY"));
+    response
+}
+
 async fn assign_request_id(mut request: Request<Body>, next: Next) -> Response {
     let request_id = request
         .headers()
@@ -496,16 +732,28 @@ mod tests {
         response::IntoResponse,
         routing::post,
     };
+    use chrono::{Duration as ChronoDuration, Utc};
     use serde_json::{Value, json};
     use tempfile::Builder;
     use tm_core::{DEFAULT_TM_HOME, TmCore, TmHome};
     use tower::ServiceExt;
 
     use super::{
-        ServerProfile, build_cloud_bootstrap_router, build_router, build_router_with_openai,
-        validate_bind_addr, validate_cloud_home,
+        ServerProfile, build_cloud_authenticated_router, build_cloud_bootstrap_router,
+        build_router, build_router_with_openai, validate_bind_addr, validate_cloud_home,
     };
+    use crate::auth::{AuthConfig, TOKEN_PREFIX};
     use crate::openai::{OpenAiClient, OpenAiConfig};
+
+    const TEST_AUTH_SECRET: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+    fn test_auth_token() -> String {
+        format!("{TOKEN_PREFIX}{TEST_AUTH_SECRET}")
+    }
+
+    fn test_auth_config() -> AuthConfig {
+        AuthConfig::for_test(&test_auth_token(), Utc::now() + ChronoDuration::minutes(5))
+    }
 
     #[derive(Clone, Default)]
     struct MockOpenAiCapture {
@@ -852,8 +1100,150 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn cloud_authenticated_profile_protects_every_non_health_route() {
+        let (_temporary, core) = test_core();
+        let router = build_cloud_authenticated_router(core, test_auth_config());
+
+        let health_response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .expect("build public health request"),
+            )
+            .await
+            .expect("call public health route");
+        assert_eq!(health_response.status(), StatusCode::OK);
+        assert_eq!(
+            health_response
+                .headers()
+                .get("content-security-policy")
+                .expect("content security policy"),
+            "default-src 'none'; frame-ancestors 'none'"
+        );
+        assert!(
+            health_response
+                .headers()
+                .get("access-control-allow-origin")
+                .is_none()
+        );
+        let health = response_json(health_response).await;
+        assert_eq!(health["data"]["status"], "ok");
+        assert!(health["data"].get("version").is_none());
+
+        let unauthenticated = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/auth/status")
+                    .body(Body::empty())
+                    .expect("build unauthenticated request"),
+            )
+            .await
+            .expect("call unauthenticated route");
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+        assert!(unauthenticated.headers().get("www-authenticate").is_some());
+        assert_eq!(
+            unauthenticated
+                .headers()
+                .get("cache-control")
+                .expect("cache control"),
+            "no-store"
+        );
+        let body = response_json(unauthenticated).await;
+        assert_eq!(body["error"]["code"], "AUTHENTICATION_REQUIRED");
+
+        let authenticated = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/auth/status")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .body(Body::empty())
+                    .expect("build authenticated request"),
+            )
+            .await
+            .expect("call authenticated route");
+        assert_eq!(authenticated.status(), StatusCode::OK);
+        let body = response_json(authenticated).await;
+        assert_eq!(body["data"]["authenticated"], true);
+        assert_eq!(body["data"]["subject"], "single-user");
+        assert!(body["data"]["tokenExpiresAt"].is_string());
+
+        let hidden_route = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/private-route")
+                    .body(Body::empty())
+                    .expect("build hidden route request"),
+            )
+            .await
+            .expect("call hidden route without authentication");
+        assert_eq!(hidden_route.status(), StatusCode::UNAUTHORIZED);
+
+        let authenticated_missing_route = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/private-route")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .body(Body::empty())
+                    .expect("build authenticated missing route request"),
+            )
+            .await
+            .expect("call missing route with authentication");
+        assert_eq!(authenticated_missing_route.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn failed_authentication_is_rate_limited_without_blocking_the_valid_token() {
+        let (_temporary, core) = test_core();
+        let router = build_cloud_authenticated_router(core, test_auth_config());
+
+        for attempt in 1..=21 {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/auth/status")
+                        .header(
+                            "authorization",
+                            format!("Bearer {TOKEN_PREFIX}{attempt:0>43}"),
+                        )
+                        .body(Body::empty())
+                        .expect("build invalid authentication request"),
+                )
+                .await
+                .expect("call invalid authentication request");
+
+            if attempt <= 20 {
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            } else {
+                assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+                assert_eq!(
+                    response.headers().get("retry-after").expect("retry after"),
+                    "60"
+                );
+            }
+        }
+
+        let valid = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/auth/status")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .body(Body::empty())
+                    .expect("build valid request after invalid attempts"),
+            )
+            .await
+            .expect("call valid request after invalid attempts");
+        assert_eq!(valid.status(), StatusCode::OK);
+    }
+
     #[test]
-    fn public_server_bind_addresses_are_rejected_before_authentication_exists() {
+    fn local_profile_remains_loopback_only_after_cloud_authentication_is_added() {
         assert!(
             validate_bind_addr(
                 ServerProfile::Local,
@@ -881,6 +1271,15 @@ mod tests {
                 "127.0.0.1:8787".parse().expect("parse invalid cloud bind")
             )
             .is_err()
+        );
+        assert!(
+            validate_bind_addr(
+                ServerProfile::CloudAuthenticated,
+                "0.0.0.0:8787"
+                    .parse()
+                    .expect("parse authenticated cloud bind")
+            )
+            .is_ok()
         );
     }
 

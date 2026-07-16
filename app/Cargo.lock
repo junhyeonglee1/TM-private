@@ -4463,9 +4463,11 @@ name = "tm-server"
 version = "0.1.5"
 dependencies = [
  "axum",
+ "chrono",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tm-core",
  "tokio",

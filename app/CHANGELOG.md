@@ -12,11 +12,21 @@
 - Railway Hobby용 multi-stage Docker image, Config as Code, Volume entrypoint를 추가했다.
 - Railway 환경과 Volume을 검증하고 health/readiness만 제공하는 `cloud-bootstrap` 서버 프로필을 추가했다.
 - 서버 시작 로그에 SQLite 최초 초기화 시각을 기록해 Volume 영속성을 민감 데이터 노출 없이 확인할 수 있게 했다.
+- Railway 공개 전용 `cloud-authenticated` 프로필과 단일 사용자 bearer token 인증 경계를 추가했다.
+- 256-bit 토큰을 화면·파일에 남기지 않고 생성하고 서버용 SHA-256 해시와 만료 시각만 출력하는 PowerShell 도구를 추가했다.
+- 비인증 API 은닉, 토큰 만료, 인증 실패·정상 요청 rate limit, CORS 차단과 공통 보안 header를 추가했다.
+
+### Changed
+
+- Railway Volume 서비스가 replica 구성으로 해석되지 않도록 Config as Code의 `multiRegionConfig`를 `null`로 명시했다.
 
 ### Verified
 
 - Railway Singapore production에서 새 이미지 배포와 동일 이미지 재시작 후에도 `/var/lib/tm`의 SQLite 최초 초기화 시각이 유지됨을 확인했다.
 - 인증 구현 전 원격 서버에는 공개 도메인과 OpenAI API 키가 없고 health/readiness route만 존재함을 확인했다.
+- Railway production에서 `cloud-authenticated` singleton 배포와 기존 SQLite Volume 보존을 확인했다.
+- HTTPS 공개 health/readiness는 `200`, 토큰 없음·잘못된 토큰·비인증 미등록 경로는 `401`이며 공통 보안 header가 적용됨을 확인했다.
+- 비밀번호 관리자에 보관한 원문 토큰으로 production `/api/v1/auth/status`가 `200`과 `authenticated: true`를 반환함을 확인했다.
 
 ## [0.1.5]
 

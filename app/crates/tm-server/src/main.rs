@@ -2,8 +2,8 @@ use std::{error::Error, io};
 
 use tm_core::{TmCore, TmHome};
 use tm_server::{
-    ServerConfig, ServerProfile, build_cloud_bootstrap_router, build_router_with_openai,
-    openai::OpenAiClient,
+    ServerConfig, ServerProfile, build_cloud_authenticated_router, build_cloud_bootstrap_router,
+    build_router_with_openai, openai::OpenAiClient,
 };
 
 #[tokio::main]
@@ -32,6 +32,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
             build_router_with_openai(core, openai)
         }
         ServerProfile::CloudBootstrap => build_cloud_bootstrap_router(core),
+        ServerProfile::CloudAuthenticated => {
+            let auth = config.auth.ok_or_else(|| {
+                io::Error::other("cloud-authenticated profile requires authentication config")
+            })?;
+            build_cloud_authenticated_router(core, auth)
+        }
     };
 
     axum::serve(listener, router)
