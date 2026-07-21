@@ -76,3 +76,22 @@ Set-Location 'C:\Users\tkfk0\Desktop\codex\TM\app'
 ```
 
 이 스크립트는 운영 token을 Windows Credential Locker의 `TM Cloud Production` / `single-user`에서 읽으며 화면·파일·클립보드에 token을 출력하지 않는다.
+
+Railway secret 보안 입력과 최소 과금 acceptance 명령:
+
+```powershell
+Set-Location 'C:\Users\tkfk0\Desktop\codex\TM\app'
+& '.\scripts\configure-step11-openai-secret.ps1'
+& '.\scripts\verify-step11-production.ps1' -ExpectedConfigured $true
+& '.\scripts\invoke-step11-production-acceptance.ps1'
+```
+
+secret 입력 스크립트는 키 형식 검증 후 Railway CLI의 stdin으로만 `OPENAI_API_KEY`를 전달하고, 로컬 결과에는 변수 이름과 성공 여부만 기록한다. acceptance 스크립트는 probe 1회와 assistant 질의 1회를 실행한다. 답변 원문은 화면에만 표시하고 결과 파일에는 hash·길이·usage·비용·도구 이름만 남긴다. 호출 전후 Project·Task·Checklist·Note·Session·Worklog의 응답 data hash가 같아야 성공한다.
+
+## 2026-07-21 production 완료 기록
+
+- API key 없는 production deployment `45968361-7cc5-4424-a69a-86c2835fe8d3`에서 missing-key·과금 확인·인증·예산 경계를 비과금으로 검증했다.
+- Railway sealed variable 설정 후 deployment `8e9e6e55-5a3a-4896-8860-3cd3bfa6f52c`가 성공했고 key 원문 없이 `configured: true`를 확인했다.
+- 실제 probe는 USD 0.000208, read-only assistant는 USD 0.008188로 추정됐다. assistant는 `list_tasks` 1회만 사용했고 input 1,739·output 256 tokens를 사용했다.
+- 업무 데이터 SHA-256은 호출 전후 모두 `23c77655c6d26ccde3e07576d4c13514b8af94c8efe3dd27ad8ce9d3129f0163`으로 같았다. 답변 원문은 검증 결과 파일에 저장하지 않았다.
+- OpenAI organization에는 월 USD 20 hard limit과 USD 10 email alert를 설정했다. TM 서버 내부의 USD 10 warning·USD 20 선결제 hard stop도 독립적으로 유지한다.

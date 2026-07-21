@@ -9,6 +9,8 @@
 - Railway `cloud-authenticated` profile에 `gpt-5.6-terra` Responses API 기반 read-only AI 오케스트레이터와 인증·명시적 과금 확인 route를 추가했다.
 - Project·Task·Checklist·Note·Session·Worklog만 최소 필드로 조회하는 strict tool allowlist, prompt injection 격리, 6회 tool·60초·2,000 output token·USD 0.25 요청 상한을 추가했다.
 - Windows Credential Locker의 운영 token으로 AI 상태·안전 상한·과금 확인·missing-key 차단을 검증하는 STEP 11 비과금 production 검증 스크립트를 추가했다.
+- OpenAI API key를 Railway stdin으로만 전달하는 보안 입력 스크립트와 probe·assistant 비용·도구 allowlist·업무 데이터 불변성을 확인하는 STEP 11 production acceptance 스크립트를 추가했다.
+- STEP 11 production에서 `gpt-5.6-terra` probe와 read-only assistant 실호출을 통과하고 OpenAI 월 USD 10 email alert·USD 20 hard limit을 설정했다.
 - localhost 전용 `tm-server` 뼈대와 liveness/readiness, 구조화 오류, request ID를 추가했다.
 - 서버 실행 시 명시적인 절대 `TM_SERVER_HOME`을 요구해 실제 사용자 DB를 실수로 여는 경계를 추가했다.
 - 서버 환경변수에만 API 키를 보관하는 OpenAI Responses API 연결 경계와 비과금 상태 확인·명시적 최소 probe를 추가했다.

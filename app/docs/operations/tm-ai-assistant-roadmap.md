@@ -492,7 +492,7 @@ Codex TODO:
 
 ## STEP 11 — Cloud OpenAI와 read-only 오케스트레이터
 
-상태: 진행 중 — 구현·모의 통합 검증 완료, Railway key와 최소 과금 운영 검증 대기
+상태: 완료 — 구현·CI·Railway 배포·최소 과금 운영 검증·비용 알림 설정 완료
 
 Codex 권장 기본안:
 
@@ -506,7 +506,7 @@ Codex 권장 기본안:
 - [x] OpenAI에 전달 가능한 데이터 범위 승인
 - [x] 기본 model과 요청별·월별 비용 상한 승인
 - [x] 답변 스타일과 기본 리포트 길이 승인
-- [ ] Railway에 OpenAI API key 입력
+- [x] Railway에 OpenAI API key 입력
 
 Codex TODO:
 
@@ -517,11 +517,13 @@ Codex TODO:
 - [x] prompt version, model, 합산 token usage, 비용 추정, request ID 기록
 - [x] 6회 tool call·무한 루프·60초 timeout·요청/월 예산 초과 차단
 - [x] prompt injection 지시와 allowlist 밖 tool output 오염 격리 테스트
-- [ ] production 최소 비용 end-to-end probe 수행
+- [x] production 최소 비용 end-to-end probe 수행
 
 완료 게이트:
 
-- AI가 TM 데이터를 최소 범위로 읽고 설명할 수 있지만 어떤 데이터도 변경할 수 없다.
+- [x] AI가 TM 데이터를 최소 범위로 읽고 설명할 수 있지만 어떤 데이터도 변경할 수 없다.
+- [x] production probe와 assistant 질의의 합산 추정 비용 USD 0.008396, `list_tasks` 1회, 호출 전후 업무 데이터 hash 일치를 확인했다.
+- [x] OpenAI organization USD 10 email alert·USD 20 hard limit과 TM 내부 USD 10 warning·USD 20 hard stop을 적용했다.
 
 구현 계약과 운영 검증 절차: [STEP 11 read-only AI 오케스트레이터](../architecture/read-only-ai-orchestrator.md)
 
