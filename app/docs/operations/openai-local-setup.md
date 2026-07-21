@@ -19,6 +19,8 @@
 | `TM_OPENAI_MODEL` | 아니요 | `gpt-5.6` | Responses API 모델 |
 | `TM_OPENAI_BASE_URL` | 아니요 | `https://api.openai.com/v1/` | 공식 OpenAI 주소, 테스트에서는 loopback HTTP만 허용 |
 | `TM_OPENAI_TIMEOUT_SECS` | 아니요 | `30` | OpenAI 호출 제한 시간, 1~120초 |
+| `TM_OPENAI_MONTHLY_WARNING_USD` | 아니요 | `10` | TM 상태에 경고로 표시할 월 누적 추정 비용 |
+| `TM_OPENAI_MONTHLY_HARD_LIMIT_USD` | 아니요 | `20` | 요청 전에 원자적으로 차단할 TM 월 비용 상한 |
 
 ## 1. 서버 실행
 
@@ -50,7 +52,7 @@ Invoke-RestMethod -Method Post `
     'http://127.0.0.1:8787/api/v1/ai/probe'
 ```
 
-성공하면 `outputText`가 `TM_OPENAI_OK`, `matchedExpectedText`가 `True`, `stored`가 `False`로 표시된다. `usage`에는 실제 입출력 토큰 수가 표시된다.
+성공하면 `outputText`가 `TM_OPENAI_OK`, `matchedExpectedText`가 `True`, `stored`가 `False`로 표시된다. `usage`에는 실제 입출력 토큰 수가, `estimatedCostMicrousd`와 `budget`에는 비용 추정과 월 잔여 한도가 표시된다. hard limit을 넘는 호출은 OpenAI로 전송되기 전에 `402 AI_MONTHLY_BUDGET_EXCEEDED`로 차단된다.
 
 ## 3. 종료
 

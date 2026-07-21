@@ -118,6 +118,28 @@ impl CommandService for CoreService {
         serde_json::to_value(artifact).context("failed to serialize source snapshot result")
     }
 
+    fn migration_manifest(&mut self) -> Result<Value> {
+        let manifest = self
+            .core
+            .migration_manifest()
+            .context("failed to build migration manifest")?;
+        serde_json::to_value(manifest).context("failed to serialize migration manifest")
+    }
+
+    fn migration_dry_run(&mut self) -> Result<Value> {
+        let result = self
+            .core
+            .migration_dry_run()
+            .context("failed to run migration dry-run")?;
+        serde_json::to_value(result).context("failed to serialize migration dry-run")
+    }
+
+    fn migration_inspect(&mut self, path: &std::path::Path) -> Result<Value> {
+        let manifest = TmCore::inspect_migration_database(path)
+            .context("failed to inspect migration database")?;
+        serde_json::to_value(manifest).context("failed to serialize inspected manifest")
+    }
+
     fn health(&mut self) -> Result<Value> {
         let health = self.core.health().context("health check failed")?;
         serde_json::to_value(health).context("failed to serialize health report")

@@ -133,6 +133,7 @@ mod tests {
 
     use super::{DEFAULT_TM_HOME, is_allowed_debug_override};
 
+    #[cfg(windows)]
     #[test]
     fn debug_override_must_be_absolute_normalized_and_inside_tm_home() {
         let allowed = Path::new(DEFAULT_TM_HOME).join("dist").join("test-runs");
@@ -142,5 +143,12 @@ mod tests {
         assert!(!is_allowed_debug_override(
             &Path::new(DEFAULT_TM_HOME).join("..").join("outside")
         ));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn windows_debug_override_is_rejected_on_other_platforms() {
+        assert!(!is_allowed_debug_override(Path::new(DEFAULT_TM_HOME)));
+        assert!(!is_allowed_debug_override(Path::new("relative-test-home")));
     }
 }

@@ -124,6 +124,7 @@ pub(crate) fn restore_database(
     let delivery_ledger = read_delivery_ledger(&current)?;
     let change_request_ledger = read_change_request_ledger(&current)?;
     let mutation_ledger = read_mutation_ledger(&current)?;
+    let ai_budget_ledger = read_ai_budget_ledger(&current)?;
     let safety_backup = online_backup_connection_inner(
         &current,
         backup_directory,
@@ -138,6 +139,7 @@ pub(crate) fn restore_database(
     )?;
     validate_change_request_restore_source(&source, &change_request_ledger)?;
     validate_mutation_restore_source(&source, &mutation_ledger)?;
+    validate_ai_budget_restore_source(&source, &ai_budget_ledger)?;
     let mut destination = Connection::open(database_path)?;
     destination.busy_timeout(Duration::from_secs(15))?;
     register_runtime_functions(&destination)?;
@@ -551,6 +553,42 @@ fn validate_mutation_restore_source(source: &Connection, current: &MutationLedge
     if &restored != current {
         return Err(Error::Conflict(
             "restore would alter the append-only mutation and idempotency ledger".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn read_ai_budget_ledger(connection: &Connection) -> Result<Vec<String>> {
+    let table_exists: bool = connection.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM sqlite_schema
+            WHERE type = 'table' AND name = 'ai_budget_ledger'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if !table_exists {
+        return Ok(Vec::new());
+    }
+    canonical_json_rows(
+        connection,
+        "SELECT json_array(
+            id, request_id, entry_kind, provider, model, operation, budget_month,
+            amount_microusd, input_tokens, cached_input_tokens, output_tokens,
+            total_tokens, outcome, created_at
+         )
+         FROM ai_budget_ledger ORDER BY id",
+    )
+}
+
+fn validate_ai_budget_restore_source(source: &Connection, current: &[String]) -> Result<()> {
+    if current.is_empty() {
+        return Ok(());
+    }
+    let restored = read_ai_budget_ledger(source)?;
+    if restored != current {
+        return Err(Error::Conflict(
+            "restore would alter the append-only AI cost and budget ledger".to_owned(),
         ));
     }
     Ok(())

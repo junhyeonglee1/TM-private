@@ -24,12 +24,19 @@
 - domain 변경, 중복 응답, actor·request ID·before/after를 한 transaction에 기록하는 append-only mutation 감사·idempotency ledger를 추가했다.
 - 통제된 write API v1 계약 문서와 JSON Schema를 추가했다.
 - 원문 token을 저장하지 않고 production write API의 인증·precondition·금지 동작과 데이터 불변을 확인하는 STEP 8 PowerShell 검증 도구를 추가했다.
+- schema 5 append-only OpenAI token·비용 원장과 요청 전 USD 20 월 hard stop을 추가했다.
+- SQLite 일관 snapshot을 client-side 암호화해 Railway Bucket으로 전송하고 일 7·주 4·월 12 보존·전체 pack 무결성 검사를 수행하는 작업을 추가했다.
+- 활성 DB를 건드리지 않고 최신 외부 backup의 checksum·schema·SQLite 무결성을 검증하는 restore drill을 추가했다.
+- 인증된 운영 상태 API와 request ID·route family·status·latency만 남기는 Railway JSON 로그를 추가했다.
+- production schema 5와 STEP 11 전 AI route 격리를 과금·mutation 없이 확인하고, AI route 활성화 후에는 USD 10/20 예산 경계도 확인하는 STEP 9 PowerShell 검증 도구를 추가했다.
+- row 원문을 노출하지 않고 현재 DB manifest, 일관 snapshot dry-run, 후보 snapshot 검사를 수행하는 `tm-cli migration` 명령과 STEP 10 검증 스크립트를 추가했다.
 
 ### Changed
 
 - Railway Volume 서비스가 replica 구성으로 해석되지 않도록 Config as Code의 `multiRegionConfig`를 `null`로 명시했다.
 - SQLite schema 4에서 Task·Note·Checklist에 optimistic concurrency용 정수 `version`을 추가하고 read DTO에도 노출했다.
 - 현재 mutation ledger와 일치하지 않는 backup 복원을 거부해 감사·idempotency 이력의 rewind를 차단했다.
+- 현재 AI 비용 ledger와 일치하지 않는 backup 복원을 거부해 비용 이력의 rewind를 차단했다.
 - Windows PowerShell 5.1이 한국어 검증 문구와 기본 결과 경로를 올바르게 처리하도록 production 검증 스크립트를 UTF-8 BOM 형식과 본문 경로 계산 방식으로 고정했다.
 
 ### Verified
@@ -44,6 +51,14 @@
 - Railway production에서 인증된 tasks 조회 `200`, ETag 재검증 `304`, mutation 요청 `405 METHOD_NOT_ALLOWED`, 빈 cloud DB 유지를 확인했다.
 - 합성 DB에서 mutation 중복 제출 1회 실행, stale version 충돌, 실패 rollback, append-only 감사, strict JSON·입력 상한·금지 method를 확인했다.
 - Railway production에 schema 4 controlled write API를 배포하고 인증 `200`, precondition `428`, 누락 resource `404`, 삭제 금지 `405`, Task·Note 개수와 ETag 불변을 비파괴 방식으로 확인했다.
+- Railway staging schema 5에서 Task mutation·idempotency replay·stale version conflict를 확인하고, 암호화 Bucket snapshot을 빈 위치에 복원해 checksum·schema·SQLite 무결성을 검증했다.
+- Railway Hobby에서는 native Volume backup과 CPU·RAM·disk·network monitor가 Pro 전용임을 dashboard와 API 권한 거부로 확인했다. deployment failure·crash·OOM·usage 알림은 email과 in-app으로 활성화되어 있다.
+- staging에서 검증한 STEP 9 source를 Railway production deployment `4a0bd0d7-6a3d-4104-9eec-acb16bb78b7c`로 승격했다.
+- production schema 5 확인 후 encrypted Bucket backup을 활성화하고 첫 snapshot `ecb2b965` 생성을 확인했다.
+- production bearer token을 회전하고 새 token으로 인증·schema 5·원격 backup 성공·STEP 11 전 AI route `404` 격리를 재검증했다.
+- production 암호화 backup을 `/tmp`에 복원해 checksum·schema 5·SQLite 무결성·foreign key 검사를 통과했고 활성 DB가 바뀌지 않음을 확인했다.
+- production restore drill용 일회용 Railway SSH key와 모든 로컬 key 파일을 폐기하고, 검증 완료 후 staging deployment를 중지하면서 Volume은 보존했다.
+- STEP 10 사전 inventory에서 local schema 3 DB의 integrity와 foreign key가 정상이고 Project 2·Task 2·Task event 5, 첨부파일 0개임을 원문 비노출 방식으로 확인했다.
 
 ## [0.1.5]
 

@@ -406,6 +406,42 @@ pub struct BackupInfo {
     pub trigger: String,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiBudgetPolicy {
+    pub warning_limit_microusd: u64,
+    pub hard_limit_microusd: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiBudgetStatus {
+    pub budget_month: String,
+    pub warning_limit_microusd: u64,
+    pub hard_limit_microusd: u64,
+    pub committed_microusd: u64,
+    pub remaining_microusd: u64,
+    pub warning_reached: bool,
+    pub hard_stop_reached: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiBudgetReservation {
+    pub request_id: String,
+    pub budget_month: String,
+    pub reserved_microusd: u64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiTokenUsage {
+    pub input_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchHit {

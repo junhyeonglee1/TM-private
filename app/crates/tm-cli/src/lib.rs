@@ -1,4 +1,7 @@
-use std::io::Write;
+use std::{
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 use anyhow::Result;
 use chrono::NaiveDate;
@@ -21,6 +24,8 @@ pub enum Commands {
     Changes(ChangesArgs),
     /// Create a point-in-time database backup.
     Backup(BackupArgs),
+    /// Prepare and inspect data for a one-time cloud cutover.
+    Migration(MigrationArgs),
     /// Check paths, database access, and schema state.
     Health(JsonArgs),
     /// Export the complete data model as JSON.
@@ -149,6 +154,30 @@ pub enum BackupCommands {
     Source,
 }
 
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct MigrationArgs {
+    #[command(subcommand)]
+    pub command: MigrationCommands,
+}
+
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum MigrationCommands {
+    /// Build a content-free logical manifest for the current database.
+    Manifest(JsonArgs),
+    /// Create a consistent snapshot and verify it against the current database.
+    DryRun(JsonArgs),
+    /// Inspect a candidate SQLite snapshot without modifying it.
+    Inspect(MigrationInspectArgs),
+}
+
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct MigrationInspectArgs {
+    #[arg(long, value_name = "PATH")]
+    pub path: PathBuf,
+    #[arg(long)]
+    pub json: bool,
+}
+
 #[derive(Clone, Copy, Debug, Args, PartialEq, Eq)]
 pub struct JsonArgs {
     #[arg(long)]
@@ -181,6 +210,9 @@ pub trait CommandService {
     fn changes_status(&mut self) -> Result<Value>;
     fn backup_create(&mut self) -> Result<Value>;
     fn backup_source(&mut self) -> Result<Value>;
+    fn migration_manifest(&mut self) -> Result<Value>;
+    fn migration_dry_run(&mut self) -> Result<Value>;
+    fn migration_inspect(&mut self, path: &Path) -> Result<Value>;
     fn health(&mut self) -> Result<Value>;
     fn export(&mut self) -> Result<Value>;
 }
@@ -218,6 +250,11 @@ pub fn execute(cli: Cli, service: &mut impl CommandService, stdout: &mut impl Wr
             BackupCommands::Create => service.backup_create()?,
             BackupCommands::Source => service.backup_source()?,
         },
+        Commands::Migration(args) => match args.command {
+            MigrationCommands::Manifest(_) => service.migration_manifest()?,
+            MigrationCommands::DryRun(_) => service.migration_dry_run()?,
+            MigrationCommands::Inspect(args) => service.migration_inspect(&args.path)?,
+        },
         Commands::Health(_) => service.health()?,
         Commands::Export(_) => service.export()?,
     };
@@ -236,7 +273,7 @@ mod tests {
 
     use super::{
         BackupCommands, ChangesArgs, ChangesCommands, Cli, CommandService, Commands, DigestArgs,
-        DigestCommands, DigestKind, JsonArgs, execute,
+        DigestCommands, DigestKind, JsonArgs, MigrationArgs, MigrationCommands, execute,
     };
 
     #[derive(Default)]
@@ -311,6 +348,18 @@ mod tests {
 
         fn backup_source(&mut self) -> Result<Value> {
             self.response("source-backup".to_owned())
+        }
+
+        fn migration_manifest(&mut self) -> Result<Value> {
+            self.response("migration:manifest".to_owned())
+        }
+
+        fn migration_dry_run(&mut self) -> Result<Value> {
+            self.response("migration:dry-run".to_owned())
+        }
+
+        fn migration_inspect(&mut self, path: &std::path::Path) -> Result<Value> {
+            self.response(format!("migration:inspect:{}", path.display()))
         }
 
         fn health(&mut self) -> Result<Value> {
@@ -537,6 +586,16 @@ mod tests {
             &["tm-cli", "changes", "status", "--json"],
             &["tm-cli", "backup", "create"],
             &["tm-cli", "backup", "source"],
+            &["tm-cli", "migration", "manifest", "--json"],
+            &["tm-cli", "migration", "dry-run", "--json"],
+            &[
+                "tm-cli",
+                "migration",
+                "inspect",
+                "--path",
+                "C:\\tm\\snapshot.sqlite3",
+                "--json",
+            ],
             &["tm-cli", "health", "--json"],
             &["tm-cli", "export", "--json"],
         ];
@@ -595,6 +654,53 @@ mod tests {
 
         assert_eq!(stdout, b"{\"call\":\"source-backup\",\"ok\":true}\n");
         assert_eq!(service.call.as_deref(), Some("source-backup"));
+        Ok(())
+    }
+
+    #[test]
+    fn execute_routes_migration_commands_without_row_contents() -> Result<()> {
+        let commands = [
+            (
+                Cli {
+                    command: Commands::Migration(MigrationArgs {
+                        command: MigrationCommands::Manifest(JsonArgs { json: true }),
+                    }),
+                },
+                "migration:manifest",
+            ),
+            (
+                Cli {
+                    command: Commands::Migration(MigrationArgs {
+                        command: MigrationCommands::DryRun(JsonArgs { json: true }),
+                    }),
+                },
+                "migration:dry-run",
+            ),
+            (
+                Cli {
+                    command: Commands::Migration(MigrationArgs {
+                        command: MigrationCommands::Inspect(super::MigrationInspectArgs {
+                            path: std::path::PathBuf::from("snapshot.sqlite3"),
+                            json: true,
+                        }),
+                    }),
+                },
+                "migration:inspect:snapshot.sqlite3",
+            ),
+        ];
+
+        for (cli, expected_call) in commands {
+            let mut service = FakeService::default();
+            let mut stdout = Vec::new();
+
+            execute(cli, &mut service, &mut stdout)?;
+
+            assert_eq!(service.call.as_deref(), Some(expected_call));
+            assert_eq!(
+                serde_json::from_slice::<Value>(&stdout)?,
+                json!({"call": expected_call, "ok": true})
+            );
+        }
         Ok(())
     }
 

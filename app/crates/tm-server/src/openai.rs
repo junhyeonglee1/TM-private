@@ -2,11 +2,15 @@ use std::{env, fmt, net::IpAddr, sync::Arc, time::Duration};
 
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
+use tm_core::{AiBudgetPolicy, AiBudgetStatus};
 use url::Url;
 
 pub const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1/";
 pub const DEFAULT_OPENAI_MODEL: &str = "gpt-5.6";
 pub const DEFAULT_OPENAI_TIMEOUT_SECS: u64 = 30;
+pub const DEFAULT_OPENAI_MONTHLY_WARNING_MICROUSD: u64 = 10_000_000;
+pub const DEFAULT_OPENAI_MONTHLY_HARD_LIMIT_MICROUSD: u64 = 20_000_000;
+pub const PROBE_MAXIMUM_COST_MICROUSD: u64 = 10_000;
 
 const PROBE_EXPECTED_TEXT: &str = "TM_OPENAI_OK";
 const PROBE_INSTRUCTIONS: &str =
@@ -19,6 +23,7 @@ pub struct OpenAiConfig {
     model: String,
     base_url: Url,
     timeout: Duration,
+    budget_policy: AiBudgetPolicy,
 }
 
 impl fmt::Debug for OpenAiConfig {
@@ -29,6 +34,7 @@ impl fmt::Debug for OpenAiConfig {
             .field("model", &self.model)
             .field("base_url", &self.base_url.as_str())
             .field("timeout", &self.timeout)
+            .field("budget_policy", &self.budget_policy)
             .finish()
     }
 }
@@ -41,6 +47,10 @@ impl Default for OpenAiConfig {
             base_url: Url::parse(DEFAULT_OPENAI_BASE_URL)
                 .expect("the built-in OpenAI base URL must be valid"),
             timeout: Duration::from_secs(DEFAULT_OPENAI_TIMEOUT_SECS),
+            budget_policy: AiBudgetPolicy {
+                warning_limit_microusd: DEFAULT_OPENAI_MONTHLY_WARNING_MICROUSD,
+                hard_limit_microusd: DEFAULT_OPENAI_MONTHLY_HARD_LIMIT_MICROUSD,
+            },
         }
     }
 }
@@ -71,11 +81,33 @@ impl OpenAiConfig {
             return Err("TM_OPENAI_TIMEOUT_SECS must be between 1 and 120".to_owned());
         }
 
+        let warning_limit_microusd = optional_env("TM_OPENAI_MONTHLY_WARNING_USD")?
+            .map(|value| parse_usd_microusd("TM_OPENAI_MONTHLY_WARNING_USD", &value))
+            .transpose()?
+            .unwrap_or(DEFAULT_OPENAI_MONTHLY_WARNING_MICROUSD);
+        let hard_limit_microusd = optional_env("TM_OPENAI_MONTHLY_HARD_LIMIT_USD")?
+            .map(|value| parse_usd_microusd("TM_OPENAI_MONTHLY_HARD_LIMIT_USD", &value))
+            .transpose()?
+            .unwrap_or(DEFAULT_OPENAI_MONTHLY_HARD_LIMIT_MICROUSD);
+        if warning_limit_microusd == 0
+            || hard_limit_microusd == 0
+            || warning_limit_microusd > hard_limit_microusd
+        {
+            return Err(
+                "TM OpenAI monthly warning must be positive and no greater than the hard limit"
+                    .to_owned(),
+            );
+        }
+
         Ok(Self {
             api_key,
             model,
             base_url,
             timeout: Duration::from_secs(timeout_secs),
+            budget_policy: AiBudgetPolicy {
+                warning_limit_microusd,
+                hard_limit_microusd,
+            },
         })
     }
 
@@ -97,6 +129,10 @@ impl OpenAiConfig {
             model: model.to_owned(),
             base_url: validate_base_url(base_url)?,
             timeout,
+            budget_policy: AiBudgetPolicy {
+                warning_limit_microusd: DEFAULT_OPENAI_MONTHLY_WARNING_MICROUSD,
+                hard_limit_microusd: DEFAULT_OPENAI_MONTHLY_HARD_LIMIT_MICROUSD,
+            },
         })
     }
 
@@ -113,6 +149,25 @@ impl OpenAiConfig {
     #[must_use]
     pub fn base_url(&self) -> &str {
         self.base_url.as_str()
+    }
+
+    #[must_use]
+    pub const fn budget_policy(&self) -> AiBudgetPolicy {
+        self.budget_policy
+    }
+
+    #[must_use]
+    pub fn estimate_cost_microusd(&self, usage: &ProbeUsage) -> Option<u64> {
+        if !self.model.starts_with("gpt-5.6") {
+            return None;
+        }
+        let uncached_input = usage.input_tokens.saturating_sub(usage.cached_input_tokens);
+        let numerator = u128::from(uncached_input)
+            .saturating_mul(5_000_000)
+            .saturating_add(u128::from(usage.cached_input_tokens).saturating_mul(500_000))
+            .saturating_add(u128::from(usage.output_tokens).saturating_mul(30_000_000));
+        let rounded_up = numerator.saturating_add(999_999) / 1_000_000;
+        u64::try_from(rounded_up).ok()
     }
 
     fn responses_url(&self) -> Result<Url, OpenAiError> {
@@ -211,6 +266,8 @@ impl OpenAiClient {
             matched_expected_text: response_matches_probe(&response.output),
             usage: response.usage.map(Into::into),
             stored: false,
+            estimated_cost_microusd: None,
+            budget: None,
         })
     }
 }
@@ -240,12 +297,15 @@ pub struct OpenAiProbeResult {
     pub matched_expected_text: bool,
     pub usage: Option<ProbeUsage>,
     pub stored: bool,
+    pub estimated_cost_microusd: Option<u64>,
+    pub budget: Option<AiBudgetStatus>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProbeUsage {
     pub input_tokens: u64,
+    pub cached_input_tokens: u64,
     pub output_tokens: u64,
     pub total_tokens: u64,
 }
@@ -293,16 +353,55 @@ struct UpstreamUsage {
     input_tokens: u64,
     output_tokens: u64,
     total_tokens: u64,
+    #[serde(default)]
+    input_tokens_details: Option<InputTokenDetails>,
+}
+
+#[derive(Deserialize)]
+struct InputTokenDetails {
+    #[serde(default)]
+    cached_tokens: u64,
 }
 
 impl From<UpstreamUsage> for ProbeUsage {
     fn from(value: UpstreamUsage) -> Self {
         Self {
             input_tokens: value.input_tokens,
+            cached_input_tokens: value
+                .input_tokens_details
+                .map_or(0, |details| details.cached_tokens),
             output_tokens: value.output_tokens,
             total_tokens: value.total_tokens,
         }
     }
+}
+
+fn parse_usd_microusd(name: &str, value: &str) -> Result<u64, String> {
+    let value = value.trim();
+    let (whole, fractional) = value.split_once('.').map_or((value, ""), |parts| parts);
+    if whole.is_empty()
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || !fractional.bytes().all(|byte| byte.is_ascii_digit())
+        || fractional.len() > 6
+    {
+        return Err(format!(
+            "{name} must be a positive USD decimal with at most 6 digits after the decimal point"
+        ));
+    }
+    let whole = whole
+        .parse::<u64>()
+        .map_err(|error| format!("{name} is invalid: {error}"))?;
+    let fractional = if fractional.is_empty() {
+        0
+    } else {
+        format!("{fractional:0<6}")
+            .parse::<u64>()
+            .map_err(|error| format!("{name} is invalid: {error}"))?
+    };
+    whole
+        .checked_mul(1_000_000)
+        .and_then(|value| value.checked_add(fractional))
+        .ok_or_else(|| format!("{name} is too large"))
 }
 
 fn optional_env(name: &str) -> Result<Option<String>, String> {

@@ -37,7 +37,7 @@ API 키, 인증 토큰 원문, 로그, DB 백업 파일, source snapshot은 TM �
 
 ## 보존해야 하는 불변 조건
 
-- SQLite `user_version`과 `schema_migrations` ledger가 현재 schema 4, migration `1, 2, 3, 4`와 정확히 일치한다.
+- SQLite `user_version`과 `schema_migrations` ledger가 현재 schema 5, migration `1, 2, 3, 4, 5`와 정확히 일치한다.
 - `PRAGMA integrity_check`가 `ok`이며 `PRAGMA foreign_key_check` 결과가 없다.
 - Task, checklist, tag, day entry, session 관계와 Note 다중 링크의 외래키가 유지된다.
 - `task_events`, `change_request_events`, `mutation_audit_events`의 append-only 의미와 idempotency ledger가 유지된다.

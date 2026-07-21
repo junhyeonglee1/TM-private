@@ -2,9 +2,12 @@ use std::{
     env, fmt,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 pub mod auth;
+mod desktop_api;
+mod import_api;
 pub mod openai;
 mod read_api;
 mod write_api;
@@ -18,19 +21,22 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use serde::Serialize;
-use tm_core::{HealthReport, TmCore};
+use serde::{Deserialize, Serialize};
+use tm_core::{AiBudgetStatus, AiTokenUsage, Error as CoreError, HealthReport, TmCore};
 use uuid::Uuid;
 
 use crate::auth::{
     AUTH_TOKEN_EXPIRY_ENV, AUTH_TOKEN_HASH_ENV, AuthConfig, AuthDecision, TokenAuthenticator,
 };
-use crate::openai::{OpenAiClient, OpenAiConfig, OpenAiError, OpenAiProbeResult};
+use crate::openai::{
+    OpenAiClient, OpenAiConfig, OpenAiError, OpenAiProbeResult, PROBE_MAXIMUM_COST_MICROUSD,
+};
 
 pub const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8787";
 pub const LOCAL_PROFILE: &str = "local";
 pub const CLOUD_BOOTSTRAP_PROFILE: &str = "cloud-bootstrap";
 pub const CLOUD_AUTHENTICATED_PROFILE: &str = "cloud-authenticated";
+pub const IMPORT_MAINTENANCE_MODE: &str = "import";
 const REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-request-id");
 const AI_CONFIRM_HEADER: HeaderName = HeaderName::from_static("x-tm-confirm-ai-call");
 const CACHE_CONTROL_HEADER: HeaderName = HeaderName::from_static("cache-control");
@@ -49,6 +55,13 @@ pub enum ServerProfile {
     Local,
     CloudBootstrap,
     CloudAuthenticated,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MaintenanceMode {
+    #[default]
+    Disabled,
+    Import,
 }
 
 impl ServerProfile {
@@ -81,6 +94,7 @@ pub struct ServerConfig {
     pub home: PathBuf,
     pub openai: OpenAiConfig,
     pub auth: Option<AuthConfig>,
+    pub maintenance_mode: MaintenanceMode,
 }
 
 impl ServerConfig {
@@ -88,6 +102,20 @@ impl ServerConfig {
         let profile =
             optional_env("TM_SERVER_PROFILE")?.unwrap_or_else(|| LOCAL_PROFILE.to_owned());
         let profile = ServerProfile::parse(&profile)?;
+        let maintenance_mode = match optional_env("TM_MAINTENANCE_MODE")? {
+            None => MaintenanceMode::Disabled,
+            Some(value)
+                if profile == ServerProfile::CloudAuthenticated
+                    && value == IMPORT_MAINTENANCE_MODE =>
+            {
+                MaintenanceMode::Import
+            }
+            Some(_) => {
+                return Err(format!(
+                    "TM_MAINTENANCE_MODE must be unset or {IMPORT_MAINTENANCE_MODE} in cloud-authenticated"
+                ));
+            }
+        };
 
         let home = required_path_env("TM_SERVER_HOME")?;
         if !home.is_absolute() {
@@ -149,6 +177,7 @@ impl ServerConfig {
             home,
             openai,
             auth,
+            maintenance_mode,
         })
     }
 }
@@ -267,6 +296,55 @@ struct AiStatus {
     model: String,
     api_base: String,
     response_storage: &'static str,
+    budget: AiBudgetStatus,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OperationsStatus {
+    service_version: &'static str,
+    database: OperationsDatabaseStatus,
+    local_backup: LocalBackupStatus,
+    remote_backup: RemoteBackupStatus,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OperationsDatabaseStatus {
+    ok: bool,
+    schema_version: i64,
+    journal_mode: String,
+    checked_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalBackupStatus {
+    count: usize,
+    latest_created_at: Option<String>,
+    latest_byte_size: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteBackupStatus {
+    status: String,
+    checked_at: Option<String>,
+    snapshot_id: Option<String>,
+    database_sha256: Option<String>,
+    database_byte_size: Option<u64>,
+    schema_version: Option<i64>,
+    retention: Option<RemoteBackupRetention>,
+    integrity_check: Option<String>,
+    reason: Option<String>,
+    retry_after_seconds: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct RemoteBackupRetention {
+    daily: u32,
+    weekly: u32,
+    monthly: u32,
 }
 
 pub fn build_router(core: TmCore) -> Router {
@@ -282,6 +360,7 @@ pub fn build_router_with_openai(core: TmCore, openai: OpenAiClient) -> Router {
         .fallback(not_found)
         .with_state(AppState { core, openai })
         .layer(middleware::from_fn(security_headers))
+        .layer(middleware::from_fn(request_telemetry))
         .layer(middleware::from_fn(assign_request_id))
 }
 
@@ -295,6 +374,7 @@ pub fn build_cloud_bootstrap_router(core: TmCore) -> Router {
             openai: OpenAiClient::disabled(),
         })
         .layer(middleware::from_fn(security_headers))
+        .layer(middleware::from_fn(request_telemetry))
         .layer(middleware::from_fn(assign_request_id))
 }
 
@@ -304,6 +384,11 @@ pub fn build_cloud_authenticated_router(core: TmCore, auth: AuthConfig) -> Route
         .route("/healthz", get(cloud_healthz))
         .route("/readyz", get(cloud_readyz))
         .route("/api/v1/auth/status", get(auth_status))
+        .route("/api/v1/ops/status", get(operations_status))
+        .route(
+            "/api/v1/desktop/commands/{command}",
+            post(desktop_api::invoke),
+        )
         .route("/api/v1/projects", get(read_api::projects))
         .route(
             "/api/v1/tasks",
@@ -341,6 +426,31 @@ pub fn build_cloud_authenticated_router(core: TmCore, auth: AuthConfig) -> Route
             authenticate_cloud_request,
         ))
         .layer(middleware::from_fn(security_headers))
+        .layer(middleware::from_fn(request_telemetry))
+        .layer(middleware::from_fn(assign_request_id))
+}
+
+pub fn build_cloud_import_router(core: TmCore, auth: AuthConfig) -> Router {
+    let authenticator = TokenAuthenticator::new(auth);
+    Router::new()
+        .route("/healthz", get(cloud_healthz))
+        .route("/readyz", get(cloud_readyz))
+        .route("/api/v1/auth/status", get(auth_status))
+        .route("/api/v1/ops/status", get(operations_status))
+        .route("/api/v1/ops/import", post(import_api::import_database))
+        .fallback(not_found)
+        .method_not_allowed_fallback(method_not_allowed)
+        .with_state(AppState {
+            core,
+            openai: OpenAiClient::disabled(),
+        })
+        .layer(import_api::body_limit())
+        .layer(middleware::from_fn_with_state(
+            authenticator,
+            authenticate_cloud_request,
+        ))
+        .layer(middleware::from_fn(security_headers))
+        .layer(middleware::from_fn(request_telemetry))
         .layer(middleware::from_fn(assign_request_id))
 }
 
@@ -465,9 +575,13 @@ async fn auth_status(
 async fn ai_status(
     State(state): State<AppState>,
     Extension(request_id): Extension<RequestId>,
-) -> Json<ApiEnvelope<AiStatus>> {
+) -> Result<Json<ApiEnvelope<AiStatus>>, ApiError> {
     let config = state.openai.config();
-    Json(ApiEnvelope {
+    let budget = state
+        .core
+        .ai_budget_status(config.budget_policy())
+        .map_err(|error| ai_budget_api_error(error, request_id.0.clone()))?;
+    Ok(Json(ApiEnvelope {
         request_id: request_id.0,
         data: AiStatus {
             provider: "openai",
@@ -475,8 +589,9 @@ async fn ai_status(
             model: config.model().to_owned(),
             api_base: config.base_url().to_owned(),
             response_storage: "disabled",
+            budget,
         },
-    })
+    }))
 }
 
 async fn ai_probe(
@@ -498,15 +613,150 @@ async fn ai_probe(
     }
 
     let error_request_id = request_id.0.clone();
-    let result = state
-        .openai
-        .probe()
-        .await
-        .map_err(|error| openai_api_error(error, error_request_id))?;
+    let config = state.openai.config();
+    if !config.configured() {
+        return Err(openai_api_error(
+            OpenAiError::NotConfigured,
+            error_request_id,
+        ));
+    }
+    let model = config.model().to_owned();
+    let policy = config.budget_policy();
+    let reservation = state
+        .core
+        .reserve_ai_budget(
+            &request_id.0,
+            "openai",
+            &model,
+            "probe",
+            PROBE_MAXIMUM_COST_MICROUSD,
+            policy,
+        )
+        .map_err(|error| ai_budget_api_error(error, request_id.0.clone()))?;
+
+    let mut result = match state.openai.probe().await {
+        Ok(result) => result,
+        Err(error) => {
+            let may_have_been_billed =
+                matches!(error, OpenAiError::Transport | OpenAiError::InvalidResponse);
+            let estimated_cost = if may_have_been_billed {
+                reservation.reserved_microusd
+            } else {
+                0
+            };
+            let outcome = if may_have_been_billed {
+                "upstream_cost_estimate"
+            } else {
+                "preflight_failed"
+            };
+            state
+                .core
+                .settle_ai_budget(&reservation, estimated_cost, None, outcome, policy)
+                .map_err(|ledger_error| ai_budget_api_error(ledger_error, request_id.0.clone()))?;
+            return Err(openai_api_error(error, error_request_id));
+        }
+    };
+    let usage = result.usage.map(|usage| AiTokenUsage {
+        input_tokens: usage.input_tokens,
+        cached_input_tokens: usage.cached_input_tokens,
+        output_tokens: usage.output_tokens,
+        total_tokens: usage.total_tokens,
+    });
+    let known_cost = result
+        .usage
+        .and_then(|usage| state.openai.config().estimate_cost_microusd(&usage));
+    let actual_cost = known_cost.unwrap_or(reservation.reserved_microusd);
+    let outcome = if known_cost.is_some() {
+        "succeeded"
+    } else {
+        "upstream_cost_estimate"
+    };
+    let budget = state
+        .core
+        .settle_ai_budget(&reservation, actual_cost, usage, outcome, policy)
+        .map_err(|error| ai_budget_api_error(error, request_id.0.clone()))?;
+    result.estimated_cost_microusd = Some(actual_cost);
+    result.budget = Some(budget);
 
     Ok(Json(ApiEnvelope {
         request_id: request_id.0,
         data: result,
+    }))
+}
+
+async fn operations_status(
+    State(state): State<AppState>,
+    Extension(request_id): Extension<RequestId>,
+) -> Result<Json<ApiEnvelope<OperationsStatus>>, ApiError> {
+    let error_request_id = request_id.0.clone();
+    let status = tokio::task::spawn_blocking(move || {
+        let health = state.core.health()?;
+        let backups = state.core.list_backups()?;
+        let latest = backups.first();
+        let remote_status_path = state
+            .core
+            .home()
+            .backups_dir()
+            .join("remote")
+            .join("status.json");
+        let remote_backup = if remote_status_path.is_file() {
+            let metadata = std::fs::metadata(&remote_status_path)?;
+            if metadata.len() > 64 * 1024 {
+                return Err(CoreError::Invariant(
+                    "remote backup status file exceeds the size limit".to_owned(),
+                ));
+            }
+            serde_json::from_slice::<RemoteBackupStatus>(&std::fs::read(remote_status_path)?)?
+        } else {
+            RemoteBackupStatus {
+                status: "pending".to_owned(),
+                checked_at: None,
+                snapshot_id: None,
+                database_sha256: None,
+                database_byte_size: None,
+                schema_version: None,
+                retention: None,
+                integrity_check: None,
+                reason: None,
+                retry_after_seconds: None,
+            }
+        };
+        Ok::<_, CoreError>(OperationsStatus {
+            service_version: env!("CARGO_PKG_VERSION"),
+            database: OperationsDatabaseStatus {
+                ok: health.ok,
+                schema_version: health.schema_version,
+                journal_mode: health.journal_mode,
+                checked_at: health.checked_at,
+            },
+            local_backup: LocalBackupStatus {
+                count: backups.len(),
+                latest_created_at: latest.map(|backup| backup.created_at.clone()),
+                latest_byte_size: latest.map(|backup| backup.byte_size),
+            },
+            remote_backup,
+        })
+    })
+    .await
+    .map_err(|_| ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: "OPERATIONS_STATUS_WORKER_FAILED",
+        message: "operations status worker failed".to_owned(),
+        request_id: error_request_id.clone(),
+    })?
+    .map_err(|error| {
+        tracing::warn!(error = %error, request_id = %error_request_id, "operations status failed");
+        ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "OPERATIONS_STATUS_UNAVAILABLE",
+            message: "operations status is temporarily unavailable".to_owned(),
+            request_id: error_request_id,
+        }
+    })?;
+
+    Ok(Json(ApiEnvelope {
+        request_id: request_id.0,
+        data: status,
     }))
 }
 
@@ -557,6 +807,8 @@ fn reject_cloud_overrides(forbid_auth: bool) -> Result<(), String> {
         "TM_OPENAI_MODEL",
         "TM_OPENAI_BASE_URL",
         "TM_OPENAI_TIMEOUT_SECS",
+        "TM_OPENAI_MONTHLY_WARNING_USD",
+        "TM_OPENAI_MONTHLY_HARD_LIMIT_USD",
     ];
     if forbid_auth {
         forbidden.extend([AUTH_TOKEN_HASH_ENV, AUTH_TOKEN_EXPIRY_ENV]);
@@ -632,6 +884,24 @@ fn openai_api_error(error: OpenAiError, request_id: String) -> ApiError {
             status: StatusCode::BAD_GATEWAY,
             code: "OPENAI_RESPONSE_INVALID",
             message: "OpenAI returned an unexpected response".to_owned(),
+            request_id,
+        },
+    }
+}
+
+fn ai_budget_api_error(error: CoreError, request_id: String) -> ApiError {
+    tracing::warn!(error = %error, %request_id, "AI budget guard rejected an operation");
+    match error {
+        CoreError::AiBudgetExceeded { .. } => ApiError {
+            status: StatusCode::PAYMENT_REQUIRED,
+            code: "AI_MONTHLY_BUDGET_EXCEEDED",
+            message: "the TM monthly OpenAI hard limit has been reached".to_owned(),
+            request_id,
+        },
+        _ => ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "AI_BUDGET_LEDGER_FAILED",
+            message: "the AI cost safety ledger could not be updated".to_owned(),
             request_id,
         },
     }
@@ -727,6 +997,52 @@ async fn security_headers(request: Request<Body>, next: Next) -> Response {
     response
 }
 
+async fn request_telemetry(request: Request<Body>, next: Next) -> Response {
+    let started = Instant::now();
+    let method = request.method().clone();
+    let route = safe_route_family(request.uri().path());
+    let request_id = request
+        .extensions()
+        .get::<RequestId>()
+        .map_or_else(|| "missing".to_owned(), |value| value.0.clone());
+    let response = next.run(request).await;
+    tracing::info!(
+        event = "http_request_completed",
+        %request_id,
+        method = %method,
+        route,
+        status = response.status().as_u16(),
+        duration_ms = started.elapsed().as_millis() as u64,
+    );
+    response
+}
+
+fn safe_route_family(path: &str) -> &'static str {
+    match path {
+        "/healthz" => "/healthz",
+        "/readyz" => "/readyz",
+        "/api/v1/auth/status" => "/api/v1/auth/status",
+        "/api/v1/ops/status" => "/api/v1/ops/status",
+        "/api/v1/ops/import" => "/api/v1/ops/import",
+        "/api/v1/ai/status" => "/api/v1/ai/status",
+        "/api/v1/ai/probe" => "/api/v1/ai/probe",
+        "/api/v1/projects" => "/api/v1/projects",
+        "/api/v1/tasks" => "/api/v1/tasks",
+        "/api/v1/checklist" => "/api/v1/checklist",
+        "/api/v1/tags" => "/api/v1/tags",
+        "/api/v1/sessions" => "/api/v1/sessions",
+        "/api/v1/worklogs" => "/api/v1/worklogs",
+        "/api/v1/notes" => "/api/v1/notes",
+        value if value.starts_with("/api/v1/desktop/commands/") => {
+            "/api/v1/desktop/commands/{command}"
+        }
+        value if value.starts_with("/api/v1/tasks/") => "/api/v1/tasks/{id}",
+        value if value.starts_with("/api/v1/checklist/") => "/api/v1/checklist/{id}",
+        value if value.starts_with("/api/v1/notes/") => "/api/v1/notes/{id}",
+        _ => "unmatched",
+    }
+}
+
 async fn assign_request_id(mut request: Request<Body>, next: Next) -> Response {
     let request_id = request
         .headers()
@@ -774,14 +1090,15 @@ mod tests {
     use serde_json::{Value, json};
     use tempfile::Builder;
     use tm_core::{
-        CreateNoteInput, CreateProjectInput, CreateTaskInput, CreateWorkLogInput, DEFAULT_TM_HOME,
-        NoteType, SessionStatus, StartSessionInput, TaskStatus, TmCore, TmHome,
+        AiBudgetPolicy, CreateNoteInput, CreateProjectInput, CreateTaskInput, CreateWorkLogInput,
+        DEFAULT_TM_HOME, NoteType, SessionStatus, StartSessionInput, TaskStatus, TmCore, TmHome,
     };
     use tower::ServiceExt;
 
     use super::{
         ServerProfile, build_cloud_authenticated_router, build_cloud_bootstrap_router,
-        build_router, build_router_with_openai, validate_bind_addr, validate_cloud_home,
+        build_cloud_import_router, build_router, build_router_with_openai, validate_bind_addr,
+        validate_cloud_home,
     };
     use crate::auth::{AuthConfig, TOKEN_PREFIX};
     use crate::openai::{OpenAiClient, OpenAiConfig};
@@ -911,6 +1228,7 @@ mod tests {
                 }],
                 "usage": {
                     "input_tokens": 12,
+                    "input_tokens_details": {"cached_tokens": 2},
                     "output_tokens": 4,
                     "total_tokens": 16
                 }
@@ -961,7 +1279,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
         assert_eq!(body["data"]["status"], "ready");
-        assert_eq!(body["data"]["schemaVersion"], 4);
+        assert_eq!(body["data"]["schemaVersion"], 5);
         assert_eq!(body["data"]["journalMode"], "wal");
     }
 
@@ -1075,7 +1393,7 @@ mod tests {
 
         let config = OpenAiConfig::for_test(
             Some("test-api-key"),
-            "gpt-test-1",
+            "gpt-5.6",
             &format!("http://{mock_address}/v1"),
             Duration::from_secs(5),
         )
@@ -1101,6 +1419,9 @@ mod tests {
         assert_eq!(body["data"]["outputText"], "TM_OPENAI_OK");
         assert_eq!(body["data"]["matchedExpectedText"], true);
         assert_eq!(body["data"]["usage"]["totalTokens"], 16);
+        assert_eq!(body["data"]["usage"]["cachedInputTokens"], 2);
+        assert_eq!(body["data"]["estimatedCostMicrousd"], 171);
+        assert_eq!(body["data"]["budget"]["committedMicrousd"], 171);
         assert_eq!(body["data"]["stored"], false);
 
         assert_eq!(
@@ -1113,7 +1434,7 @@ mod tests {
         );
         let captured_payload = capture.payload.lock().expect("lock captured payload");
         let captured_payload = captured_payload.as_ref().expect("captured payload");
-        assert_eq!(captured_payload["model"], "gpt-test-1");
+        assert_eq!(captured_payload["model"], "gpt-5.6");
         assert_eq!(captured_payload["store"], false);
         assert_eq!(captured_payload["reasoning"]["effort"], "none");
 
@@ -1314,6 +1635,72 @@ mod tests {
             .await
             .expect("call missing route with authentication");
         assert_eq!(authenticated_missing_route.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn authenticated_operations_status_is_safe_and_reports_backup_state() {
+        let (_temporary, core) = test_core();
+        let response = build_cloud_authenticated_router(core, test_auth_config())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/ops/status")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .body(Body::empty())
+                    .expect("build operations status request"),
+            )
+            .await
+            .expect("call operations status route");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["data"]["database"]["ok"], true);
+        assert_eq!(body["data"]["database"]["schemaVersion"], 5);
+        assert_eq!(body["data"]["remoteBackup"]["status"], "pending");
+        let serialized = body.to_string();
+        assert!(!serialized.contains("databasePath"));
+        assert!(!serialized.contains("TM_AUTH"));
+    }
+
+    #[tokio::test]
+    async fn ai_probe_is_blocked_before_network_when_monthly_hard_limit_would_be_crossed() {
+        let config = OpenAiConfig::for_test(
+            Some("test-api-key"),
+            "gpt-5.6",
+            "https://api.openai.com/v1",
+            Duration::from_secs(5),
+        )
+        .expect("build OpenAI config");
+        let client = OpenAiClient::new(config).expect("build OpenAI client");
+        let (_temporary, core) = test_core();
+        let policy = AiBudgetPolicy {
+            warning_limit_microusd: 10_000_000,
+            hard_limit_microusd: 20_000_000,
+        };
+        core.reserve_ai_budget(
+            "019b0000-0000-7000-8000-000000000099",
+            "openai",
+            "gpt-5.6",
+            "assistant",
+            19_999_999,
+            policy,
+        )
+        .expect("reserve almost all monthly budget");
+
+        let response = build_router_with_openai(core, client)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/ai/probe")
+                    .header("x-tm-confirm-ai-call", "probe")
+                    .body(Body::empty())
+                    .expect("build budget blocked probe"),
+            )
+            .await
+            .expect("call budget blocked probe");
+        assert_eq!(response.status(), StatusCode::PAYMENT_REQUIRED);
+        assert_eq!(
+            response_json(response).await["error"]["code"],
+            "AI_MONTHLY_BUDGET_EXCEEDED"
+        );
     }
 
     #[tokio::test]
@@ -1860,6 +2247,193 @@ mod tests {
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
         let body = response_json(response).await;
         assert_eq!(body["error"]["code"], "RESPONSE_TOO_LARGE");
+    }
+
+    #[tokio::test]
+    async fn desktop_snapshot_command_is_authenticated_and_matches_the_app_contract() {
+        let (temporary, core, _project_id, task_id) = populated_test_core();
+        let router = build_cloud_authenticated_router(core, test_auth_config());
+
+        let unauthorized = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/desktop/commands/get_app_snapshot")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"args":{}}"#))
+                    .expect("build unauthorized desktop request"),
+            )
+            .await
+            .expect("call unauthorized desktop route");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/desktop/commands/get_app_snapshot")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"args":{}}"#))
+                    .expect("build desktop snapshot request"),
+            )
+            .await
+            .expect("call desktop snapshot route");
+        drop(temporary);
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["data"]["databasePath"], "TM Cloud");
+        assert!(
+            body["data"]["tasks"]
+                .as_array()
+                .is_some_and(|tasks| tasks.iter().any(|task| task["id"] == task_id))
+        );
+    }
+
+    #[tokio::test]
+    async fn desktop_write_command_requires_exact_confirmation() {
+        let (temporary, core) = test_core();
+        let router = build_cloud_authenticated_router(core.clone(), test_auth_config());
+        let body = json!({
+            "args": {
+                "input": {
+                    "title": "Desktop bridge task",
+                    "description": "",
+                    "projectId": null,
+                    "status": "todo",
+                    "priority": "none",
+                    "dueDate": null,
+                    "tags": []
+                }
+            }
+        })
+        .to_string();
+
+        let missing_confirmation = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/desktop/commands/create_task")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .expect("build unconfirmed desktop command"),
+            )
+            .await
+            .expect("call unconfirmed desktop command");
+        assert_eq!(
+            missing_confirmation.status(),
+            StatusCode::PRECONDITION_REQUIRED
+        );
+        assert!(
+            core.list_tasks(false)
+                .expect("list unchanged tasks")
+                .is_empty()
+        );
+
+        let confirmed = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/desktop/commands/create_task")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header("x-tm-confirm-desktop-command", "create_task")
+                    .body(Body::from(body))
+                    .expect("build confirmed desktop command"),
+            )
+            .await
+            .expect("call confirmed desktop command");
+
+        assert_eq!(confirmed.status(), StatusCode::OK);
+        assert_eq!(core.list_tasks(false).expect("list created task").len(), 1);
+        drop(temporary);
+    }
+
+    #[tokio::test]
+    async fn database_import_exists_only_in_maintenance_and_requires_manifest_confirmation() {
+        let (source_temporary, source) = test_core();
+        source
+            .create_task(CreateTaskInput {
+                project_id: None,
+                title: "Imported production task".to_owned(),
+                description: "content remains inside the SQLite upload".to_owned(),
+                status: TaskStatus::Todo,
+                priority: 2,
+                due_date: None,
+            })
+            .expect("create import source task");
+        let dry_run = source
+            .migration_dry_run()
+            .expect("create verified import snapshot");
+        let snapshot = fs::read(&dry_run.snapshot_artifact.path).expect("read import snapshot");
+
+        let (target_temporary, target) = test_core();
+        let normal_response = build_cloud_authenticated_router(target.clone(), test_auth_config())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/ops/import")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .body(Body::from(snapshot.clone()))
+                    .expect("build normal-mode import request"),
+            )
+            .await
+            .expect("call normal-mode import route");
+        assert_eq!(normal_response.status(), StatusCode::NOT_FOUND);
+
+        let maintenance = build_cloud_import_router(target.clone(), test_auth_config());
+        let wrong_confirmation = maintenance
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/ops/import")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("x-tm-confirm-import", "0".repeat(64))
+                    .body(Body::from(snapshot.clone()))
+                    .expect("build mismatched import request"),
+            )
+            .await
+            .expect("call mismatched import route");
+        assert_eq!(wrong_confirmation.status(), StatusCode::CONFLICT);
+        assert!(
+            target
+                .list_tasks(false)
+                .expect("list unchanged target")
+                .is_empty()
+        );
+
+        let imported = maintenance
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/ops/import")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header(
+                        "x-tm-confirm-import",
+                        dry_run.source.logical_sha256.as_str(),
+                    )
+                    .body(Body::from(snapshot))
+                    .expect("build confirmed import request"),
+            )
+            .await
+            .expect("call confirmed import route");
+        assert_eq!(imported.status(), StatusCode::OK);
+        let body = response_json(imported).await;
+        assert_eq!(body["data"]["imported"], true);
+        assert_eq!(
+            body["data"]["manifest"]["logicalSha256"],
+            dry_run.source.logical_sha256
+        );
+        assert_eq!(
+            target.list_tasks(false).expect("list imported tasks")[0].title,
+            "Imported production task"
+        );
+        drop((source_temporary, target_temporary));
     }
 
     #[test]

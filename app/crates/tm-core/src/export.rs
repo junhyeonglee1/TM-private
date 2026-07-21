@@ -34,6 +34,7 @@ pub(crate) const EXPORTED_TABLES: &[&str] = &[
     "change_request_events",
     "mutation_idempotency_records",
     "mutation_audit_events",
+    "ai_budget_ledger",
     "app_state",
 ];
 

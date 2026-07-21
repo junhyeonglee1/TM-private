@@ -20,6 +20,7 @@ tauri-build.workspace = true
 [dependencies]
 chrono.workspace = true
 chrono-tz.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tauri.workspace = true
@@ -30,6 +31,7 @@ tm-core = { path = "../crates/tm-core" }
 tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

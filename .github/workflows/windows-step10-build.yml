@@ -1,0 +1,83 @@
+name: STEP 10 Windows build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    defaults:
+      run:
+        working-directory: app
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Set up pnpm
+        shell: pwsh
+        run: |
+          corepack enable
+          corepack install
+          pnpm --version
+
+      - name: Set up Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.97.0 --profile minimal --target x86_64-pc-windows-msvc --component rustfmt,clippy
+          rustup default 1.97.0
+          rustc --version
+          cargo --version
+
+      - name: Install frontend dependencies
+        shell: pwsh
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify frontend
+        shell: pwsh
+        run: |
+          pnpm lint
+          pnpm typecheck
+          pnpm test
+
+      - name: Verify Rust workspace
+        shell: pwsh
+        run: |
+          cargo fmt --all -- --check
+          cargo test --locked --workspace
+          cargo clippy --locked --workspace --all-targets -- -D warnings
+
+      - name: Build Windows executables
+        shell: pwsh
+        run: |
+          pnpm exec tauri build --target x86_64-pc-windows-msvc --no-bundle --features custom-protocol -- --locked
+          cargo build --locked --release --target x86_64-pc-windows-msvc -p tm-cli --bin tm-cli
+
+      - name: Prepare verified artifact
+        shell: pwsh
+        run: |
+          $artifact = Join-Path $env:RUNNER_TEMP 'tm-step10-windows-x64'
+          New-Item -ItemType Directory -Force -Path $artifact | Out-Null
+          Copy-Item 'target\x86_64-pc-windows-msvc\release\tm.exe' $artifact
+          Copy-Item 'target\x86_64-pc-windows-msvc\release\tm-cli.exe' $artifact
+          Get-FileHash -Algorithm SHA256 (Join-Path $artifact 'tm.exe'), (Join-Path $artifact 'tm-cli.exe') |
+            ForEach-Object { '{0}  {1}' -f $_.Hash.ToLowerInvariant(), (Split-Path -Leaf $_.Path) } |
+            Set-Content -Encoding ascii (Join-Path $artifact 'SHA256SUMS.txt')
+
+      - name: Upload Windows executables
+        uses: actions/upload-artifact@v4
+        with:
+          name: tm-step10-windows-x64
+          path: ${{ runner.temp }}\tm-step10-windows-x64
+          if-no-files-found: error
+          retention-days: 1

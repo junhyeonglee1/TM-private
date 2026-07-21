@@ -14,13 +14,19 @@ STEP 7의 `/api/v1` 조회 route는 `cloud-authenticated` profile에만 존재�
 
 STEP 8은 Task·Note 생성/수정과 Checklist 완료 상태 변경만 typed command로 허용한다. 모든 mutation은 bearer 인증 외에도 idempotency key, 정수 version precondition, operation 확인을 요구하고 domain 변경·중복 결과·before/after 감사를 한 transaction에 기록한다. 삭제·금전·외부 전송·계정·권한 변경 route는 없다.
 
+STEP 9는 schema 5 append-only AI 비용 원장과 월 hard stop, Railway Bucket으로 client-side 암호화하는 SQLite backup, 일·주·월 보존, 복구 drill, 인증된 운영 상태와 민감정보를 제외한 request telemetry를 추가한다. staging 검증을 통과한 동일 image만 production으로 승격한다.
+
+STEP 10은 데스크톱의 명시적 local/cloud transport, Windows Credential Locker token 경계, 현재 기능 전체의 first-party command allowlist와 maintenance-only database import를 추가한다. 자동 sync나 양방향 write는 허용하지 않으며 source/cloud logical manifest가 완전히 일치한 뒤에만 cloud를 단일 기준 원본으로 전환한다.
+
 - [수동 승인 개선 요청 흐름](change-request-workflow.md)
 - [데이터 기준 원본과 migration 안전 설계](data-authority-and-migration.md)
+- [데스크톱 cloud transport와 cutover 경계](desktop-cloud-transport.md)
 - [인증된 read-only TM API v1](read-only-api-v1.md)
 - [통제된 TM write API v1](controlled-write-api-v1.md)
 - [TM AI 비서 시스템 구축 로드맵](../operations/tm-ai-assistant-roadmap.md)
 - [OpenAI 로컬 연결 설정](../operations/openai-local-setup.md)
 - [Railway Hobby bootstrap 배포](../operations/railway-bootstrap-deploy.md)
+- [STEP 9 백업·복구·모니터링·비용 안전장치](../operations/step9-backup-monitoring-cost.md)
 - [STEP 5 단일 사용자 인증](../operations/single-user-auth-setup.md)
 
 기본 홈은 `C:\Users\tkfk0\Desktop\codex\TM`이다. 테스트는 프로세스별 임시 `TM_HOME`을 사용한다. 모든 저장 시각은 UTC RFC 3339로 기록하고, 사용자 날짜는 `Asia/Seoul`로 계산한다.

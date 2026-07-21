@@ -87,7 +87,7 @@ fn file_sha256(path: &std::path::Path) -> Result<String> {
 #[test]
 fn current_schema_exports_queue_and_validates_required_content() -> Result<()> {
     let (_temporary, core) = fixture()?;
-    assert_eq!(core.health()?.schema_version, 4);
+    assert_eq!(core.health()?.schema_version, 5);
 
     let mut invalid = create_input("필수 검증", 1);
     invalid.description.clear();
@@ -124,7 +124,7 @@ fn opening_v1_database_creates_pre_migration_backup_and_applies_all_migrations()
     drop(connection);
 
     let core = TmCore::open(TmHome::new(temporary.path()))?;
-    assert_eq!(core.health()?.schema_version, 4);
+    assert_eq!(core.health()?.schema_version, 5);
     assert!(
         core.list_backups()?
             .iter()
@@ -155,7 +155,7 @@ fn opening_v2_database_creates_pre_migration_backup_and_applies_current_schema()
     drop(connection);
 
     let core = TmCore::open(TmHome::new(temporary.path()))?;
-    assert_eq!(core.health()?.schema_version, 4);
+    assert_eq!(core.health()?.schema_version, 5);
     let backups = core.list_backups()?;
     let pre_migration = backups
         .iter()
@@ -405,7 +405,8 @@ fn restoring_v1_backup_migrates_and_preserves_non_rewindable_ledger() -> Result<
     let backup_path = std::path::Path::new(&backup.path);
     let v1 = Connection::open(backup_path)?;
     v1.execute_batch(
-        "DROP TABLE mutation_audit_events;
+        "DROP TABLE ai_budget_ledger;
+         DROP TABLE mutation_audit_events;
          DROP TABLE mutation_idempotency_records;
          ALTER TABLE tasks DROP COLUMN version;
          ALTER TABLE checklist_items DROP COLUMN version;
@@ -443,7 +444,7 @@ fn restoring_v1_backup_migrates_and_preserves_non_rewindable_ledger() -> Result<
     let protected_ids = [claimed.id, completed.id, failed.id, cancelled.id];
 
     core.restore_backup(backup_path)?;
-    assert_eq!(core.health()?.schema_version, 4);
+    assert_eq!(core.health()?.schema_version, 5);
     let restored = core.list_change_requests()?;
     for id in &protected_ids {
         assert!(restored.iter().any(|request| &request.id == id));

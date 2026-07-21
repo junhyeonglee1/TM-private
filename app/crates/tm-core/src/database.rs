@@ -13,13 +13,14 @@ use uuid::Uuid;
 
 use crate::{Error, Result, TmHome};
 
-pub(crate) const SCHEMA_VERSION: i64 = 4;
+pub(crate) const SCHEMA_VERSION: i64 = 5;
 const INITIAL_MIGRATION: &str = include_str!("../migrations/0001_initial.sql");
 const CHANGE_REQUESTS_MIGRATION: &str = include_str!("../migrations/0002_change_requests.sql");
 const CHANGE_REQUESTS_STRICT_CAS_MIGRATION: &str =
     include_str!("../migrations/0003_change_request_strict_cas.sql");
 const CONTROLLED_MUTATIONS_MIGRATION: &str =
     include_str!("../migrations/0004_controlled_mutations.sql");
+const AI_BUDGET_GUARD_MIGRATION: &str = include_str!("../migrations/0005_ai_budget_guard.sql");
 const BUSY_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone)]
@@ -145,6 +146,18 @@ impl Database {
                 [now_utc()],
             )?;
             transaction.pragma_update(None, "user_version", 4_i64)?;
+            transaction.commit()?;
+        }
+        if current_version < 5 {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(AI_BUDGET_GUARD_MIGRATION)?;
+            transaction.execute(
+                "INSERT INTO schema_migrations(version, name, applied_at)
+                 VALUES (5, 'ai-budget-guard', ?1)",
+                [now_utc()],
+            )?;
+            transaction.pragma_update(None, "user_version", 5_i64)?;
             transaction.commit()?;
         }
         Ok(())

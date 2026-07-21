@@ -7,16 +7,17 @@ use rusqlite::{
 use serde_json::{Value, json};
 
 use crate::{
-    Attachment, BackupArtifact, BackupInfo, ChangeRequest, ChangeRequestClaim, ChangeRequestEvent,
-    ChecklistItem, ChecklistMutationInput, CreateAttachmentInput, CreateChangeRequestInput,
-    CreateLinkInput, CreateNoteAggregateInput, CreateNoteInput, CreateProjectInput,
-    CreateTaskAggregateInput, CreateTaskInput, CreateWorkLogInput, DigestDelivery, DigestKind,
-    DigestPreparation, EndSessionInput, EntityLink, EntityType, Error, ExportArtifact,
-    HealthReport, LinkTargetType, MigrationDryRun, MigrationManifest, Note, NoteAggregate,
-    NotePatch, NoteType, Project, Result, SearchHit, SessionCompletion, SessionStatus,
-    StartSessionInput, Tag, Task, TaskAggregate, TaskDayEntry, TaskDayStatus, TaskEvent, TaskPatch,
-    TaskStatus, TmHome, TrashEntityType, TrashItem, UpdateChangeRequestInput,
-    UpdateTaskAggregateInput, WorkLog, WorkSession, backup, change_request,
+    AiBudgetPolicy, AiBudgetReservation, AiBudgetStatus, AiTokenUsage, Attachment, BackupArtifact,
+    BackupInfo, ChangeRequest, ChangeRequestClaim, ChangeRequestEvent, ChecklistItem,
+    ChecklistMutationInput, CreateAttachmentInput, CreateChangeRequestInput, CreateLinkInput,
+    CreateNoteAggregateInput, CreateNoteInput, CreateProjectInput, CreateTaskAggregateInput,
+    CreateTaskInput, CreateWorkLogInput, DigestDelivery, DigestKind, DigestPreparation,
+    EndSessionInput, EntityLink, EntityType, Error, ExportArtifact, HealthReport, LinkTargetType,
+    MigrationDryRun, MigrationManifest, Note, NoteAggregate, NotePatch, NoteType, Project, Result,
+    SearchHit, SessionCompletion, SessionStatus, StartSessionInput, Tag, Task, TaskAggregate,
+    TaskDayEntry, TaskDayStatus, TaskEvent, TaskPatch, TaskStatus, TmHome, TrashEntityType,
+    TrashItem, UpdateChangeRequestInput, UpdateTaskAggregateInput, WorkLog, WorkSession, ai_budget,
+    backup, change_request,
     database::{Database, SCHEMA_VERSION, new_id, now_utc, today_seoul},
     digest,
     error::{invalid, not_found},
@@ -1108,6 +1109,48 @@ impl TmCore {
             &self.home().database_path(),
             &self.home().database_backups_dir(),
             "manual",
+        )
+    }
+
+    pub fn ai_budget_status(&self, policy: AiBudgetPolicy) -> Result<AiBudgetStatus> {
+        ai_budget::status(&self.database, policy)
+    }
+
+    pub fn reserve_ai_budget(
+        &self,
+        request_id: &str,
+        provider: &str,
+        model: &str,
+        operation: &str,
+        maximum_cost_microusd: u64,
+        policy: AiBudgetPolicy,
+    ) -> Result<AiBudgetReservation> {
+        ai_budget::reserve(
+            &self.database,
+            request_id,
+            provider,
+            model,
+            operation,
+            maximum_cost_microusd,
+            policy,
+        )
+    }
+
+    pub fn settle_ai_budget(
+        &self,
+        reservation: &AiBudgetReservation,
+        actual_cost_microusd: u64,
+        usage: Option<AiTokenUsage>,
+        outcome: &str,
+        policy: AiBudgetPolicy,
+    ) -> Result<AiBudgetStatus> {
+        ai_budget::settle(
+            &self.database,
+            reservation,
+            actual_cost_microusd,
+            usage,
+            outcome,
+            policy,
         )
     }
 

@@ -66,7 +66,12 @@ export interface TmApi {
 }
 
 class TauriTransport implements CommandTransport {
+  private readonly mode = tauriInvoke<"local" | "cloud">("data_mode");
+
   async invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+    if ((await this.mode) === "cloud") {
+      return tauriInvoke<T>("invoke_cloud_command", { command, args: args ?? {} });
+    }
     return tauriInvoke<T>(command, args);
   }
 }

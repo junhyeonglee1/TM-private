@@ -72,8 +72,8 @@ API 키와 비밀번호는 채팅, Git, 소스 파일 또는 일반 로그에 �
 | 6 | 데이터 기준 원본과 migration 안전 설계 | 완료 |
 | 7 | 인증된 read-only TM 데이터 API | 완료 |
 | 8 | 통제된 write API와 감사 기록 | 완료 |
-| 9 | 백업·복구·모니터링·비용 안전장치 | 대기 |
-| 10 | 데스크톱 cloud mode와 일회성 cutover | 대기 |
+| 9 | 백업·복구·모니터링·비용 안전장치 | 완료 |
+| 10 | 데스크톱 cloud mode와 일회성 cutover | 진행 중 |
 | 11 | Cloud OpenAI와 read-only 오케스트레이터 | 대기 |
 | 12 | 실행 승인·취소·도구 정책 | 대기 |
 | 13 | 장기 기억·검색·컨텍스트 예산 | 대기 |
@@ -417,7 +417,7 @@ Production 검증 기록:
 
 ## STEP 9 — 백업·복구·모니터링·비용 안전장치
 
-상태: 대기
+상태: 완료
 
 Codex 권장 기본안:
 
@@ -427,29 +427,35 @@ Codex 권장 기본안:
 
 사용자 결정 게이트:
 
-- [ ] 외부 backup 저장소와 필요한 결제 승인
-- [ ] backup 보존 기간과 허용 가능한 데이터 손실 시간 승인
-- [ ] Railway·OpenAI 월 비용 경고선과 hard stop 기준 승인
+- [x] 외부 backup 저장소와 필요한 결제 승인
+- [x] backup 보존 기간과 허용 가능한 데이터 손실 시간 승인
+- [x] Railway·OpenAI 월 비용 경고선과 hard stop 기준 승인
 
 Codex TODO:
 
-- [ ] 일관된 SQLite backup과 외부 암호화 저장 구현
-- [ ] 일·주·월 retention과 자동 무결성 검사 구현
-- [ ] 빈 환경에서 backup restore 훈련과 checksum 검증
-- [ ] staging environment와 배포 승격 절차를 구축하고 성공 mutation·idempotency·충돌 smoke test 수행
-- [ ] API latency·오류율·rate limit·Volume 사용량 관측
-- [ ] OpenAI 요청별 token·비용 기록 schema와 예산 차단 장치 준비
-- [ ] 로그 redaction과 request ID 기반 추적 검증
-- [ ] 장애·비용 초과 알림 경로 구성
+- [x] 일관된 SQLite backup과 외부 암호화 저장 구현
+- [x] 일·주·월 retention과 자동 무결성 검사 구현
+- [x] 빈 환경에서 backup restore 훈련과 checksum 검증
+- [x] staging environment와 배포 승격 절차를 구축하고 성공 mutation·idempotency·충돌 smoke test 수행
+- [x] API latency·오류율·rate limit·Volume 사용량 관측 기반 구현
+- [x] OpenAI 요청별 token·비용 기록 schema와 예산 차단 장치 준비
+- [x] 로그 redaction과 request ID 기반 추적 검증
+- [x] Railway deployment failure·crash·OOM·usage email/in-app 알림 경로 확인
+- [x] Railway CPU·RAM·disk·network monitor는 Hobby에서 사용할 수 없어 Pro 승격 전까지 보류
+- [x] OpenAI platform USD 10 monthly budget email alert는 결제수단 등록과 함께 STEP 11에서 설정하도록 이관
+- [x] production schema 5 read-only 검증 후 첫 암호화 backup 생성 및 상태 확인
+- [x] production 암호화 backup restore drill 수행
 
 완료 게이트:
 
 - Volume이나 배포 환경이 사라져도 검증된 backup으로 복구할 수 있다.
 - 비용과 장애를 감지하고 설정한 기준에서 알림 또는 중단할 수 있다.
 
+확정 정책과 복구 절차: [STEP 9 백업·복구·모니터링·비용 안전장치](step9-backup-monitoring-cost.md)
+
 ## STEP 10 — 데스크톱 cloud mode와 일회성 cutover
 
-상태: 대기
+상태: 진행 중 — 비파괴 사전 준비
 
 Codex 권장 기본안:
 
@@ -467,6 +473,8 @@ Codex 권장 기본안:
 
 Codex TODO:
 
+- [x] 로컬 DB 원문 비노출 inventory와 read-only integrity·foreign key 사전검사
+- [ ] `tm-cli migration` manifest·dry-run·inspect 명령의 Windows format·test·clippy 통과
 - [ ] 인증된 HTTPS desktop client와 오류 contract 구현
 - [ ] 인증 토큰을 OS 보안 저장소에 보관하고 로그·UI 노출 차단
 - [ ] local/cloud mode 전환 UI와 잘못된 동시 실행 차단
@@ -479,6 +487,8 @@ Codex TODO:
 
 - 현재 데스크톱 기능이 cloud 기준 DB에서 정상 동작한다.
 - local/cloud 양쪽에 서로 다른 최신 데이터가 생기지 않는다.
+
+확정 전 inventory와 cutover 절차: [STEP 10 데스크톱 cloud mode와 일회성 cutover](step10-cloud-cutover.md)
 
 ## STEP 11 — Cloud OpenAI와 read-only 오케스트레이터
 

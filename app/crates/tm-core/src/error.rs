@@ -27,6 +27,15 @@ pub enum Error {
     #[error("conflict: {0}")]
     Conflict(String),
 
+    #[error(
+        "AI monthly hard limit would be exceeded: current={current_microusd} microUSD, requested={requested_microusd} microUSD, limit={hard_limit_microusd} microUSD"
+    )]
+    AiBudgetExceeded {
+        current_microusd: u64,
+        requested_microusd: u64,
+        hard_limit_microusd: u64,
+    },
+
     #[error("data invariant violated: {0}")]
     Invariant(String),
 
