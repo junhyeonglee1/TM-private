@@ -22,6 +22,8 @@ STEP 11은 인증된 cloud 서버에 OpenAI Responses API와 read-only 오케스
 
 STEP 12는 기존 7개 자동 read-only 도구에 승인 요청 전용 `propose_task_create`를 추가한다. 제안은 Task를 만들지 않으며 10분 안에 인증된 별도 API에서 locked payload의 revision·SHA-256을 확인하고 1회 승인해야 한다. 승인 후 기존 controlled mutation을 즉시 실행하고 idempotency와 append-only approval audit로 중복·변조·되감기를 막는다.
 
+STEP 13은 원본 TM 데이터와 AI 기억을 schema 7에서 분리한다. 사용자 기억은 명시적 요청과 STEP 12 승인 뒤에만 생성·수정·삭제되며 private·restricted 정보와 금지된 비밀값은 OpenAI로 전달되지 않는다. retrieval은 외부 vector 서비스 없이 SQLite FTS5와 구조화 filter를 사용하고 요청 종류별 최대 6/10/12개, 절대 6,144 bytes 안에서 관련 기억만 전달한다. 일·주·월 요약은 로컬 결정론적 계산이며 출처·보존·삭제를 append-only 이벤트로 추적한다.
+
 - [수동 승인 개선 요청 흐름](change-request-workflow.md)
 - [데이터 기준 원본과 migration 안전 설계](data-authority-and-migration.md)
 - [데스크톱 cloud transport와 cutover 경계](desktop-cloud-transport.md)
@@ -29,11 +31,13 @@ STEP 12는 기존 7개 자동 read-only 도구에 승인 요청 전용 `propose_
 - [통제된 TM write API v1](controlled-write-api-v1.md)
 - [STEP 11 read-only AI 오케스트레이터](read-only-ai-orchestrator.md)
 - [STEP 12 AI 실행 승인 경계](assistant-action-approval.md)
+- [STEP 13 장기 기억·검색·컨텍스트 예산](assistant-memory-context.md)
 - [TM AI 비서 시스템 구축 로드맵](../operations/tm-ai-assistant-roadmap.md)
 - [OpenAI 로컬 연결 설정](../operations/openai-local-setup.md)
 - [Railway Hobby bootstrap 배포](../operations/railway-bootstrap-deploy.md)
 - [STEP 9 백업·복구·모니터링·비용 안전장치](../operations/step9-backup-monitoring-cost.md)
 - [STEP 12 실행 승인 운영 절차](../operations/step12-action-approval.md)
+- [STEP 13 기억·검색 운영 절차](../operations/step13-memory-context.md)
 - [STEP 5 단일 사용자 인증](../operations/single-user-auth-setup.md)
 
 기본 홈은 `C:\Users\tkfk0\Desktop\codex\TM`이다. 테스트는 프로세스별 임시 `TM_HOME`을 사용한다. 모든 저장 시각은 UTC RFC 3339로 기록하고, 사용자 날짜는 `Asia/Seoul`로 계산한다.

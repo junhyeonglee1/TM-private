@@ -74,9 +74,9 @@ API 키와 비밀번호는 채팅, Git, 소스 파일 또는 일반 로그에 �
 | 8 | 통제된 write API와 감사 기록 | 완료 |
 | 9 | 백업·복구·모니터링·비용 안전장치 | 완료 |
 | 10 | 데스크톱 cloud mode와 일회성 cutover | 완료 |
-| 11 | Cloud OpenAI와 read-only 오케스트레이터 | 진행 중 |
-| 12 | 실행 승인·취소·도구 정책 | 대기 |
-| 13 | 장기 기억·검색·컨텍스트 예산 | 대기 |
+| 11 | Cloud OpenAI와 read-only 오케스트레이터 | 완료 |
+| 12 | 실행 승인·취소·도구 정책 | 완료 |
+| 13 | 장기 기억·검색·컨텍스트 예산 | 완료 |
 | 14 | 스케줄러·작업 큐·정기 실행 기반 | 대기 |
 | 15 | 모바일·원격 클라이언트와 기기 인증 | 대기 |
 | 16 | 보안 강화·사고 대응·운영 준비 | 대기 |
@@ -564,7 +564,7 @@ Codex TODO:
 
 ## STEP 13 — 장기 기억·검색·컨텍스트 예산
 
-상태: 대기
+상태: 완료 — schema 7 기억·출처·감사·FTS와 승인형 CRUD, 결정론적 요약, 컨텍스트 예산을 구현하고 Railway production 비과금 검증을 통과
 
 Codex 권장 기본안:
 
@@ -575,23 +575,29 @@ Codex 권장 기본안:
 
 사용자 결정 게이트:
 
-- [ ] 장기 기억으로 저장할 정보 범위 승인
-- [ ] 자동 저장과 명시적 저장 정책 승인
-- [ ] 보존 기간·삭제 정책과 OpenAI 전송 금지 정보 승인
+- [x] 장기 기억으로 저장할 정보 범위 승인: preference·goal·routine·constraint·reference·summary
+- [x] 자동 저장과 명시적 저장 정책 승인: 사용자 기억은 명시적 요청만 허용하고 생성·수정·삭제 모두 STEP 12 승인 적용
+- [x] 보존 기간·삭제 정책과 OpenAI 전송 금지 정보 승인: 사용자 기억은 삭제 시까지, 파생 요약은 일 90일·주 1년·월 3년, private·restricted와 비밀값은 OpenAI 전송 금지
 
 Codex TODO:
 
-- [ ] memory source, provenance, sensitivity, retention schema 구현
-- [ ] 구조화 filter와 FTS 기반 retrieval 구현
-- [ ] 일·주·월 요약 계층과 재생성 규칙 구현
-- [ ] 요청 종류별 context·token 상한과 truncation 정책 적용
-- [ ] 기억 조회·수정·삭제와 감사 이벤트 구현
-- [ ] 삭제된 원본의 파생 기억 정리와 retention job 구현
-- [ ] 장기 데이터 규모와 비용 회귀 테스트
+- [x] memory source, provenance, sensitivity, retention schema 구현
+- [x] 구조화 filter와 FTS 기반 retrieval 구현
+- [x] 일·주·월 요약 계층과 재생성 규칙 구현
+- [x] 요청 종류별 context·token 상한과 truncation 정책 적용
+- [x] 기억 조회·수정·삭제와 감사 이벤트 구현
+- [x] 삭제된 원본의 파생 기억 정리와 retention job 구현
+- [x] 장기 데이터 규모와 비용 회귀 테스트
 
 완료 게이트:
 
-- 데이터가 늘어도 관련 정보만 제한된 비용으로 사용하고 기억의 출처·수정·삭제를 추적할 수 있다.
+- [x] 250개 기억 회귀 테스트에서 일반 요청은 최대 6개·2,048 bytes, 절대 상한은 12개·6,144 bytes로 제한되고 외부 vector service를 사용하지 않았다.
+- [x] 명시적 기억의 승인 전 무변경, 승인 후 1회 실행, revision 충돌, append-only 출처·수정·삭제 이벤트를 확인했다.
+- [x] private·restricted와 비밀값의 OpenAI 전달을 차단하고 삭제된 원본의 파생 기억 정리와 일·주·월 retention을 확인했다.
+- [x] GitHub Actions Windows CI #13에서 fail-fast workspace test·clippy와 `tm.exe`·`tm-cli.exe` release artifact 생성을 통과했다.
+- [x] Railway production 배포 `4b850b1b-fa4a-4e68-8c9f-8b578af5c098`에서 schema 7, `step13-v1`, SQLite FTS5, 자동 저장 비활성화, 승인 필수, 컨텍스트 상한을 확인했다. 검증은 OpenAI 호출과 production 기억 mutation 없이 완료했다.
+
+구현 계약과 운영 검증 절차: [STEP 13 장기 기억·검색·컨텍스트 예산](../architecture/assistant-memory-context.md), [STEP 13 기억·검색 운영 절차](step13-memory-context.md)
 
 ## STEP 14 — 스케줄러·작업 큐·정기 실행 기반
 
