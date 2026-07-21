@@ -1,9 +1,6 @@
 name: STEP 10 Windows build
 
 on:
-  push:
-    branches:
-      - agent/step10-cloud-cutover
   workflow_dispatch:
 
 permissions:

@@ -2,19 +2,19 @@
 
 ## 현재 상태
 
-실데이터 전송과 기준 원본 전환 전의 구현·검증 단계다. 로컬 TM DB와 Railway production DB는 아직 서로 독립적이며, 현재 기준 원본은 로컬 DB다.
+2026-07-21 cutover와 검증이 완료됐다. Railway production DB가 유일한 기준 원본이며, 로컬 DB는 2026-10-19까지 read-only rollback archive로 보존한다.
 
 2026-07-21 read-only inventory:
 
 | 항목 | 결과 |
 | --- | --- |
 | 로컬 DB | `C:\Users\tkfk0\Desktop\codex\TM\data\tm.sqlite3` |
-| schema | 3; 실제 cutover 전 검증된 앱으로 schema 5 migration 필요 |
+| schema | 원본 schema 3을 보관하고 검증된 schema 5 snapshot으로 migration 완료 |
 | 무결성 | SQLite integrity `ok`, foreign key 위반 0 |
 | 사용자 데이터 | Project 2, Task 2, Task event 5 |
 | 그 외 이전 대상 | Checklist·Tag·일정·Session·WorkLog·Note·Change Request 모두 0 |
 | 첨부파일 | 0개, 0 byte |
-| production | schema 5, encrypted backup 및 restore drill 통과; 아직 사용자 실데이터를 넣지 않음 |
+| production | schema 5, encrypted backup·restore drill·실데이터 import·desktop HTTPS 조회 통과 |
 
 inventory에는 제목·본문·파일명 같은 원문을 기록하지 않는다.
 
@@ -31,6 +31,17 @@ Codex 권장 기본안:
 이 다섯 항목의 사용자 승인 전에는 로컬 DB migration, production maintenance mode, 파일 업로드, DB 교체를 실행하지 않는다.
 
 2026-07-21 사용자 승인: 전체 이전, 검증 후 cloud 단일 원본, 최대 30분 maintenance, 제외 없음, local archive 90일 보존.
+
+## 완료 기록
+
+- maintenance window 안에서 schema 5 snapshot을 production에 import하고 정상 router로 복귀했다.
+- source와 production의 logical SHA-256은 `e66d9e33b3dc8fa22551a1914e9dcbd7ac3ac657a77355e37d170da9b4a758ba`로 일치한다.
+- production은 schema 5, database health 정상, encrypted remote backup `succeeded`를 반환했다.
+- 인증된 desktop snapshot에서 Project 2개와 Task 2개를 확인했고 maintenance-only import route는 정상 mode에서 `404`다.
+- GitHub Actions Windows run `29815250852`가 만든 x64 `tm.exe`의 SHA-256 `e6a49ae1355cca9658f5cac7c764d87511965ec0bd963454675a9c571ee82798`을 검증해 루트 실행 파일로 설치했다.
+- 최종 `TM\tm.exe`의 `tm-desktop/0.1.5` 요청이 production deployment `31be7ede-da86-448b-a69c-a00bb42ccd98`에서 `200`을 반환했다.
+- 토큰은 Windows Credential Locker의 `TM Cloud Production`에만 저장되며 `data\cloud-client.json`에는 cloud mode와 HTTPS origin만 저장한다.
+- 로컬 DB, 원본 schema 3 backup, schema 5 cutover snapshot은 read-only로 표시했고 2026-10-19까지 보존한다.
 
 ## 준비된 비노출 검증 도구
 

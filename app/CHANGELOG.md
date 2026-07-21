@@ -30,6 +30,8 @@
 - 인증된 운영 상태 API와 request ID·route family·status·latency만 남기는 Railway JSON 로그를 추가했다.
 - production schema 5와 STEP 11 전 AI route 격리를 과금·mutation 없이 확인하고, AI route 활성화 후에는 USD 10/20 예산 경계도 확인하는 STEP 9 PowerShell 검증 도구를 추가했다.
 - row 원문을 노출하지 않고 현재 DB manifest, 일관 snapshot dry-run, 후보 snapshot 검사를 수행하는 `tm-cli migration` 명령과 STEP 10 검증 스크립트를 추가했다.
+- Windows Credential Locker와 HTTPS desktop command bridge를 사용하는 명시적 cloud mode를 추가했다.
+- schema 5 snapshot을 maintenance mode에서만 검증·import하고 실패 시 자동 rollback하는 STEP 10 cutover 경계를 추가했다.
 
 ### Changed
 
@@ -38,6 +40,7 @@
 - 현재 mutation ledger와 일치하지 않는 backup 복원을 거부해 감사·idempotency 이력의 rewind를 차단했다.
 - 현재 AI 비용 ledger와 일치하지 않는 backup 복원을 거부해 비용 이력의 rewind를 차단했다.
 - Windows PowerShell 5.1이 한국어 검증 문구와 기본 결과 경로를 올바르게 처리하도록 production 검증 스크립트를 UTF-8 BOM 형식과 본문 경로 계산 방식으로 고정했다.
+- cloud client 설정이 실제 TM home의 `data\cloud-client.json`을 사용하도록 수정하고, 토큰 형식·401 재입력과 운영 snapshot·backup·import route 격리를 저장 전에 검증하도록 강화했다.
 
 ### Verified
 
@@ -59,6 +62,10 @@
 - production 암호화 backup을 `/tmp`에 복원해 checksum·schema 5·SQLite 무결성·foreign key 검사를 통과했고 활성 DB가 바뀌지 않음을 확인했다.
 - production restore drill용 일회용 Railway SSH key와 모든 로컬 key 파일을 폐기하고, 검증 완료 후 staging deployment를 중지하면서 Volume은 보존했다.
 - STEP 10 사전 inventory에서 local schema 3 DB의 integrity와 foreign key가 정상이고 Project 2·Task 2·Task event 5, 첨부파일 0개임을 원문 비노출 방식으로 확인했다.
+- GitHub Actions Windows run `29812300709`에서 frontend와 Rust workspace test·clippy·release build를 통과했고, 후속 성공 run `29815250852`에서 x64 `tm.exe`·`tm-cli.exe` artifact를 내려받아 SHA-256을 재검증했다.
+- production import의 logical SHA-256 `e66d9e33b3dc8fa22551a1914e9dcbd7ac3ac657a77355e37d170da9b4a758ba`가 source와 일치하고 encrypted remote backup이 성공했음을 확인했다.
+- 정상 router 복귀 후 인증된 desktop snapshot에서 Project 2개·Task 2개를 확인하고 import route `404`, 최종 `tm-desktop/0.1.5` snapshot 요청 `200`을 확인했다.
+- cloud를 단일 기준 원본으로 전환하고 로컬 DB·schema 3 backup·schema 5 snapshot을 2026-10-19까지 read-only archive로 고정했다.
 
 ## [0.1.5]
 

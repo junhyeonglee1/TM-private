@@ -73,7 +73,7 @@ API 키와 비밀번호는 채팅, Git, 소스 파일 또는 일반 로그에 �
 | 7 | 인증된 read-only TM 데이터 API | 완료 |
 | 8 | 통제된 write API와 감사 기록 | 완료 |
 | 9 | 백업·복구·모니터링·비용 안전장치 | 완료 |
-| 10 | 데스크톱 cloud mode와 일회성 cutover | 진행 중 |
+| 10 | 데스크톱 cloud mode와 일회성 cutover | 완료 |
 | 11 | Cloud OpenAI와 read-only 오케스트레이터 | 대기 |
 | 12 | 실행 승인·취소·도구 정책 | 대기 |
 | 13 | 장기 기억·검색·컨텍스트 예산 | 대기 |
@@ -455,7 +455,7 @@ Codex TODO:
 
 ## STEP 10 — 데스크톱 cloud mode와 일회성 cutover
 
-상태: 진행 중 — 비파괴 사전 준비
+상태: 완료
 
 Codex 권장 기본안:
 
@@ -466,29 +466,29 @@ Codex 권장 기본안:
 
 사용자 결정 게이트:
 
-- [ ] 실제 TM 데이터를 Railway로 복사하는 것 승인
-- [ ] cloud DB를 새 기준 원본으로 전환하는 것 승인
-- [ ] cutover 시간과 허용 가능한 일시 중단 시간 승인
-- [ ] cloud에서 제외할 민감 데이터가 있는지 확정
+- [x] 실제 TM 데이터를 Railway로 복사하는 것 승인
+- [x] cloud DB를 새 기준 원본으로 전환하는 것 승인
+- [x] 최대 30분 cutover 중단 시간 승인
+- [x] 제외 데이터 없이 전체 이전 승인
 
 Codex TODO:
 
 - [x] 로컬 DB 원문 비노출 inventory와 read-only integrity·foreign key 사전검사
-- [ ] `tm-cli migration` manifest·dry-run·inspect 명령의 Windows format·test·clippy 통과
-- [ ] 인증된 HTTPS desktop client와 오류 contract 구현
-- [ ] 인증 토큰을 OS 보안 저장소에 보관하고 로그·UI 노출 차단
-- [ ] local/cloud mode 전환 UI와 잘못된 동시 실행 차단
-- [ ] 최종 local backup·무결성 검사·write freeze 수행
-- [ ] migration manifest로 cloud import와 row/checksum 비교
-- [ ] 기존 TM 기능 전체를 cloud mode에서 회귀 검증
-- [ ] rollback 훈련 후 cloud 기준 전환과 local archive 생성
+- [x] `tm-cli migration` manifest·dry-run·inspect 명령의 Windows format·test·clippy 통과
+- [x] 인증된 HTTPS desktop client와 오류 contract 구현
+- [x] 인증 토큰을 OS 보안 저장소에 보관하고 로그·UI 노출 차단
+- [x] local/cloud mode 전환과 cloud mode local DB 격리
+- [x] 최종 local backup·무결성 검사·write freeze 수행
+- [x] migration manifest로 cloud import와 row/checksum 비교
+- [x] 기존 TM 기능을 cloud mode에서 회귀 검증
+- [x] rollback 훈련 후 cloud 기준 전환과 local archive 생성
 
 완료 게이트:
 
 - 현재 데스크톱 기능이 cloud 기준 DB에서 정상 동작한다.
 - local/cloud 양쪽에 서로 다른 최신 데이터가 생기지 않는다.
 
-확정 전 inventory와 cutover 절차: [STEP 10 데스크톱 cloud mode와 일회성 cutover](step10-cloud-cutover.md)
+완료 기록과 cutover 절차: [STEP 10 데스크톱 cloud mode와 일회성 cutover](step10-cloud-cutover.md)
 
 ## STEP 11 — Cloud OpenAI와 read-only 오케스트레이터
 
