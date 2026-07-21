@@ -42,6 +42,12 @@ jobs:
           rustc --version
           cargo --version
 
+      - name: Resolve Cargo target directory
+        shell: pwsh
+        run: |
+          $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
+          "TM_CARGO_TARGET_DIR=$($metadata.target_directory)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Cache Rust build inputs
         uses: actions/cache@v4
         with:
@@ -49,6 +55,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             dist/build/cargo
+            app/dist/build/cargo
           key: ${{ runner.os }}-rust-1.97-${{ hashFiles('app/Cargo.lock') }}
 
       - name: Install frontend dependencies
@@ -80,9 +87,10 @@ jobs:
         shell: pwsh
         run: |
           $artifact = Join-Path $env:RUNNER_TEMP 'tm-step10-windows-x64'
+          $release = Join-Path $env:TM_CARGO_TARGET_DIR 'x86_64-pc-windows-msvc\release'
           New-Item -ItemType Directory -Force -Path $artifact | Out-Null
-          Copy-Item '..\dist\build\cargo\x86_64-pc-windows-msvc\release\tm.exe' $artifact
-          Copy-Item '..\dist\build\cargo\x86_64-pc-windows-msvc\release\tm-cli.exe' $artifact
+          Copy-Item (Join-Path $release 'tm.exe') $artifact
+          Copy-Item (Join-Path $release 'tm-cli.exe') $artifact
           Get-FileHash -Algorithm SHA256 (Join-Path $artifact 'tm.exe'), (Join-Path $artifact 'tm-cli.exe') |
             ForEach-Object { '{0}  {1}' -f $_.Hash.ToLowerInvariant(), (Split-Path -Leaf $_.Path) } |
             Set-Content -Encoding ascii (Join-Path $artifact 'SHA256SUMS.txt')
