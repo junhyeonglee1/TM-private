@@ -157,6 +157,7 @@ pub(crate) fn restore_database(
     Database::migrate(&mut destination, restored_version)?;
     merge_delivery_ledger(&destination, &delivery_ledger)?;
     merge_change_request_ledger(&mut destination, &change_request_ledger)?;
+    merge_scheduler_ledger(&destination, Path::new(&safety_backup.path))?;
     destination.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
     drop(destination);
     validate_database(database_path, true)?;
@@ -739,6 +740,81 @@ fn validate_assistant_memory_restore_source(
             "restore would alter the assistant memory and provenance ledger".to_owned(),
         ));
     }
+    Ok(())
+}
+
+fn merge_scheduler_ledger(connection: &Connection, preserved_database: &Path) -> Result<()> {
+    connection.execute(
+        "ATTACH DATABASE ?1 AS scheduler_preserved",
+        [preserved_database.to_string_lossy().as_ref()],
+    )?;
+    let merge_result = connection.execute_batch(
+        "BEGIN IMMEDIATE;
+         INSERT INTO scheduler_jobs(
+            id, job_key, kind, schedule_type, interval_seconds, local_time, timezone,
+            enabled, max_attempts, misfire_grace_seconds, coalesce, next_run_at,
+            last_scheduled_at, created_at, updated_at
+         )
+         SELECT id, job_key, kind, schedule_type, interval_seconds, local_time, timezone,
+                enabled, max_attempts, misfire_grace_seconds, coalesce, next_run_at,
+                last_scheduled_at, created_at, updated_at
+         FROM scheduler_preserved.scheduler_jobs WHERE true
+         ON CONFLICT(id) DO UPDATE SET
+            enabled = excluded.enabled,
+            max_attempts = excluded.max_attempts,
+            misfire_grace_seconds = excluded.misfire_grace_seconds,
+            coalesce = excluded.coalesce,
+            next_run_at = excluded.next_run_at,
+            last_scheduled_at = excluded.last_scheduled_at,
+            updated_at = excluded.updated_at;
+
+         INSERT INTO scheduler_runs(
+            id, job_id, scheduled_for, status, attempt_count, max_attempts,
+            idempotency_key, available_at, lease_owner, lease_acquired_at,
+            lease_expires_at, last_error, result_json, created_at, updated_at,
+            started_at, completed_at, dead_letter_at, skipped_at
+         )
+         SELECT id, job_id, scheduled_for, status, attempt_count, max_attempts,
+                idempotency_key, available_at, lease_owner, lease_acquired_at,
+                lease_expires_at, last_error, result_json, created_at, updated_at,
+                started_at, completed_at, dead_letter_at, skipped_at
+         FROM scheduler_preserved.scheduler_runs WHERE true
+         ON CONFLICT(id) DO UPDATE SET
+            status = excluded.status,
+            attempt_count = excluded.attempt_count,
+            available_at = excluded.available_at,
+            lease_owner = excluded.lease_owner,
+            lease_acquired_at = excluded.lease_acquired_at,
+            lease_expires_at = excluded.lease_expires_at,
+            last_error = excluded.last_error,
+            result_json = excluded.result_json,
+            updated_at = excluded.updated_at,
+            started_at = excluded.started_at,
+            completed_at = excluded.completed_at,
+            dead_letter_at = excluded.dead_letter_at,
+            skipped_at = excluded.skipped_at;
+
+         INSERT OR IGNORE INTO scheduler_attempts(
+            id, run_id, attempt_number, worker_id, started_at, completed_at,
+            outcome, error, created_at
+         )
+         SELECT id, run_id, attempt_number, worker_id, started_at, completed_at,
+                outcome, error, created_at
+         FROM scheduler_preserved.scheduler_attempts;
+
+         INSERT OR IGNORE INTO scheduler_effects(
+            idempotency_key, run_id, job_kind, result_json, applied_at
+         )
+         SELECT idempotency_key, run_id, job_kind, result_json, applied_at
+         FROM scheduler_preserved.scheduler_effects;
+         COMMIT;",
+    );
+    if merge_result.is_err() {
+        let _ = connection.execute_batch("ROLLBACK;");
+    }
+    let detach_result = connection.execute_batch("DETACH DATABASE scheduler_preserved;");
+    merge_result?;
+    detach_result?;
     Ok(())
 }
 

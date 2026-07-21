@@ -24,6 +24,8 @@ STEP 12는 기존 7개 자동 read-only 도구에 승인 요청 전용 `propose_
 
 STEP 13은 원본 TM 데이터와 AI 기억을 schema 7에서 분리한다. 사용자 기억은 명시적 요청과 STEP 12 승인 뒤에만 생성·수정·삭제되며 private·restricted 정보와 금지된 비밀값은 OpenAI로 전달되지 않는다. retrieval은 외부 vector 서비스 없이 SQLite FTS5와 구조화 filter를 사용하고 요청 종류별 최대 6/10/12개, 절대 6,144 bytes 안에서 관련 기억만 전달한다. 일·주·월 요약은 로컬 결정론적 계산이며 출처·보존·삭제를 append-only 이벤트로 추적한다.
 
+STEP 14는 schema 8에 durable job·run·attempt·effect 원장을 추가한다. Railway singleton 서버 안의 worker가 30초마다 due work를 확인하고 5분 lease, 5회 지수형 재시도, dead-letter, 24시간 misfire grace와 coalescing을 적용한다. canary와 기억 정리는 OpenAI를 호출하지 않으며 effect와 실제 변경을 한 SQLite transaction에 기록해 재시작·중복 claim·백업 복원 뒤에도 효과가 한 번만 반영되도록 한다.
+
 - [수동 승인 개선 요청 흐름](change-request-workflow.md)
 - [데이터 기준 원본과 migration 안전 설계](data-authority-and-migration.md)
 - [데스크톱 cloud transport와 cutover 경계](desktop-cloud-transport.md)
@@ -38,6 +40,7 @@ STEP 13은 원본 TM 데이터와 AI 기억을 schema 7에서 분리한다. 사�
 - [STEP 9 백업·복구·모니터링·비용 안전장치](../operations/step9-backup-monitoring-cost.md)
 - [STEP 12 실행 승인 운영 절차](../operations/step12-action-approval.md)
 - [STEP 13 기억·검색 운영 절차](../operations/step13-memory-context.md)
+- [STEP 14 durable scheduler 운영 절차](../operations/step14-durable-scheduler.md)
 - [STEP 5 단일 사용자 인증](../operations/single-user-auth-setup.md)
 
 기본 홈은 `C:\Users\tkfk0\Desktop\codex\TM`이다. 테스트는 프로세스별 임시 `TM_HOME`을 사용한다. 모든 저장 시각은 UTC RFC 3339로 기록하고, 사용자 날짜는 `Asia/Seoul`로 계산한다.

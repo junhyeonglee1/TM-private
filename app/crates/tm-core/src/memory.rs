@@ -260,49 +260,9 @@ impl TmCore {
     }
 
     pub fn run_memory_maintenance(&self, as_of: DateTime<Utc>) -> Result<MemoryMaintenanceReport> {
-        let checked_at = as_of.to_rfc3339_opts(SecondsFormat::Millis, true);
         self.database
             .transaction(TransactionBehavior::Immediate, |transaction| {
-                let expired_ids = query_ids(
-                    transaction,
-                    "SELECT id FROM assistant_memories
-                     WHERE deleted_at IS NULL AND expires_at IS NOT NULL AND expires_at <= ?1",
-                    &checked_at,
-                )?;
-                let mut expired = 0;
-                for memory_id in expired_ids {
-                    if soft_delete_memory(
-                        transaction,
-                        &memory_id,
-                        "retention",
-                        "memory-retention",
-                        "expired",
-                        &checked_at,
-                    )? {
-                        expired += 1;
-                    }
-                }
-
-                let invalid_source_ids = invalid_source_memory_ids(transaction)?;
-                let mut source_deleted = 0;
-                for memory_id in invalid_source_ids {
-                    if soft_delete_memory(
-                        transaction,
-                        &memory_id,
-                        "system",
-                        "memory-source-cleanup",
-                        "source_deleted",
-                        &checked_at,
-                    )? {
-                        source_deleted += 1;
-                    }
-                }
-
-                Ok(MemoryMaintenanceReport {
-                    expired,
-                    source_deleted,
-                    checked_at,
-                })
+                run_memory_maintenance_in_transaction(transaction, as_of)
             })
     }
 
@@ -361,6 +321,53 @@ impl TmCore {
                 })
             })
     }
+}
+
+pub(crate) fn run_memory_maintenance_in_transaction(
+    transaction: &Transaction<'_>,
+    as_of: DateTime<Utc>,
+) -> Result<MemoryMaintenanceReport> {
+    let checked_at = as_of.to_rfc3339_opts(SecondsFormat::Millis, true);
+    let expired_ids = query_ids(
+        transaction,
+        "SELECT id FROM assistant_memories
+         WHERE deleted_at IS NULL AND expires_at IS NOT NULL AND expires_at <= ?1",
+        &checked_at,
+    )?;
+    let mut expired = 0;
+    for memory_id in expired_ids {
+        if soft_delete_memory(
+            transaction,
+            &memory_id,
+            "retention",
+            "memory-retention",
+            "expired",
+            &checked_at,
+        )? {
+            expired += 1;
+        }
+    }
+
+    let invalid_source_ids = invalid_source_memory_ids(transaction)?;
+    let mut source_deleted = 0;
+    for memory_id in invalid_source_ids {
+        if soft_delete_memory(
+            transaction,
+            &memory_id,
+            "system",
+            "memory-source-cleanup",
+            "source_deleted",
+            &checked_at,
+        )? {
+            source_deleted += 1;
+        }
+    }
+
+    Ok(MemoryMaintenanceReport {
+        expired,
+        source_deleted,
+        checked_at,
+    })
 }
 
 fn regenerate_rollup(

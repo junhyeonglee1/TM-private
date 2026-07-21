@@ -15,6 +15,7 @@ mod memory;
 mod migration;
 mod model;
 mod mutation;
+mod scheduler;
 
 pub use assistant_action::*;
 pub use backup::BackupArtifact;
@@ -27,3 +28,4 @@ pub use memory::*;
 pub use migration::{MigrationDryRun, MigrationManifest, MigrationTableManifest};
 pub use model::*;
 pub use mutation::*;
+pub use scheduler::*;

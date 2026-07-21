@@ -40,6 +40,10 @@ pub(crate) const EXPORTED_TABLES: &[&str] = &[
     "assistant_memories",
     "assistant_memory_sources",
     "assistant_memory_events",
+    "scheduler_jobs",
+    "scheduler_runs",
+    "scheduler_attempts",
+    "scheduler_effects",
     "app_state",
 ];
 

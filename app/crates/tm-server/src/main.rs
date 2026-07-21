@@ -4,7 +4,7 @@ use tm_core::{TmCore, TmHome};
 use tm_server::{
     MaintenanceMode, ServerConfig, ServerProfile, build_cloud_authenticated_router_with_openai,
     build_cloud_bootstrap_router, build_cloud_import_router, build_router_with_openai,
-    openai::OpenAiClient,
+    openai::OpenAiClient, scheduler,
 };
 
 #[tokio::main]
@@ -15,6 +15,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let core = TmCore::open(TmHome::new(&config.home))?;
     let database_initialized_at = core.database_initialized_at()?;
     let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
+    let scheduler_enabled = config.profile == ServerProfile::CloudAuthenticated
+        && config.maintenance_mode == MaintenanceMode::Disabled;
+    let scheduler_core = core.clone();
 
     tracing::info!(
         profile = %config.profile,
@@ -43,9 +46,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     };
 
-    axum::serve(listener, router)
+    let scheduler_handle = scheduler_enabled.then(|| scheduler::spawn(scheduler_core));
+    let result = axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal())
-        .await?;
+        .await;
+    if let Some(handle) = scheduler_handle {
+        handle.abort();
+        let _ = handle.await;
+    }
+    result?;
     Ok(())
 }
 

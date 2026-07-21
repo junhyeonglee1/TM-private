@@ -601,7 +601,7 @@ Codex TODO:
 
 ## STEP 14 — 스케줄러·작업 큐·정기 실행 기반
 
-상태: 대기
+상태: 진행 중 — schema 8 durable scheduler 구현과 전체 로컬 회귀 검증 완료, Railway production 배포·재시작 검증 대기
 
 Codex 권장 기본안:
 
@@ -612,18 +612,18 @@ Codex 권장 기본안:
 
 사용자 결정 게이트:
 
-- [ ] 기본 실행 빈도와 방해 금지 시간 승인
-- [ ] 실패 재시도·dead-letter·사용자 알림 기준 승인
-- [ ] 서버 재시작 후 놓친 작업 처리 방식 승인
+- [x] 기본 실행 빈도와 방해 금지 시간 승인
+- [x] 실패 재시도·dead-letter·사용자 알림 기준 승인
+- [x] 서버 재시작 후 놓친 작업 처리 방식 승인
 
 Codex TODO:
 
-- [ ] durable job·attempt·lease schema 구현
-- [ ] 중복 claim 방지와 lease 만료 복구 구현
-- [ ] exponential backoff와 dead-letter 상태 구현
-- [ ] UTC/KST·DST 경계와 missed-run 정책 테스트
-- [ ] 배포·재시작·장애 상황의 exactly-once effect 검증
-- [ ] queue depth·실패율·지연 모니터링 연결
+- [x] durable job·attempt·lease schema 구현
+- [x] 중복 claim 방지와 lease 만료 복구 구현
+- [x] exponential backoff와 dead-letter 상태 구현
+- [x] UTC/KST·DST 경계와 missed-run 정책 테스트
+- [x] 로컬 재시작·중복·lease 만료·복원 상황의 exactly-once effect 검증
+- [x] queue depth·실패율·지연 모니터링 연결
 - [ ] 무과금 내부 정기 작업을 production에서 검증
 
 완료 게이트:

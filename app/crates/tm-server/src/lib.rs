@@ -13,6 +13,7 @@ mod memories;
 pub mod openai;
 mod orchestrator;
 mod read_api;
+pub mod scheduler;
 mod write_api;
 
 use axum::{
@@ -24,10 +25,11 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tm_core::{
     ASSISTANT_ACTION_APPROVAL_TTL_SECONDS, AiBudgetStatus, AiTokenUsage, Error as CoreError,
-    HealthReport, TmCore,
+    HealthReport, SchedulerStatus, TmCore,
 };
 use uuid::Uuid;
 
@@ -333,6 +335,7 @@ struct AiStatus {
 struct OperationsStatus {
     service_version: &'static str,
     database: OperationsDatabaseStatus,
+    scheduler: SchedulerStatus,
     local_backup: LocalBackupStatus,
     remote_backup: RemoteBackupStatus,
 }
@@ -939,6 +942,7 @@ async fn operations_status(
     let error_request_id = request_id.0.clone();
     let status = tokio::task::spawn_blocking(move || {
         let health = state.core.health()?;
+        let scheduler = state.core.scheduler_status(Utc::now())?;
         let backups = state.core.list_backups()?;
         let latest = backups.first();
         let remote_status_path = state
@@ -977,6 +981,7 @@ async fn operations_status(
                 journal_mode: health.journal_mode,
                 checked_at: health.checked_at,
             },
+            scheduler,
             local_backup: LocalBackupStatus {
                 count: backups.len(),
                 latest_created_at: latest.map(|backup| backup.created_at.clone()),
@@ -1732,7 +1737,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
         assert_eq!(body["data"]["status"], "ready");
-        assert_eq!(body["data"]["schemaVersion"], 7);
+        assert_eq!(body["data"]["schemaVersion"], 8);
         assert_eq!(body["data"]["journalMode"], "wal");
     }
 
@@ -2523,7 +2528,10 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
         assert_eq!(body["data"]["database"]["ok"], true);
-        assert_eq!(body["data"]["database"]["schemaVersion"], 7);
+        assert_eq!(body["data"]["database"]["schemaVersion"], 8);
+        assert_eq!(body["data"]["scheduler"]["status"], "healthy");
+        assert_eq!(body["data"]["scheduler"]["openaiCallsEnabled"], false);
+        assert_eq!(body["data"]["scheduler"]["effectCount"], 0);
         assert_eq!(body["data"]["remoteBackup"]["status"], "pending");
         let serialized = body.to_string();
         assert!(!serialized.contains("databasePath"));
