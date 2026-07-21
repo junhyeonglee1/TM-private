@@ -529,7 +529,7 @@ Codex TODO:
 
 ## STEP 12 — 실행 승인·취소·도구 정책
 
-상태: 진행 중 — 기본안 승인, schema 6·승인 상태 machine·API 구현 및 격리 테스트 완료; CI·Railway 검증 대기
+상태: 완료 — schema 6 승인 ledger·API·오케스트레이터를 구현하고 Windows CI, Railway Linux Docker 검증, production 비과금 검증을 통과
 
 권장 권한 등급:
 
@@ -552,11 +552,15 @@ Codex TODO:
 - [x] 동일 승인·요청의 중복 실행 차단
 - [x] 실행 전 권한과 최신 version 재검증
 - [x] 결과·실패·복구 metadata와 append-only 감사 기록
-- [ ] 첫 low-risk mutation tool을 end-to-end로 검증
+- [x] 첫 low-risk mutation tool을 end-to-end로 검증
 
 완료 게이트:
 
-- AI가 중요한 작업을 사용자 모르게 실행하거나 승인 후 내용을 바꿀 수 없다.
+- [x] AI가 중요한 작업을 사용자 모르게 실행하거나 승인 후 내용을 바꿀 수 없다.
+- [x] 격리 임시 DB와 mock OpenAI로 제안 시 Task 0건, 별도 승인 후 Task 1건, 재시도·동시 요청 후에도 Task 1건, 승인 중 OpenAI 추가 호출 0회를 확인했다.
+- [x] Railway production 배포 `dc4646e5-23b8-4774-ae26-5430f4f262a6`에서 schema 6과 `step12-v1` 계약을 확인했다. 검증은 OpenAI 호출과 production mutation 없이 완료했다.
+
+구현 계약과 운영 검증 절차: [STEP 12 AI 실행 승인 경계](../architecture/assistant-action-approval.md), [STEP 12 실행 승인 운영 절차](step12-action-approval.md)
 
 ## STEP 13 — 장기 기억·검색·컨텍스트 예산
 

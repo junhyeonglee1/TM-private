@@ -31,3 +31,13 @@
 - restore 필요: approval ledger가 현재와 정확히 일치하는 snapshot만 허용한다.
 
 승인 API는 OpenAI를 호출하지 않으므로 승인 재시도 자체로 AI 요금이 발생하지 않는다.
+
+## 2026-07-21 완료 검증
+
+- GitHub Actions Windows runner에서 frontend lint·typecheck·test, Rust workspace format·test·Clippy, `tm.exe`·`tm-cli.exe` release build와 artifact 업로드를 통과했다.
+- Railway Linux Docker build에서 전체 workspace test·Clippy와 `tm-server` release build를 통과했다. 특히 승인 흐름 6개 테스트와 schema 1 backup 복원·schema 6 migration 회귀 테스트를 실제 실행했다.
+- production 배포 `dc4646e5-23b8-4774-ae26-5430f4f262a6`, image digest `sha256:ad93759f0ba5c50c5f257f536b64f7e2a90ffed6ef1e9c26f363c6f0ee933060`이 `SUCCESS`로 완료됐다.
+- production에서 schema 6, prompt `step12-v1`, 자동 read tool 7개, `task.create` 승인, TTL 600초, 자동 실행 금지, 승인 즉시 실행 계약을 확인했다.
+- 기존 action 0건과 confirmation header가 없는 승인 요청의 HTTP 428 차단을 확인했다.
+- production 검증 중 OpenAI 호출과 데이터 mutation은 모두 0회였다.
+- 첫 배포 `feb07aea-c1a0-4607-b9e7-97cb1089487d`는 legacy schema 1 test fixture가 새 승인 테이블을 제거하지 않아 Docker test에서 실패했다. 기존 production 인스턴스에는 영향이 없었고 fixture 수정 후 전체 검증을 다시 통과했다.
