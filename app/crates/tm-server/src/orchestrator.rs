@@ -11,6 +11,7 @@ pub(super) const ASSISTANT_MAX_MESSAGE_BYTES: usize = 8 * 1024;
 pub(super) const ASSISTANT_MAX_OUTPUT_TOKENS: u32 = 2_000;
 pub(super) const ASSISTANT_MAX_TOOL_CALLS: usize = 6;
 pub(super) const ASSISTANT_TIMEOUT_SECS: u64 = 60;
+pub(super) const ASSISTANT_PROMPT_VERSION: &str = "step11-v1";
 
 const MAX_TOOL_ITEMS: usize = 20;
 const MAX_TOOL_FIELD_BYTES: usize = 512;
@@ -35,6 +36,7 @@ pub(super) struct AssistantRequest {
 pub(super) struct AssistantResult {
     pub answer: String,
     pub provider: &'static str,
+    pub prompt_version: &'static str,
     pub model: String,
     pub response_ids: Vec<String>,
     pub upstream_request_ids: Vec<String>,
@@ -138,13 +140,14 @@ pub(super) async fn run(
         input.extend(call.response.output.clone());
 
         if tool_calls.is_empty() {
-            let answer = output_text(&call.response.output).ok_or_else(|| AssistantError {
+            let answer = output_text(&call.response.output).ok_or(AssistantError {
                 kind: AssistantErrorKind::InvalidResponse,
                 possibly_billed: true,
             })?;
             return Ok(AssistantResult {
                 answer,
                 provider: "openai",
+                prompt_version: ASSISTANT_PROMPT_VERSION,
                 model: response_model,
                 response_ids,
                 upstream_request_ids,

@@ -18,11 +18,14 @@ STEP 9는 schema 5 append-only AI 비용 원장과 월 hard stop, Railway Bucket
 
 STEP 10은 데스크톱의 명시적 local/cloud transport, Windows Credential Locker token 경계, 현재 기능 전체의 first-party command allowlist와 maintenance-only database import를 추가한다. 자동 sync나 양방향 write는 허용하지 않으며 source/cloud logical manifest가 완전히 일치한 뒤에만 cloud를 단일 기준 원본으로 전환한다.
 
+STEP 11은 인증된 cloud 서버에 OpenAI Responses API와 read-only 오케스트레이터를 추가한다. 모델은 strict allowlist를 통해 Project·Task·Checklist·Note·Session·Worklog의 최소 필드만 최대 6회 조회할 수 있고 mutation·첨부·backup·인증·감사·비용 원장 도구는 사용할 수 없다. `store: false`, 60초 timeout, 요청별 USD 0.25 예약과 월 USD 20 hard stop을 적용한다.
+
 - [수동 승인 개선 요청 흐름](change-request-workflow.md)
 - [데이터 기준 원본과 migration 안전 설계](data-authority-and-migration.md)
 - [데스크톱 cloud transport와 cutover 경계](desktop-cloud-transport.md)
 - [인증된 read-only TM API v1](read-only-api-v1.md)
 - [통제된 TM write API v1](controlled-write-api-v1.md)
+- [STEP 11 read-only AI 오케스트레이터](read-only-ai-orchestrator.md)
 - [TM AI 비서 시스템 구축 로드맵](../operations/tm-ai-assistant-roadmap.md)
 - [OpenAI 로컬 연결 설정](../operations/openai-local-setup.md)
 - [Railway Hobby bootstrap 배포](../operations/railway-bootstrap-deploy.md)

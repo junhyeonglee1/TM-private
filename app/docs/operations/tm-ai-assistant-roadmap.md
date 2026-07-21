@@ -74,7 +74,7 @@ API 키와 비밀번호는 채팅, Git, 소스 파일 또는 일반 로그에 �
 | 8 | 통제된 write API와 감사 기록 | 완료 |
 | 9 | 백업·복구·모니터링·비용 안전장치 | 완료 |
 | 10 | 데스크톱 cloud mode와 일회성 cutover | 완료 |
-| 11 | Cloud OpenAI와 read-only 오케스트레이터 | 대기 |
+| 11 | Cloud OpenAI와 read-only 오케스트레이터 | 진행 중 |
 | 12 | 실행 승인·취소·도구 정책 | 대기 |
 | 13 | 장기 기억·검색·컨텍스트 예산 | 대기 |
 | 14 | 스케줄러·작업 큐·정기 실행 기반 | 대기 |
@@ -492,7 +492,7 @@ Codex TODO:
 
 ## STEP 11 — Cloud OpenAI와 read-only 오케스트레이터
 
-상태: 대기
+상태: 진행 중 — 구현·모의 통합 검증 완료, Railway key와 최소 과금 운영 검증 대기
 
 Codex 권장 기본안:
 
@@ -503,25 +503,27 @@ Codex 권장 기본안:
 
 사용자 결정 게이트:
 
-- [ ] OpenAI에 전달 가능한 데이터 범위 승인
-- [ ] 기본 model과 요청별·일별·월별 비용 상한 승인
-- [ ] 답변 스타일과 기본 리포트 길이 승인
+- [x] OpenAI에 전달 가능한 데이터 범위 승인
+- [x] 기본 model과 요청별·월별 비용 상한 승인
+- [x] 답변 스타일과 기본 리포트 길이 승인
 - [ ] Railway에 OpenAI API key 입력
 
 Codex TODO:
 
-- [ ] cloud 전용 OpenAI client와 sealed secret 검증 경계 구현
-- [ ] 사용자 요청을 답변·조회·계획으로 구분하는 intent contract 구현
-- [ ] read-only tool schema와 결과 크기 제한 정의
-- [ ] 계획과 실행을 분리하고 실행 요청은 무조건 보류 상태로 반환
-- [ ] prompt version, model, token usage, 비용 추정, request ID 기록
-- [ ] 반복 tool call·무한 루프·timeout·예산 초과 차단
-- [ ] prompt injection과 tool output 오염에 대한 격리 테스트
+- [x] cloud 전용 OpenAI client와 sealed secret 검증 경계 구현
+- [x] 모든 요청을 답변·조회·계획 범위로 제한하는 read-only intent contract 구현
+- [x] strict read-only tool schema와 필드·레코드·전체 결과 크기 제한 정의
+- [x] 계획과 실행을 분리하고 mutation 도구를 등록하지 않음
+- [x] prompt version, model, 합산 token usage, 비용 추정, request ID 기록
+- [x] 6회 tool call·무한 루프·60초 timeout·요청/월 예산 초과 차단
+- [x] prompt injection 지시와 allowlist 밖 tool output 오염 격리 테스트
 - [ ] production 최소 비용 end-to-end probe 수행
 
 완료 게이트:
 
 - AI가 TM 데이터를 최소 범위로 읽고 설명할 수 있지만 어떤 데이터도 변경할 수 없다.
+
+구현 계약과 운영 검증 절차: [STEP 11 read-only AI 오케스트레이터](../architecture/read-only-ai-orchestrator.md)
 
 ## STEP 12 — 실행 승인·취소·도구 정책
 

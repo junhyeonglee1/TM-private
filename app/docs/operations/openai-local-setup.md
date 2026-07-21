@@ -16,9 +16,9 @@
 | `TM_SERVER_HOME` | 예 | 없음 | 서버가 사용할 절대 TM 홈 경로 |
 | `TM_SERVER_BIND` | 아니요 | `127.0.0.1:8787` | 인증 도입 전에는 loopback 주소만 허용 |
 | `OPENAI_API_KEY` | AI 호출 시 | 없음 | 서버 전용 OpenAI API 키 |
-| `TM_OPENAI_MODEL` | 아니요 | `gpt-5.6` | Responses API 모델 |
+| `TM_OPENAI_MODEL` | 아니요 | `gpt-5.6-terra` | Responses API 모델 |
 | `TM_OPENAI_BASE_URL` | 아니요 | `https://api.openai.com/v1/` | 공식 OpenAI 주소, 테스트에서는 loopback HTTP만 허용 |
-| `TM_OPENAI_TIMEOUT_SECS` | 아니요 | `30` | OpenAI 호출 제한 시간, 1~120초 |
+| `TM_OPENAI_TIMEOUT_SECS` | 아니요 | `60` | OpenAI 호출 제한 시간, 1~120초 |
 | `TM_OPENAI_MONTHLY_WARNING_USD` | 아니요 | `10` | TM 상태에 경고로 표시할 월 누적 추정 비용 |
 | `TM_OPENAI_MONTHLY_HARD_LIMIT_USD` | 아니요 | `20` | 요청 전에 원자적으로 차단할 TM 월 비용 상한 |
 
@@ -32,7 +32,7 @@ $secret = Read-Host 'OPENAI_API_KEY 입력' -AsSecureString
 $env:OPENAI_API_KEY = [System.Net.NetworkCredential]::new('', $secret).Password
 $env:TM_SERVER_HOME = (New-Item -ItemType Directory -Force '..\dist\manual-openai-probe').FullName
 $env:TM_SERVER_BIND = '127.0.0.1:8787'
-$env:TM_OPENAI_MODEL = 'gpt-5.6'
+$env:TM_OPENAI_MODEL = 'gpt-5.6-terra'
 & 'C:\Users\tkfk0\.cargo\bin\cargo.exe' run --locked --offline -p tm-server
 ```
 
