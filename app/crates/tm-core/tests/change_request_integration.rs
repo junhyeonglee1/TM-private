@@ -405,7 +405,9 @@ fn restoring_v1_backup_migrates_and_preserves_non_rewindable_ledger() -> Result<
     let backup_path = std::path::Path::new(&backup.path);
     let v1 = Connection::open(backup_path)?;
     v1.execute_batch(
-        "DROP TABLE ai_budget_ledger;
+        "DROP TABLE assistant_action_events;
+         DROP TABLE assistant_action_requests;
+         DROP TABLE ai_budget_ledger;
          DROP TABLE mutation_audit_events;
          DROP TABLE mutation_idempotency_records;
          ALTER TABLE tasks DROP COLUMN version;
