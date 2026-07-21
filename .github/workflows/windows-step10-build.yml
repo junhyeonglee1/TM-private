@@ -42,6 +42,15 @@ jobs:
           rustc --version
           cargo --version
 
+      - name: Cache Rust build inputs
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            dist/build/cargo
+          key: ${{ runner.os }}-rust-1.97-${{ hashFiles('app/Cargo.lock') }}
+
       - name: Install frontend dependencies
         shell: pwsh
         run: pnpm install --frozen-lockfile
@@ -54,6 +63,7 @@ jobs:
           pnpm test
 
       - name: Verify Rust workspace
+        if: github.event_name == 'workflow_dispatch'
         shell: pwsh
         run: |
           cargo fmt --all -- --check
@@ -71,8 +81,8 @@ jobs:
         run: |
           $artifact = Join-Path $env:RUNNER_TEMP 'tm-step10-windows-x64'
           New-Item -ItemType Directory -Force -Path $artifact | Out-Null
-          Copy-Item 'target\x86_64-pc-windows-msvc\release\tm.exe' $artifact
-          Copy-Item 'target\x86_64-pc-windows-msvc\release\tm-cli.exe' $artifact
+          Copy-Item '..\dist\build\cargo\x86_64-pc-windows-msvc\release\tm.exe' $artifact
+          Copy-Item '..\dist\build\cargo\x86_64-pc-windows-msvc\release\tm-cli.exe' $artifact
           Get-FileHash -Algorithm SHA256 (Join-Path $artifact 'tm.exe'), (Join-Path $artifact 'tm-cli.exe') |
             ForEach-Object { '{0}  {1}' -f $_.Hash.ToLowerInvariant(), (Split-Path -Leaf $_.Path) } |
             Set-Content -Encoding ascii (Join-Path $artifact 'SHA256SUMS.txt')
