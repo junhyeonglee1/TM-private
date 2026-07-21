@@ -125,6 +125,7 @@ pub(crate) fn restore_database(
     let change_request_ledger = read_change_request_ledger(&current)?;
     let mutation_ledger = read_mutation_ledger(&current)?;
     let ai_budget_ledger = read_ai_budget_ledger(&current)?;
+    let assistant_action_ledger = read_assistant_action_ledger(&current)?;
     let safety_backup = online_backup_connection_inner(
         &current,
         backup_directory,
@@ -140,6 +141,7 @@ pub(crate) fn restore_database(
     validate_change_request_restore_source(&source, &change_request_ledger)?;
     validate_mutation_restore_source(&source, &mutation_ledger)?;
     validate_ai_budget_restore_source(&source, &ai_budget_ledger)?;
+    validate_assistant_action_restore_source(&source, &assistant_action_ledger)?;
     let mut destination = Connection::open(database_path)?;
     destination.busy_timeout(Duration::from_secs(15))?;
     register_runtime_functions(&destination)?;
@@ -589,6 +591,74 @@ fn validate_ai_budget_restore_source(source: &Connection, current: &[String]) ->
     if restored != current {
         return Err(Error::Conflict(
             "restore would alter the append-only AI cost and budget ledger".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct AssistantActionLedger {
+    requests: Vec<String>,
+    events: Vec<String>,
+}
+
+fn read_assistant_action_ledger(connection: &Connection) -> Result<AssistantActionLedger> {
+    let has_requests: bool = connection.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM sqlite_schema
+            WHERE type = 'table' AND name = 'assistant_action_requests'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    let has_events: bool = connection.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM sqlite_schema
+            WHERE type = 'table' AND name = 'assistant_action_events'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_requests && !has_events {
+        return Ok(AssistantActionLedger::default());
+    }
+    if !has_requests || !has_events {
+        return Err(Error::Invariant(
+            "assistant action ledger tables must exist together".to_owned(),
+        ));
+    }
+    let requests = canonical_json_rows(
+        connection,
+        "SELECT json_array(
+            id, operation, status, revision, payload_json, payload_sha256,
+            origin_request_id, execution_idempotency_key, approval_idempotency_key,
+            result_json, failure_code, created_at, expires_at, approved_at,
+            executing_at, completed_at, terminal_at
+         )
+         FROM assistant_action_requests ORDER BY id",
+    )?;
+    let events = canonical_json_rows(
+        connection,
+        "SELECT json_array(
+            id, action_id, event_type, from_status, to_status, revision, actor,
+            request_id, payload_sha256, metadata_json, created_at
+         )
+         FROM assistant_action_events ORDER BY id",
+    )?;
+    Ok(AssistantActionLedger { requests, events })
+}
+
+fn validate_assistant_action_restore_source(
+    source: &Connection,
+    current: &AssistantActionLedger,
+) -> Result<()> {
+    if current.requests.is_empty() && current.events.is_empty() {
+        return Ok(());
+    }
+    let restored = read_assistant_action_ledger(source)?;
+    if &restored != current {
+        return Err(Error::Conflict(
+            "restore would alter the immutable assistant action approval ledger".to_owned(),
         ));
     }
     Ok(())

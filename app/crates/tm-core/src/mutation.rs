@@ -40,12 +40,14 @@ impl MutationExpectedVersion {
 #[serde(rename_all = "snake_case")]
 pub enum MutationApprovalPolicy {
     ExplicitUserConfirmation,
+    AiActionApproval,
 }
 
 impl MutationApprovalPolicy {
     const fn as_str(self) -> &'static str {
         match self {
             Self::ExplicitUserConfirmation => "explicit_user_confirmation",
+            Self::AiActionApproval => "ai_action_approval",
         }
     }
 }
@@ -447,7 +449,7 @@ fn validate_project_target(transaction: &Transaction<'_>, project_id: &str) -> R
     Ok(())
 }
 
-fn validate_task_create(input: &CreateTaskInput) -> Result<()> {
+pub(crate) fn validate_task_create(input: &CreateTaskInput) -> Result<()> {
     validate_required_text("task title", &input.title, MAX_TITLE_CHARS)?;
     validate_optional_text(
         "task description",

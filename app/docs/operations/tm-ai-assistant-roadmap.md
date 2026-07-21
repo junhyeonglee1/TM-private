@@ -529,7 +529,7 @@ Codex TODO:
 
 ## STEP 12 — 실행 승인·취소·도구 정책
 
-상태: 대기
+상태: 진행 중 — 기본안 승인, schema 6·승인 상태 machine·API 구현 및 격리 테스트 완료; CI·Railway 검증 대기
 
 권장 권한 등급:
 
@@ -540,18 +540,18 @@ Codex TODO:
 
 사용자 결정 게이트:
 
-- [ ] 권한 등급과 각 동작의 배치 승인
-- [ ] 첫 실행 도구 1개와 승인 유효 시간 승인
-- [ ] 자동 실행을 허용할 read-only 범위 승인
+- [x] 권한 등급과 각 동작의 배치 승인
+- [x] 첫 실행 도구 `task.create`와 승인 유효 시간 10분 승인
+- [x] 기존 7개 read-only 도구 자동 실행 승인
 
 Codex TODO:
 
-- [ ] preview, 영향 범위, 비용, 되돌리기 가능 여부 표시
-- [ ] approval 요청·승인·거절·취소·만료 상태 machine 구현
-- [ ] 승인 revision과 실행 payload를 해시로 고정
-- [ ] 동일 승인·요청의 중복 실행 차단
-- [ ] 실행 전 권한과 최신 version 재검증
-- [ ] 결과·실패·부분 실행·rollback metadata 감사 기록
+- [x] preview, 영향 범위, 비용, 되돌리기 가능 여부 표시
+- [x] approval 요청·승인·거절·취소·만료 상태 machine 구현
+- [x] 승인 revision과 실행 payload를 해시로 고정
+- [x] 동일 승인·요청의 중복 실행 차단
+- [x] 실행 전 권한과 최신 version 재검증
+- [x] 결과·실패·복구 metadata와 append-only 감사 기록
 - [ ] 첫 low-risk mutation tool을 end-to-end로 검증
 
 완료 게이트:

@@ -1,6 +1,7 @@
 //! Local-first domain and persistence core shared by the TM desktop app and CLI.
 
 mod ai_budget;
+mod assistant_action;
 mod backup;
 mod change_request;
 mod core;
@@ -14,6 +15,7 @@ mod migration;
 mod model;
 mod mutation;
 
+pub use assistant_action::*;
 pub use backup::BackupArtifact;
 pub use core::TmCore;
 pub use desktop_api::{DesktopCommand, execute_desktop_command};
