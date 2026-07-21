@@ -4,6 +4,7 @@ set -u
 : "${TM_SERVER_HOME:?TM_SERVER_HOME must be set}"
 
 status_directory="$TM_SERVER_HOME/backups/remote"
+database="$TM_SERVER_HOME/data/tm.sqlite3"
 mkdir -p "$status_directory"
 
 write_failure_status() {
@@ -20,11 +21,21 @@ sleep 60
 while :; do
     today="$(date -u +%Y-%m-%d)"
     last_success=""
+    last_success_schema=""
+    current_schema=""
     if [ -r "$status_directory/last-success-date" ]; then
         last_success="$(sed -n '1p' "$status_directory/last-success-date")"
     fi
+    if [ -r "$status_directory/status.json" ]; then
+        last_success_schema="$(jq -r '.schemaVersion // empty' "$status_directory/status.json" 2>/dev/null || true)"
+    fi
+    if [ -s "$database" ]; then
+        current_schema="$(sqlite3 -readonly "$database" 'PRAGMA user_version;' 2>/dev/null || true)"
+    fi
 
-    if [ "$last_success" = "$today" ]; then
+    if [ "$last_success" = "$today" ] \
+        && [ -n "$current_schema" ] \
+        && [ "$last_success_schema" = "$current_schema" ]; then
         sleep 3600
         continue
     fi

@@ -41,6 +41,11 @@ RUN chmod 0755 \
     /usr/local/bin/railway-backup-once \
     /usr/local/bin/railway-backup-loop \
     /usr/local/bin/railway-backup-restore-drill
+RUN sh -n \
+    /usr/local/bin/railway-entrypoint \
+    /usr/local/bin/railway-backup-once \
+    /usr/local/bin/railway-backup-loop \
+    /usr/local/bin/railway-backup-restore-drill
 
 ENV TM_SERVER_PROFILE=cloud-bootstrap \
     TM_SERVER_HOME=/var/lib/tm
