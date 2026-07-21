@@ -5,8 +5,8 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    CreateNoteInput, CreateTaskInput, Error, Note, NotePatch, Result, Task, TaskPatch, TaskStatus,
-    TmCore,
+    AssistantMemory, CreateMemoryInput, CreateNoteInput, CreateTaskInput, Error, MemoryPatch, Note,
+    NotePatch, Result, Task, TaskPatch, TaskStatus, TmCore,
     core::{
         create_note_in_transaction, create_task_in_transaction, query_checklist_item, query_note,
         query_project, query_task, update_checklist_item_in_transaction,
@@ -14,6 +14,10 @@ use crate::{
     },
     database::{new_id, now_utc},
     error::invalid,
+    memory::{
+        create_memory_in_transaction, delete_memory_in_transaction, query_memory,
+        update_memory_in_transaction,
+    },
 };
 
 const MAX_TITLE_CHARS: usize = 500;
@@ -60,6 +64,9 @@ pub enum MutationOperation {
     NoteCreate,
     NoteUpdate,
     ChecklistSetDone,
+    MemoryCreate,
+    MemoryUpdate,
+    MemoryDelete,
 }
 
 impl MutationOperation {
@@ -71,6 +78,9 @@ impl MutationOperation {
             Self::NoteCreate => "note.create",
             Self::NoteUpdate => "note.update",
             Self::ChecklistSetDone => "checklist.set_done",
+            Self::MemoryCreate => "memory.create",
+            Self::MemoryUpdate => "memory.update",
+            Self::MemoryDelete => "memory.delete",
         }
     }
 
@@ -79,6 +89,7 @@ impl MutationOperation {
             Self::TaskCreate | Self::TaskUpdate => "task",
             Self::NoteCreate | Self::NoteUpdate => "note",
             Self::ChecklistSetDone => "checklist",
+            Self::MemoryCreate | Self::MemoryUpdate | Self::MemoryDelete => "memory",
         }
     }
 }
@@ -86,11 +97,34 @@ impl MutationOperation {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "operation", rename_all = "snake_case")]
 pub enum MutationCommand {
-    TaskCreate { input: CreateTaskInput },
-    TaskUpdate { task_id: String, patch: TaskPatch },
-    NoteCreate { input: CreateNoteInput },
-    NoteUpdate { note_id: String, patch: NotePatch },
-    ChecklistSetDone { item_id: String, is_done: bool },
+    TaskCreate {
+        input: CreateTaskInput,
+    },
+    TaskUpdate {
+        task_id: String,
+        patch: TaskPatch,
+    },
+    NoteCreate {
+        input: CreateNoteInput,
+    },
+    NoteUpdate {
+        note_id: String,
+        patch: NotePatch,
+    },
+    ChecklistSetDone {
+        item_id: String,
+        is_done: bool,
+    },
+    MemoryCreate {
+        input: CreateMemoryInput,
+    },
+    MemoryUpdate {
+        memory_id: String,
+        patch: MemoryPatch,
+    },
+    MemoryDelete {
+        memory_id: String,
+    },
 }
 
 impl MutationCommand {
@@ -102,6 +136,9 @@ impl MutationCommand {
             Self::NoteCreate { .. } => MutationOperation::NoteCreate,
             Self::NoteUpdate { .. } => MutationOperation::NoteUpdate,
             Self::ChecklistSetDone { .. } => MutationOperation::ChecklistSetDone,
+            Self::MemoryCreate { .. } => MutationOperation::MemoryCreate,
+            Self::MemoryUpdate { .. } => MutationOperation::MemoryUpdate,
+            Self::MemoryDelete { .. } => MutationOperation::MemoryDelete,
         }
     }
 }
@@ -180,8 +217,13 @@ impl TmCore {
                     return Ok(result);
                 }
 
-                let execution =
-                    execute_command(transaction, &request.command, request.expected_version)?;
+                let execution = execute_command(
+                    transaction,
+                    &request.command,
+                    request.expected_version,
+                    &request.actor,
+                    &request.request_id,
+                )?;
                 let result = MutationResult {
                     operation,
                     resource_type: operation.resource_type().to_owned(),
@@ -270,6 +312,8 @@ fn execute_command(
     transaction: &Transaction<'_>,
     command: &MutationCommand,
     expected_version: MutationExpectedVersion,
+    actor: &str,
+    request_id: &str,
 ) -> Result<MutationExecution> {
     match command {
         MutationCommand::TaskCreate { input } => {
@@ -342,6 +386,35 @@ fn execute_command(
                 None,
             )?;
             completed_execution(Some(before), &item, &item.id, item.version)
+        }
+        MutationCommand::MemoryCreate { input } => {
+            require_absent(expected_version)?;
+            let memory = create_memory_in_transaction(transaction, input, actor, request_id)?;
+            completed_execution(None, &memory, &memory.id, memory.revision)
+        }
+        MutationCommand::MemoryUpdate { memory_id, patch } => {
+            validate_id("memoryId", memory_id)?;
+            let expected = require_exact(expected_version)?;
+            let current = query_memory(transaction, memory_id)?;
+            let before = serde_json::to_value(&current)?;
+            let memory = update_memory_in_transaction(
+                transaction,
+                memory_id,
+                expected,
+                patch,
+                actor,
+                request_id,
+            )?;
+            completed_execution(Some(before), &memory, &memory.id, memory.revision)
+        }
+        MutationCommand::MemoryDelete { memory_id } => {
+            validate_id("memoryId", memory_id)?;
+            let expected = require_exact(expected_version)?;
+            let current: AssistantMemory = query_memory(transaction, memory_id)?;
+            let before = serde_json::to_value(&current)?;
+            let memory =
+                delete_memory_in_transaction(transaction, memory_id, expected, actor, request_id)?;
+            completed_execution(Some(before), &memory, &memory.id, memory.revision)
         }
     }
 }
@@ -641,6 +714,9 @@ fn parse_operation(index: usize, value: &str) -> rusqlite::Result<MutationOperat
         "note.create" => Ok(MutationOperation::NoteCreate),
         "note.update" => Ok(MutationOperation::NoteUpdate),
         "checklist.set_done" => Ok(MutationOperation::ChecklistSetDone),
+        "memory.create" => Ok(MutationOperation::MemoryCreate),
+        "memory.update" => Ok(MutationOperation::MemoryUpdate),
+        "memory.delete" => Ok(MutationOperation::MemoryDelete),
         _ => Err(rusqlite::Error::FromSqlConversionFailure(
             index,
             Type::Text,

@@ -126,6 +126,7 @@ pub(crate) fn restore_database(
     let mutation_ledger = read_mutation_ledger(&current)?;
     let ai_budget_ledger = read_ai_budget_ledger(&current)?;
     let assistant_action_ledger = read_assistant_action_ledger(&current)?;
+    let assistant_memory_ledger = read_assistant_memory_ledger(&current)?;
     let safety_backup = online_backup_connection_inner(
         &current,
         backup_directory,
@@ -142,6 +143,7 @@ pub(crate) fn restore_database(
     validate_mutation_restore_source(&source, &mutation_ledger)?;
     validate_ai_budget_restore_source(&source, &ai_budget_ledger)?;
     validate_assistant_action_restore_source(&source, &assistant_action_ledger)?;
+    validate_assistant_memory_restore_source(&source, &assistant_memory_ledger)?;
     let mut destination = Connection::open(database_path)?;
     destination.busy_timeout(Duration::from_secs(15))?;
     register_runtime_functions(&destination)?;
@@ -659,6 +661,82 @@ fn validate_assistant_action_restore_source(
     if &restored != current {
         return Err(Error::Conflict(
             "restore would alter the immutable assistant action approval ledger".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct AssistantMemoryLedger {
+    memories: Vec<String>,
+    sources: Vec<String>,
+    events: Vec<String>,
+}
+
+fn read_assistant_memory_ledger(connection: &Connection) -> Result<AssistantMemoryLedger> {
+    let table_names = [
+        "assistant_memories",
+        "assistant_memory_sources",
+        "assistant_memory_events",
+    ];
+    let mut exists = Vec::with_capacity(table_names.len());
+    for table in table_names {
+        exists.push(connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1
+             )",
+            [table],
+            |row| row.get::<_, bool>(0),
+        )?);
+    }
+    if exists.iter().all(|value| !value) {
+        return Ok(AssistantMemoryLedger::default());
+    }
+    if exists.iter().any(|value| !value) {
+        return Err(Error::Invariant(
+            "assistant memory ledger tables must exist together".to_owned(),
+        ));
+    }
+    let memories = canonical_json_rows(
+        connection,
+        "SELECT json_array(
+            id, kind, title, body, source_type, source_id, provenance_json,
+            sensitivity, openai_allowed, retention, expires_at, period_kind,
+            period_start, period_end, summary_key, revision, content_sha256,
+            created_at, updated_at, deleted_at
+         ) FROM assistant_memories ORDER BY id",
+    )?;
+    let sources = canonical_json_rows(
+        connection,
+        "SELECT json_array(
+            memory_id, source_type, source_id, source_revision, source_updated_at, created_at
+         ) FROM assistant_memory_sources ORDER BY memory_id, source_type, source_id",
+    )?;
+    let events = canonical_json_rows(
+        connection,
+        "SELECT json_array(
+            id, memory_id, event_type, revision, actor, request_id,
+            content_sha256, metadata_json, created_at
+         ) FROM assistant_memory_events ORDER BY id",
+    )?;
+    Ok(AssistantMemoryLedger {
+        memories,
+        sources,
+        events,
+    })
+}
+
+fn validate_assistant_memory_restore_source(
+    source: &Connection,
+    current: &AssistantMemoryLedger,
+) -> Result<()> {
+    if current.memories.is_empty() && current.sources.is_empty() && current.events.is_empty() {
+        return Ok(());
+    }
+    let restored = read_assistant_memory_ledger(source)?;
+    if &restored != current {
+        return Err(Error::Conflict(
+            "restore would alter the assistant memory and provenance ledger".to_owned(),
         ));
     }
     Ok(())

@@ -37,6 +37,9 @@ pub(crate) const EXPORTED_TABLES: &[&str] = &[
     "ai_budget_ledger",
     "assistant_action_requests",
     "assistant_action_events",
+    "assistant_memories",
+    "assistant_memory_sources",
+    "assistant_memory_events",
     "app_state",
 ];
 

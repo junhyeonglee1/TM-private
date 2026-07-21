@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use crate::{Error, Result, TmHome};
 
-pub(crate) const SCHEMA_VERSION: i64 = 6;
+pub(crate) const SCHEMA_VERSION: i64 = 7;
 const INITIAL_MIGRATION: &str = include_str!("../migrations/0001_initial.sql");
 const CHANGE_REQUESTS_MIGRATION: &str = include_str!("../migrations/0002_change_requests.sql");
 const CHANGE_REQUESTS_STRICT_CAS_MIGRATION: &str =
@@ -23,6 +23,7 @@ const CONTROLLED_MUTATIONS_MIGRATION: &str =
 const AI_BUDGET_GUARD_MIGRATION: &str = include_str!("../migrations/0005_ai_budget_guard.sql");
 const ASSISTANT_ACTION_APPROVALS_MIGRATION: &str =
     include_str!("../migrations/0006_assistant_action_approvals.sql");
+const ASSISTANT_MEMORY_MIGRATION: &str = include_str!("../migrations/0007_assistant_memory.sql");
 const BUSY_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone)]
@@ -172,6 +173,18 @@ impl Database {
                 [now_utc()],
             )?;
             transaction.pragma_update(None, "user_version", 6_i64)?;
+            transaction.commit()?;
+        }
+        if current_version < 7 {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(ASSISTANT_MEMORY_MIGRATION)?;
+            transaction.execute(
+                "INSERT INTO schema_migrations(version, name, applied_at)
+                 VALUES (7, 'assistant-memory-and-context-budget', ?1)",
+                [now_utc()],
+            )?;
+            transaction.pragma_update(None, "user_version", 7_i64)?;
             transaction.commit()?;
         }
         Ok(())

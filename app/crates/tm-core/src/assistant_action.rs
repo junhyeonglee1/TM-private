@@ -8,11 +8,13 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    CreateTaskInput, Error, MutationApprovalPolicy, MutationCommand, MutationExpectedVersion,
-    MutationOperation, MutationRequest, MutationResult, Result, TaskStatus, TmCore,
+    CreateMemoryInput, CreateTaskInput, Error, MemoryPatch, MutationApprovalPolicy,
+    MutationCommand, MutationExpectedVersion, MutationOperation, MutationRequest, MutationResult,
+    Result, TaskStatus, TmCore,
     core::query_project,
     database::{new_id, now_utc},
     error::{invalid, not_found},
+    memory::{query_memory, validate_create_memory, validate_memory_patch},
     mutation::validate_task_create,
 };
 
@@ -62,6 +64,19 @@ impl AssistantActionStatus {
 pub enum AssistantActionPayload {
     #[serde(rename = "task.create")]
     TaskCreate { input: CreateTaskInput },
+    #[serde(rename = "memory.create")]
+    MemoryCreate { input: CreateMemoryInput },
+    #[serde(rename = "memory.update")]
+    MemoryUpdate {
+        memory_id: String,
+        expected_revision: u64,
+        patch: MemoryPatch,
+    },
+    #[serde(rename = "memory.delete")]
+    MemoryDelete {
+        memory_id: String,
+        expected_revision: u64,
+    },
 }
 
 impl AssistantActionPayload {
@@ -69,6 +84,9 @@ impl AssistantActionPayload {
     pub const fn operation(&self) -> MutationOperation {
         match self {
             Self::TaskCreate { .. } => MutationOperation::TaskCreate,
+            Self::MemoryCreate { .. } => MutationOperation::MemoryCreate,
+            Self::MemoryUpdate { .. } => MutationOperation::MemoryUpdate,
+            Self::MemoryDelete { .. } => MutationOperation::MemoryDelete,
         }
     }
 
@@ -77,6 +95,30 @@ impl AssistantActionPayload {
             Self::TaskCreate { input } => MutationCommand::TaskCreate {
                 input: input.clone(),
             },
+            Self::MemoryCreate { input } => MutationCommand::MemoryCreate {
+                input: input.clone(),
+            },
+            Self::MemoryUpdate {
+                memory_id, patch, ..
+            } => MutationCommand::MemoryUpdate {
+                memory_id: memory_id.clone(),
+                patch: patch.clone(),
+            },
+            Self::MemoryDelete { memory_id, .. } => MutationCommand::MemoryDelete {
+                memory_id: memory_id.clone(),
+            },
+        }
+    }
+
+    const fn expected_version(&self) -> MutationExpectedVersion {
+        match self {
+            Self::TaskCreate { .. } | Self::MemoryCreate { .. } => MutationExpectedVersion::Absent,
+            Self::MemoryUpdate {
+                expected_revision, ..
+            }
+            | Self::MemoryDelete {
+                expected_revision, ..
+            } => MutationExpectedVersion::Exact(*expected_revision),
         }
     }
 }
@@ -117,12 +159,6 @@ impl TmCore {
         origin_request_id: &str,
         ttl_seconds: u64,
     ) -> Result<AssistantActionRequest> {
-        validate_request_id(origin_request_id)?;
-        if ttl_seconds > MAX_ACTION_TTL_SECONDS {
-            return Err(invalid(format!(
-                "assistant action TTL cannot exceed {MAX_ACTION_TTL_SECONDS} seconds"
-            )));
-        }
         input.title = input.title.trim().to_owned();
         input.description = input.description.trim().to_owned();
         if !matches!(input.status, TaskStatus::Inbox | TaskStatus::Todo) {
@@ -132,7 +168,82 @@ impl TmCore {
         }
         validate_task_create(&input)?;
 
-        let payload = AssistantActionPayload::TaskCreate { input };
+        self.propose_assistant_action(
+            AssistantActionPayload::TaskCreate { input },
+            origin_request_id,
+            ttl_seconds,
+        )
+    }
+
+    pub fn propose_memory_create_action(
+        &self,
+        mut input: CreateMemoryInput,
+        origin_request_id: &str,
+        ttl_seconds: u64,
+    ) -> Result<AssistantActionRequest> {
+        input.title = input.title.trim().to_owned();
+        input.body = input.body.trim().to_owned();
+        validate_create_memory(&input)?;
+        self.propose_assistant_action(
+            AssistantActionPayload::MemoryCreate { input },
+            origin_request_id,
+            ttl_seconds,
+        )
+    }
+
+    pub fn propose_memory_update_action(
+        &self,
+        memory_id: &str,
+        expected_revision: u64,
+        mut patch: MemoryPatch,
+        origin_request_id: &str,
+        ttl_seconds: u64,
+    ) -> Result<AssistantActionRequest> {
+        validate_uuid("memory ID", memory_id)?;
+        patch.title = patch.title.trim().to_owned();
+        patch.body = patch.body.trim().to_owned();
+        validate_memory_patch(&patch)?;
+        self.propose_assistant_action(
+            AssistantActionPayload::MemoryUpdate {
+                memory_id: memory_id.to_owned(),
+                expected_revision,
+                patch,
+            },
+            origin_request_id,
+            ttl_seconds,
+        )
+    }
+
+    pub fn propose_memory_delete_action(
+        &self,
+        memory_id: &str,
+        expected_revision: u64,
+        origin_request_id: &str,
+        ttl_seconds: u64,
+    ) -> Result<AssistantActionRequest> {
+        validate_uuid("memory ID", memory_id)?;
+        self.propose_assistant_action(
+            AssistantActionPayload::MemoryDelete {
+                memory_id: memory_id.to_owned(),
+                expected_revision,
+            },
+            origin_request_id,
+            ttl_seconds,
+        )
+    }
+
+    fn propose_assistant_action(
+        &self,
+        payload: AssistantActionPayload,
+        origin_request_id: &str,
+        ttl_seconds: u64,
+    ) -> Result<AssistantActionRequest> {
+        validate_request_id(origin_request_id)?;
+        if ttl_seconds == 0 || ttl_seconds > MAX_ACTION_TTL_SECONDS {
+            return Err(invalid(format!(
+                "assistant action TTL must be 1-{MAX_ACTION_TTL_SECONDS} seconds"
+            )));
+        }
         let payload_json = serde_json::to_string(&payload)?;
         let payload_sha256 = format!("{:x}", Sha256::digest(payload_json.as_bytes()));
         let id = new_id();
@@ -149,9 +260,10 @@ impl TmCore {
                     "INSERT INTO assistant_action_requests(
                         id, operation, status, revision, payload_json, payload_sha256,
                         origin_request_id, execution_idempotency_key, created_at, expires_at
-                     ) VALUES (?1, 'task.create', 'pending', 1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                     ) VALUES (?1, ?2, 'pending', 1, ?3, ?4, ?5, ?6, ?7, ?8)",
                     params![
                         id,
+                        payload.operation().as_str(),
                         payload_json,
                         payload_sha256,
                         origin_request_id,
@@ -303,7 +415,7 @@ impl TmCore {
 
         let request = MutationRequest {
             idempotency_key: action.execution_idempotency_key.clone(),
-            expected_version: MutationExpectedVersion::Absent,
+            expected_version: action.payload.expected_version(),
             actor: "tm_ai_assistant".to_owned(),
             request_id: request_id.to_owned(),
             approval_policy: MutationApprovalPolicy::AiActionApproval,
@@ -666,6 +778,36 @@ fn validate_payload_targets(
                 }
             }
         }
+        AssistantActionPayload::MemoryCreate { input } => validate_create_memory(input)?,
+        AssistantActionPayload::MemoryUpdate {
+            memory_id,
+            expected_revision,
+            patch,
+        } => {
+            validate_memory_patch(patch)?;
+            let memory = query_memory(transaction, memory_id)?;
+            validate_memory_target(&memory, *expected_revision)?;
+        }
+        AssistantActionPayload::MemoryDelete {
+            memory_id,
+            expected_revision,
+        } => {
+            let memory = query_memory(transaction, memory_id)?;
+            validate_memory_target(&memory, *expected_revision)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_memory_target(memory: &crate::AssistantMemory, expected_revision: u64) -> Result<()> {
+    if memory.deleted_at.is_some() {
+        return Err(Error::Conflict("assistant memory is deleted".to_owned()));
+    }
+    if expected_revision == 0 || memory.revision != expected_revision {
+        return Err(Error::Conflict(format!(
+            "memory revision conflict: expected {expected_revision}, found {}",
+            memory.revision
+        )));
     }
     Ok(())
 }
@@ -786,6 +928,9 @@ fn action_failure_code(error: &Error) -> Option<&'static str> {
 fn parse_operation(index: usize, value: &str) -> rusqlite::Result<MutationOperation> {
     match value {
         "task.create" => Ok(MutationOperation::TaskCreate),
+        "memory.create" => Ok(MutationOperation::MemoryCreate),
+        "memory.update" => Ok(MutationOperation::MemoryUpdate),
+        "memory.delete" => Ok(MutationOperation::MemoryDelete),
         _ => Err(rusqlite::Error::FromSqlConversionFailure(
             index,
             Type::Text,
