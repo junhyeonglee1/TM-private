@@ -4,7 +4,7 @@ param(
     [string]$BaseUri = 'https://tm-server-production-5573.up.railway.app',
 
     [ValidateRange(60, 600)]
-    [int]$TimeoutSeconds = 240,
+    [int]$TimeoutSeconds = 360,
 
     [string]$OutputPath
 )
