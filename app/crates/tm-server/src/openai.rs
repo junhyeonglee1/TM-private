@@ -2,12 +2,13 @@ use std::{env, fmt, net::IpAddr, sync::Arc, time::Duration};
 
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tm_core::{AiBudgetPolicy, AiBudgetStatus};
 use url::Url;
 
 pub const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1/";
-pub const DEFAULT_OPENAI_MODEL: &str = "gpt-5.6";
-pub const DEFAULT_OPENAI_TIMEOUT_SECS: u64 = 30;
+pub const DEFAULT_OPENAI_MODEL: &str = "gpt-5.6-terra";
+pub const DEFAULT_OPENAI_TIMEOUT_SECS: u64 = 60;
 pub const DEFAULT_OPENAI_MONTHLY_WARNING_MICROUSD: u64 = 10_000_000;
 pub const DEFAULT_OPENAI_MONTHLY_HARD_LIMIT_MICROUSD: u64 = 20_000_000;
 pub const PROBE_MAXIMUM_COST_MICROUSD: u64 = 10_000;
@@ -158,14 +159,20 @@ impl OpenAiConfig {
 
     #[must_use]
     pub fn estimate_cost_microusd(&self, usage: &ProbeUsage) -> Option<u64> {
-        if !self.model.starts_with("gpt-5.6") {
+        let (uncached_rate, cached_rate, output_rate) = if self.model.starts_with("gpt-5.6-terra") {
+            (2_500_000_u128, 250_000_u128, 15_000_000_u128)
+        } else if self.model.starts_with("gpt-5.6-luna") {
+            (1_000_000_u128, 100_000_u128, 6_000_000_u128)
+        } else if self.model.starts_with("gpt-5.6") {
+            (5_000_000_u128, 500_000_u128, 30_000_000_u128)
+        } else {
             return None;
-        }
+        };
         let uncached_input = usage.input_tokens.saturating_sub(usage.cached_input_tokens);
         let numerator = u128::from(uncached_input)
-            .saturating_mul(5_000_000)
-            .saturating_add(u128::from(usage.cached_input_tokens).saturating_mul(500_000))
-            .saturating_add(u128::from(usage.output_tokens).saturating_mul(30_000_000));
+            .saturating_mul(uncached_rate)
+            .saturating_add(u128::from(usage.cached_input_tokens).saturating_mul(cached_rate))
+            .saturating_add(u128::from(usage.output_tokens).saturating_mul(output_rate));
         let rounded_up = numerator.saturating_add(999_999) / 1_000_000;
         u64::try_from(rounded_up).ok()
     }
@@ -270,6 +277,60 @@ impl OpenAiClient {
             budget: None,
         })
     }
+
+    pub(crate) async fn create_response(
+        &self,
+        request: &Value,
+    ) -> Result<OpenAiResponseCall, OpenAiError> {
+        let api_key = self
+            .config
+            .api_key
+            .as_deref()
+            .ok_or(OpenAiError::NotConfigured)?;
+        let response = self
+            .http
+            .post(self.config.responses_url()?)
+            .bearer_auth(api_key)
+            .json(request)
+            .send()
+            .await
+            .map_err(|_| OpenAiError::Transport)?;
+
+        let status = response.status();
+        let upstream_request_id = response
+            .headers()
+            .get("x-request-id")
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned);
+        if !status.is_success() {
+            return Err(classify_upstream_error(status, upstream_request_id));
+        }
+
+        let response = response
+            .json::<OpenAiResponse>()
+            .await
+            .map_err(|_| OpenAiError::InvalidResponse)?;
+        Ok(OpenAiResponseCall {
+            response,
+            upstream_request_id,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct OpenAiResponseCall {
+    pub response: OpenAiResponse,
+    pub upstream_request_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct OpenAiResponse {
+    pub id: String,
+    pub status: String,
+    pub model: String,
+    #[serde(default)]
+    pub output: Vec<Value>,
+    pub usage: Option<UpstreamUsage>,
 }
 
 #[derive(Debug)]
@@ -348,19 +409,19 @@ struct ProbeOutputContent {
     text: Option<String>,
 }
 
-#[derive(Deserialize)]
-struct UpstreamUsage {
-    input_tokens: u64,
-    output_tokens: u64,
-    total_tokens: u64,
+#[derive(Debug, Deserialize)]
+pub(crate) struct UpstreamUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
     #[serde(default)]
-    input_tokens_details: Option<InputTokenDetails>,
+    pub input_tokens_details: Option<InputTokenDetails>,
 }
 
-#[derive(Deserialize)]
-struct InputTokenDetails {
+#[derive(Debug, Deserialize)]
+pub(crate) struct InputTokenDetails {
     #[serde(default)]
-    cached_tokens: u64,
+    pub cached_tokens: u64,
 }
 
 impl From<UpstreamUsage> for ProbeUsage {
@@ -372,6 +433,19 @@ impl From<UpstreamUsage> for ProbeUsage {
                 .map_or(0, |details| details.cached_tokens),
             output_tokens: value.output_tokens,
             total_tokens: value.total_tokens,
+        }
+    }
+}
+
+impl ProbeUsage {
+    pub(crate) fn saturating_add(self, other: Self) -> Self {
+        Self {
+            input_tokens: self.input_tokens.saturating_add(other.input_tokens),
+            cached_input_tokens: self
+                .cached_input_tokens
+                .saturating_add(other.cached_input_tokens),
+            output_tokens: self.output_tokens.saturating_add(other.output_tokens),
+            total_tokens: self.total_tokens.saturating_add(other.total_tokens),
         }
     }
 }

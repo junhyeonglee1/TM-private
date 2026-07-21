@@ -2,20 +2,21 @@ use std::{
     env, fmt,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     path::{Path, PathBuf},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 pub mod auth;
 mod desktop_api;
 mod import_api;
 pub mod openai;
+mod orchestrator;
 mod read_api;
 mod write_api;
 
 use axum::{
     Extension, Json, Router,
     body::Body,
-    extract::{Request, State},
+    extract::{DefaultBodyLimit, Request, State, rejection::JsonRejection},
     http::{HeaderMap, HeaderValue, StatusCode, header::HeaderName},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -30,6 +31,11 @@ use crate::auth::{
 };
 use crate::openai::{
     OpenAiClient, OpenAiConfig, OpenAiError, OpenAiProbeResult, PROBE_MAXIMUM_COST_MICROUSD,
+};
+use crate::orchestrator::{
+    ASSISTANT_MAX_BODY_BYTES, ASSISTANT_MAX_MESSAGE_BYTES, ASSISTANT_MAX_TOOL_CALLS,
+    ASSISTANT_MAXIMUM_COST_MICROUSD, ASSISTANT_TIMEOUT_SECS, AssistantError, AssistantErrorKind,
+    AssistantRequest, AssistantResult,
 };
 
 pub const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8787";
@@ -165,7 +171,7 @@ impl ServerConfig {
                 validate_bind_addr(profile, bind_addr)?;
                 (
                     bind_addr,
-                    OpenAiConfig::default(),
+                    OpenAiConfig::from_env()?,
                     Some(AuthConfig::from_env()?),
                 )
             }
@@ -296,6 +302,10 @@ struct AiStatus {
     model: String,
     api_base: String,
     response_storage: &'static str,
+    assistant_read_only: bool,
+    assistant_maximum_cost_microusd: u64,
+    assistant_max_tool_calls: usize,
+    assistant_timeout_seconds: u64,
     budget: AiBudgetStatus,
 }
 
@@ -357,6 +367,10 @@ pub fn build_router_with_openai(core: TmCore, openai: OpenAiClient) -> Router {
         .route("/readyz", get(readyz))
         .route("/api/v1/ai/status", get(ai_status))
         .route("/api/v1/ai/probe", post(ai_probe))
+        .route(
+            "/api/v1/assistant/query",
+            post(assistant_query).layer(DefaultBodyLimit::max(ASSISTANT_MAX_BODY_BYTES)),
+        )
         .fallback(not_found)
         .with_state(AppState { core, openai })
         .layer(middleware::from_fn(security_headers))
@@ -379,12 +393,26 @@ pub fn build_cloud_bootstrap_router(core: TmCore) -> Router {
 }
 
 pub fn build_cloud_authenticated_router(core: TmCore, auth: AuthConfig) -> Router {
+    build_cloud_authenticated_router_with_openai(core, auth, OpenAiClient::disabled())
+}
+
+pub fn build_cloud_authenticated_router_with_openai(
+    core: TmCore,
+    auth: AuthConfig,
+    openai: OpenAiClient,
+) -> Router {
     let authenticator = TokenAuthenticator::new(auth);
     Router::new()
         .route("/healthz", get(cloud_healthz))
         .route("/readyz", get(cloud_readyz))
         .route("/api/v1/auth/status", get(auth_status))
         .route("/api/v1/ops/status", get(operations_status))
+        .route("/api/v1/ai/status", get(ai_status))
+        .route("/api/v1/ai/probe", post(ai_probe))
+        .route(
+            "/api/v1/assistant/query",
+            post(assistant_query).layer(DefaultBodyLimit::max(ASSISTANT_MAX_BODY_BYTES)),
+        )
         .route(
             "/api/v1/desktop/commands/{command}",
             post(desktop_api::invoke),
@@ -416,10 +444,7 @@ pub fn build_cloud_authenticated_router(core: TmCore, auth: AuthConfig) -> Route
         )
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
-        .with_state(AppState {
-            core,
-            openai: OpenAiClient::disabled(),
-        })
+        .with_state(AppState { core, openai })
         .layer(write_api::body_limit())
         .layer(middleware::from_fn_with_state(
             authenticator,
@@ -589,6 +614,10 @@ async fn ai_status(
             model: config.model().to_owned(),
             api_base: config.base_url().to_owned(),
             response_storage: "disabled",
+            assistant_read_only: true,
+            assistant_maximum_cost_microusd: ASSISTANT_MAXIMUM_COST_MICROUSD,
+            assistant_max_tool_calls: ASSISTANT_MAX_TOOL_CALLS,
+            assistant_timeout_seconds: ASSISTANT_TIMEOUT_SECS,
             budget,
         },
     }))
@@ -677,6 +706,160 @@ async fn ai_probe(
         .map_err(|error| ai_budget_api_error(error, request_id.0.clone()))?;
     result.estimated_cost_microusd = Some(actual_cost);
     result.budget = Some(budget);
+
+    Ok(Json(ApiEnvelope {
+        request_id: request_id.0,
+        data: result,
+    }))
+}
+
+async fn assistant_query(
+    State(state): State<AppState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    payload: Result<Json<AssistantRequest>, JsonRejection>,
+) -> Result<Json<ApiEnvelope<AssistantResult>>, ApiError> {
+    if headers
+        .get(&AI_CONFIRM_HEADER)
+        .and_then(|value| value.to_str().ok())
+        != Some("assistant")
+    {
+        return Err(ApiError {
+            status: StatusCode::PRECONDITION_REQUIRED,
+            code: "AI_CALL_CONFIRMATION_REQUIRED",
+            message: "set x-tm-confirm-ai-call to assistant for this billable request".to_owned(),
+            request_id: request_id.0,
+        });
+    }
+
+    let body = payload.map_err(|rejection| {
+        let too_large = rejection.status() == StatusCode::PAYLOAD_TOO_LARGE;
+        ApiError {
+            status: if too_large {
+                StatusCode::PAYLOAD_TOO_LARGE
+            } else {
+                StatusCode::BAD_REQUEST
+            },
+            code: if too_large {
+                "ASSISTANT_REQUEST_TOO_LARGE"
+            } else {
+                "INVALID_ASSISTANT_JSON"
+            },
+            message: if too_large {
+                format!("assistant request exceeds {ASSISTANT_MAX_BODY_BYTES} bytes")
+            } else {
+                "assistant request body does not match the API contract".to_owned()
+            },
+            request_id: request_id.0.clone(),
+        }
+    })?;
+    let message = body.message.trim();
+    if message.is_empty() || message.len() > ASSISTANT_MAX_MESSAGE_BYTES {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "INVALID_ASSISTANT_MESSAGE",
+            message: format!(
+                "assistant message must contain 1 to {ASSISTANT_MAX_MESSAGE_BYTES} UTF-8 bytes"
+            ),
+            request_id: request_id.0,
+        });
+    }
+
+    let error_request_id = request_id.0.clone();
+    let config = state.openai.config();
+    if !config.configured() {
+        return Err(openai_api_error(
+            OpenAiError::NotConfigured,
+            error_request_id,
+        ));
+    }
+    let model = config.model().to_owned();
+    let policy = config.budget_policy();
+    let reservation = state
+        .core
+        .reserve_ai_budget(
+            &request_id.0,
+            "openai",
+            &model,
+            "assistant",
+            ASSISTANT_MAXIMUM_COST_MICROUSD,
+            policy,
+        )
+        .map_err(|error| ai_budget_api_error(error, request_id.0.clone()))?;
+
+    let execution = tokio::time::timeout(
+        Duration::from_secs(ASSISTANT_TIMEOUT_SECS),
+        orchestrator::run(state.core.clone(), state.openai.clone(), message.to_owned()),
+    )
+    .await;
+    let mut result = match execution {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => {
+            let estimated_cost = if error.possibly_billed {
+                reservation.reserved_microusd
+            } else {
+                0
+            };
+            let outcome = if error.possibly_billed {
+                "upstream_cost_estimate"
+            } else {
+                "preflight_failed"
+            };
+            state
+                .core
+                .settle_ai_budget(&reservation, estimated_cost, None, outcome, policy)
+                .map_err(|ledger_error| ai_budget_api_error(ledger_error, request_id.0.clone()))?;
+            return Err(assistant_api_error(error, error_request_id));
+        }
+        Err(_) => {
+            state
+                .core
+                .settle_ai_budget(
+                    &reservation,
+                    reservation.reserved_microusd,
+                    None,
+                    "upstream_cost_estimate",
+                    policy,
+                )
+                .map_err(|ledger_error| ai_budget_api_error(ledger_error, request_id.0.clone()))?;
+            return Err(ApiError {
+                status: StatusCode::GATEWAY_TIMEOUT,
+                code: "ASSISTANT_TIMEOUT",
+                message: "the read-only assistant exceeded the 60 second timeout".to_owned(),
+                request_id: error_request_id,
+            });
+        }
+    };
+
+    let usage = result.usage.map(|usage| AiTokenUsage {
+        input_tokens: usage.input_tokens,
+        cached_input_tokens: usage.cached_input_tokens,
+        output_tokens: usage.output_tokens,
+        total_tokens: usage.total_tokens,
+    });
+    let known_cost = result
+        .usage
+        .and_then(|usage| state.openai.config().estimate_cost_microusd(&usage));
+    let actual_cost = known_cost.unwrap_or(reservation.reserved_microusd);
+    let outcome = if known_cost.is_some() {
+        "succeeded"
+    } else {
+        "upstream_cost_estimate"
+    };
+    let budget = state
+        .core
+        .settle_ai_budget(&reservation, actual_cost, usage, outcome, policy)
+        .map_err(|error| ai_budget_api_error(error, request_id.0.clone()))?;
+    result.estimated_cost_microusd = Some(actual_cost);
+    result.budget = Some(budget);
+
+    tracing::info!(
+        request_id = %request_id.0,
+        model = %result.model,
+        tool_call_count = result.tool_call_count,
+        tools_used = ?result.tools_used,
+        "read-only TM assistant request completed"
+    );
 
     Ok(Json(ApiEnvelope {
         request_id: request_id.0,
@@ -801,17 +984,17 @@ fn require_railway_environment() -> Result<(), String> {
 }
 
 fn reject_cloud_overrides(forbid_auth: bool) -> Result<(), String> {
-    let mut forbidden = vec![
-        "TM_SERVER_BIND",
-        "OPENAI_API_KEY",
-        "TM_OPENAI_MODEL",
-        "TM_OPENAI_BASE_URL",
-        "TM_OPENAI_TIMEOUT_SECS",
-        "TM_OPENAI_MONTHLY_WARNING_USD",
-        "TM_OPENAI_MONTHLY_HARD_LIMIT_USD",
-    ];
+    let mut forbidden = vec!["TM_SERVER_BIND", "TM_OPENAI_BASE_URL"];
     if forbid_auth {
-        forbidden.extend([AUTH_TOKEN_HASH_ENV, AUTH_TOKEN_EXPIRY_ENV]);
+        forbidden.extend([
+            "OPENAI_API_KEY",
+            "TM_OPENAI_MODEL",
+            "TM_OPENAI_TIMEOUT_SECS",
+            "TM_OPENAI_MONTHLY_WARNING_USD",
+            "TM_OPENAI_MONTHLY_HARD_LIMIT_USD",
+            AUTH_TOKEN_HASH_ENV,
+            AUTH_TOKEN_EXPIRY_ENV,
+        ]);
     }
     for name in forbidden {
         if optional_env(name)?.is_some() {
@@ -842,7 +1025,7 @@ fn required_path_env(name: &str) -> Result<PathBuf, String> {
 }
 
 fn openai_api_error(error: OpenAiError, request_id: String) -> ApiError {
-    tracing::warn!(?error, %request_id, "OpenAI probe failed");
+    tracing::warn!(?error, %request_id, "OpenAI request failed");
     match error {
         OpenAiError::NotConfigured => ApiError {
             status: StatusCode::SERVICE_UNAVAILABLE,
@@ -859,13 +1042,13 @@ fn openai_api_error(error: OpenAiError, request_id: String) -> ApiError {
         OpenAiError::RateLimited { .. } => ApiError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             code: "OPENAI_RATE_LIMITED",
-            message: "OpenAI temporarily rate-limited the connectivity check".to_owned(),
+            message: "OpenAI temporarily rate-limited the request".to_owned(),
             request_id,
         },
         OpenAiError::RequestRejected { .. } => ApiError {
             status: StatusCode::BAD_GATEWAY,
             code: "OPENAI_REQUEST_REJECTED",
-            message: "OpenAI rejected the connectivity check configuration".to_owned(),
+            message: "OpenAI rejected the server request configuration".to_owned(),
             request_id,
         },
         OpenAiError::InvalidConfiguration => ApiError {
@@ -884,6 +1067,43 @@ fn openai_api_error(error: OpenAiError, request_id: String) -> ApiError {
             status: StatusCode::BAD_GATEWAY,
             code: "OPENAI_RESPONSE_INVALID",
             message: "OpenAI returned an unexpected response".to_owned(),
+            request_id,
+        },
+    }
+}
+
+fn assistant_api_error(error: AssistantError, request_id: String) -> ApiError {
+    tracing::warn!(kind = ?error.kind, %request_id, "read-only assistant failed");
+    match error.kind {
+        AssistantErrorKind::OpenAi(error) => openai_api_error(error, request_id),
+        AssistantErrorKind::InvalidResponse => ApiError {
+            status: StatusCode::BAD_GATEWAY,
+            code: "ASSISTANT_RESPONSE_INVALID",
+            message: "OpenAI returned an invalid assistant response".to_owned(),
+            request_id,
+        },
+        AssistantErrorKind::ToolLimitExceeded => ApiError {
+            status: StatusCode::BAD_GATEWAY,
+            code: "ASSISTANT_TOOL_LIMIT_EXCEEDED",
+            message: "the assistant exceeded the six-call read-only tool limit".to_owned(),
+            request_id,
+        },
+        AssistantErrorKind::ToolNotAllowed => ApiError {
+            status: StatusCode::BAD_GATEWAY,
+            code: "ASSISTANT_TOOL_NOT_ALLOWED",
+            message: "the assistant requested a tool outside the read-only allowlist".to_owned(),
+            request_id,
+        },
+        AssistantErrorKind::InvalidToolArguments => ApiError {
+            status: StatusCode::BAD_GATEWAY,
+            code: "ASSISTANT_TOOL_ARGUMENTS_INVALID",
+            message: "the assistant returned invalid read-only tool arguments".to_owned(),
+            request_id,
+        },
+        AssistantErrorKind::DataReadFailed => ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "ASSISTANT_DATA_READ_FAILED",
+            message: "TM data could not be read for the assistant".to_owned(),
             request_id,
         },
     }
@@ -1026,6 +1246,7 @@ fn safe_route_family(path: &str) -> &'static str {
         "/api/v1/ops/import" => "/api/v1/ops/import",
         "/api/v1/ai/status" => "/api/v1/ai/status",
         "/api/v1/ai/probe" => "/api/v1/ai/probe",
+        "/api/v1/assistant/query" => "/api/v1/assistant/query",
         "/api/v1/projects" => "/api/v1/projects",
         "/api/v1/tasks" => "/api/v1/tasks",
         "/api/v1/checklist" => "/api/v1/checklist",
@@ -1074,7 +1295,10 @@ mod tests {
     use std::{
         fs,
         path::Path,
-        sync::{Arc, Mutex},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
         time::Duration,
     };
 
@@ -1096,12 +1320,13 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{
-        ServerProfile, build_cloud_authenticated_router, build_cloud_bootstrap_router,
+        ServerProfile, build_cloud_authenticated_router,
+        build_cloud_authenticated_router_with_openai, build_cloud_bootstrap_router,
         build_cloud_import_router, build_router, build_router_with_openai, validate_bind_addr,
         validate_cloud_home,
     };
     use crate::auth::{AuthConfig, TOKEN_PREFIX};
-    use crate::openai::{OpenAiClient, OpenAiConfig};
+    use crate::openai::{OpenAiClient, OpenAiConfig, ProbeUsage};
 
     const TEST_AUTH_SECRET: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
@@ -1234,6 +1459,104 @@ mod tests {
                 }
             })),
         )
+    }
+
+    #[derive(Clone, Default)]
+    struct MockAssistantCapture {
+        calls: Arc<AtomicUsize>,
+        payloads: Arc<Mutex<Vec<Value>>>,
+    }
+
+    async fn mock_assistant_response(
+        State(capture): State<MockAssistantCapture>,
+        headers: HeaderMap,
+        Json(payload): Json<Value>,
+    ) -> impl IntoResponse {
+        assert_eq!(
+            headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer test-api-key")
+        );
+        capture
+            .payloads
+            .lock()
+            .expect("lock assistant payloads")
+            .push(payload);
+        let call = capture.calls.fetch_add(1, Ordering::SeqCst);
+        let mut response_headers = HeaderMap::new();
+        response_headers.insert(
+            "x-request-id",
+            HeaderValue::from_str(&format!("openai-assistant-{}", call + 1))
+                .expect("valid mock request ID"),
+        );
+        let body = if call == 0 {
+            json!({
+                "id": "resp_assistant_1",
+                "status": "completed",
+                "model": "gpt-5.6-terra",
+                "output": [{
+                    "type": "function_call",
+                    "id": "fc_1",
+                    "call_id": "call_1",
+                    "name": "list_tasks",
+                    "arguments": "{\"project_id\":null,\"status\":null,\"limit\":10}"
+                }],
+                "usage": {
+                    "input_tokens": 100,
+                    "input_tokens_details": {"cached_tokens": 10},
+                    "output_tokens": 20,
+                    "total_tokens": 120
+                }
+            })
+        } else {
+            json!({
+                "id": "resp_assistant_2",
+                "status": "completed",
+                "model": "gpt-5.6-terra",
+                "output": [{
+                    "type": "message",
+                    "id": "msg_1",
+                    "role": "assistant",
+                    "content": [{
+                        "type": "output_text",
+                        "text": "결론: 현재 할 일이 있습니다. 근거는 TM의 읽기 전용 작업 목록입니다."
+                    }]
+                }],
+                "usage": {
+                    "input_tokens": 200,
+                    "input_tokens_details": {"cached_tokens": 50},
+                    "output_tokens": 30,
+                    "total_tokens": 230
+                }
+            })
+        };
+        (response_headers, Json(body))
+    }
+
+    async fn mock_disallowed_tool_response(
+        State(calls): State<Arc<AtomicUsize>>,
+        Json(_payload): Json<Value>,
+    ) -> impl IntoResponse {
+        calls.fetch_add(1, Ordering::SeqCst);
+        Json(json!({
+            "id": "resp_disallowed_tool",
+            "status": "completed",
+            "model": "gpt-5.6-terra",
+            "output": [{
+                "type": "function_call",
+                "id": "fc_disallowed",
+                "call_id": "call_disallowed",
+                "name": "create_task",
+                "arguments": "{\"title\":\"must never run\"}"
+            }],
+            "usage": {
+                "input_tokens": 10,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens": 5,
+                "total_tokens": 15
+            }
+        }))
     }
 
     #[tokio::test]
@@ -1437,6 +1760,206 @@ mod tests {
         assert_eq!(captured_payload["model"], "gpt-5.6");
         assert_eq!(captured_payload["store"], false);
         assert_eq!(captured_payload["reasoning"]["effort"], "none");
+
+        mock_server.abort();
+    }
+
+    #[test]
+    fn terra_cost_estimate_uses_the_approved_step_11_rates() {
+        let config = OpenAiConfig::for_test(
+            Some("test-api-key"),
+            "gpt-5.6-terra",
+            "https://api.openai.com/v1",
+            Duration::from_secs(5),
+        )
+        .expect("build Terra OpenAI config");
+
+        assert_eq!(
+            config.estimate_cost_microusd(&ProbeUsage {
+                input_tokens: 300,
+                cached_input_tokens: 60,
+                output_tokens: 50,
+                total_tokens: 350,
+            }),
+            Some(1_365)
+        );
+    }
+
+    #[tokio::test]
+    async fn authenticated_assistant_is_strict_stateless_read_only_and_budgeted() {
+        let capture = MockAssistantCapture::default();
+        let mock_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind assistant mock server");
+        let mock_address = mock_listener.local_addr().expect("read mock address");
+        let mock_router = Router::new()
+            .route("/v1/responses", post(mock_assistant_response))
+            .with_state(capture.clone());
+        let mock_server = tokio::spawn(async move {
+            axum::serve(mock_listener, mock_router)
+                .await
+                .expect("serve assistant mock responses");
+        });
+
+        let config = OpenAiConfig::for_test(
+            Some("test-api-key"),
+            "gpt-5.6-terra",
+            &format!("http://{mock_address}/v1"),
+            Duration::from_secs(5),
+        )
+        .expect("build assistant OpenAI config");
+        let client = OpenAiClient::new(config).expect("build assistant OpenAI client");
+        let (_temporary, core, _project_id, _task_id) = populated_test_core();
+        let response =
+            build_cloud_authenticated_router_with_openai(core, test_auth_config(), client)
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/assistant/query")
+                        .header("authorization", format!("Bearer {}", test_auth_token()))
+                        .header("x-tm-confirm-ai-call", "assistant")
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"message":"현재 해야 할 일을 요약해줘"}"#))
+                        .expect("build assistant request"),
+                )
+                .await
+                .expect("call assistant route");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert!(
+            body["data"]["answer"]
+                .as_str()
+                .is_some_and(|answer| answer.starts_with("결론:"))
+        );
+        assert_eq!(body["data"]["model"], "gpt-5.6-terra");
+        assert_eq!(
+            body["data"]["responseIds"].as_array().map(Vec::len),
+            Some(2)
+        );
+        assert_eq!(body["data"]["toolCallCount"], 1);
+        assert_eq!(body["data"]["toolsUsed"], json!(["list_tasks"]));
+        assert_eq!(body["data"]["usage"]["totalTokens"], 350);
+        assert_eq!(body["data"]["estimatedCostMicrousd"], 1_365);
+        assert_eq!(body["data"]["budget"]["committedMicrousd"], 1_365);
+        assert_eq!(body["data"]["stored"], false);
+        assert_eq!(body["data"]["readOnly"], true);
+        assert_eq!(body["data"]["maxOutputTokens"], 2_000);
+
+        let payloads = capture.payloads.lock().expect("lock payloads");
+        assert_eq!(payloads.len(), 2);
+        let first = &payloads[0];
+        assert_eq!(first["model"], "gpt-5.6-terra");
+        assert_eq!(first["store"], false);
+        assert_eq!(first["max_output_tokens"], 2_000);
+        assert_eq!(first["reasoning"]["effort"], "medium");
+        assert_eq!(first["reasoning"]["context"], "current_turn");
+        assert_eq!(first["text"]["verbosity"], "medium");
+        assert_eq!(first["safety_identifier"], "tm-single-user-v1");
+        assert_eq!(first["tool_choice"], "required");
+        assert_eq!(first["parallel_tool_calls"], false);
+        let tools = first["tools"].as_array().expect("function tools");
+        assert_eq!(tools.len(), 7);
+        for tool in tools {
+            assert_eq!(tool["type"], "function");
+            assert_eq!(tool["strict"], true);
+            assert_eq!(tool["parameters"]["additionalProperties"], false);
+            assert_eq!(
+                tool["parameters"]["required"].as_array().map(Vec::len),
+                tool["parameters"]["properties"]
+                    .as_object()
+                    .map(serde_json::Map::len)
+            );
+        }
+        let second = &payloads[1];
+        assert_eq!(second["tool_choice"], "auto");
+        let second_input = second["input"].as_array().expect("stateless replay input");
+        assert!(
+            second_input
+                .iter()
+                .any(|item| item["type"] == "function_call")
+        );
+        let tool_output = second_input
+            .iter()
+            .find(|item| item["type"] == "function_call_output")
+            .expect("function output replay");
+        let tool_output = tool_output["output"].as_str().expect("string tool output");
+        assert!(tool_output.contains("Read API Todo"));
+        assert!(!tool_output.contains("relativePath"));
+        assert!(!tool_output.contains("TM_AUTH"));
+        drop(payloads);
+
+        mock_server.abort();
+    }
+
+    #[tokio::test]
+    async fn assistant_rejects_unconfirmed_calls_before_openai_and_disallowed_tools_before_mutation()
+     {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mock_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind disallowed-tool mock server");
+        let mock_address = mock_listener.local_addr().expect("read mock address");
+        let mock_router = Router::new()
+            .route("/v1/responses", post(mock_disallowed_tool_response))
+            .with_state(calls.clone());
+        let mock_server = tokio::spawn(async move {
+            axum::serve(mock_listener, mock_router)
+                .await
+                .expect("serve disallowed tool response");
+        });
+        let config = OpenAiConfig::for_test(
+            Some("test-api-key"),
+            "gpt-5.6-terra",
+            &format!("http://{mock_address}/v1"),
+            Duration::from_secs(5),
+        )
+        .expect("build disallowed-tool config");
+        let client = OpenAiClient::new(config).expect("build disallowed-tool client");
+        let (_temporary, core) = test_core();
+        let router =
+            build_cloud_authenticated_router_with_openai(core.clone(), test_auth_config(), client);
+
+        let unconfirmed = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/assistant/query")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"message":"작업을 만들어줘"}"#))
+                    .expect("build unconfirmed request"),
+            )
+            .await
+            .expect("call unconfirmed assistant route");
+        assert_eq!(unconfirmed.status(), StatusCode::PRECONDITION_REQUIRED);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        let confirmed = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/assistant/query")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("x-tm-confirm-ai-call", "assistant")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"message":"작업을 만들어줘"}"#))
+                    .expect("build confirmed request"),
+            )
+            .await
+            .expect("call confirmed assistant route");
+        assert_eq!(confirmed.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            response_json(confirmed).await["error"]["code"],
+            "ASSISTANT_TOOL_NOT_ALLOWED"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(
+            core.list_tasks(false)
+                .expect("list unchanged tasks")
+                .is_empty()
+        );
 
         mock_server.abort();
     }
