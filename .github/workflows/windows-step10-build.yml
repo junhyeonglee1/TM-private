@@ -80,8 +80,10 @@ jobs:
       - name: Build Windows executables
         shell: pwsh
         run: |
-          pnpm exec tauri build --target x86_64-pc-windows-msvc --no-bundle --features custom-protocol -- --locked
+          & '.\node_modules\.bin\tauri.cmd' build --target x86_64-pc-windows-msvc --no-bundle --features custom-protocol -- --locked
+          if ($LASTEXITCODE -ne 0) { throw "Tauri release build failed with exit code $LASTEXITCODE" }
           cargo build --locked --release --target x86_64-pc-windows-msvc -p tm-cli --bin tm-cli
+          if ($LASTEXITCODE -ne 0) { throw "tm-cli release build failed with exit code $LASTEXITCODE" }
 
       - name: Prepare verified artifact
         shell: pwsh
