@@ -87,10 +87,20 @@ jobs:
         shell: pwsh
         run: |
           $artifact = Join-Path $env:RUNNER_TEMP 'tm-step10-windows-x64'
-          $release = Join-Path $env:TM_CARGO_TARGET_DIR 'x86_64-pc-windows-msvc\release'
+          $desktop = Get-ChildItem -LiteralPath $env:TM_CARGO_TARGET_DIR -Filter 'tm.exe' -File -Recurse |
+            Where-Object { $_.FullName -match '[\\/]release[\\/]tm\.exe$' } |
+            Sort-Object LastWriteTimeUtc -Descending |
+            Select-Object -First 1
+          $cli = Get-ChildItem -LiteralPath $env:TM_CARGO_TARGET_DIR -Filter 'tm-cli.exe' -File -Recurse |
+            Where-Object { $_.FullName -match '[\\/]release[\\/]tm-cli\.exe$' } |
+            Sort-Object LastWriteTimeUtc -Descending |
+            Select-Object -First 1
+          if (-not $desktop -or -not $cli) {
+            throw 'Expected release executables were not found under the Cargo target directory.'
+          }
           New-Item -ItemType Directory -Force -Path $artifact | Out-Null
-          Copy-Item (Join-Path $release 'tm.exe') $artifact
-          Copy-Item (Join-Path $release 'tm-cli.exe') $artifact
+          Copy-Item -LiteralPath $desktop.FullName -Destination (Join-Path $artifact 'tm.exe')
+          Copy-Item -LiteralPath $cli.FullName -Destination (Join-Path $artifact 'tm-cli.exe')
           Get-FileHash -Algorithm SHA256 (Join-Path $artifact 'tm.exe'), (Join-Path $artifact 'tm-cli.exe') |
             ForEach-Object { '{0}  {1}' -f $_.Hash.ToLowerInvariant(), (Split-Path -Leaf $_.Path) } |
             Set-Content -Encoding ascii (Join-Path $artifact 'SHA256SUMS.txt')
