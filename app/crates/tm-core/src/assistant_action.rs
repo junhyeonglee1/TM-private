@@ -239,9 +239,9 @@ impl TmCore {
         ttl_seconds: u64,
     ) -> Result<AssistantActionRequest> {
         validate_request_id(origin_request_id)?;
-        if ttl_seconds == 0 || ttl_seconds > MAX_ACTION_TTL_SECONDS {
+        if ttl_seconds > MAX_ACTION_TTL_SECONDS {
             return Err(invalid(format!(
-                "assistant action TTL must be 1-{MAX_ACTION_TTL_SECONDS} seconds"
+                "assistant action TTL cannot exceed {MAX_ACTION_TTL_SECONDS} seconds"
             )));
         }
         let payload_json = serde_json::to_string(&payload)?;
