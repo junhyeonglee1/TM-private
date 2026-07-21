@@ -377,7 +377,6 @@ impl TmCore {
             request_id,
             reason,
             AssistantActionStatus::Rejected,
-            "rejected",
         )
     }
 
@@ -396,7 +395,6 @@ impl TmCore {
             request_id,
             reason,
             AssistantActionStatus::Cancelled,
-            "cancelled",
         )
     }
 
@@ -408,7 +406,6 @@ impl TmCore {
         request_id: &str,
         reason: Option<&str>,
         target: AssistantActionStatus,
-        event_type: &str,
     ) -> Result<AssistantActionRequest> {
         validate_action_preconditions(action_id, expected_revision, payload_sha256, request_id)?;
         let reason = normalize_reason(reason)?;
@@ -429,7 +426,7 @@ impl TmCore {
                     transaction,
                     &current,
                     target,
-                    event_type,
+                    target.as_str(),
                     "single_user",
                     request_id,
                     None,
