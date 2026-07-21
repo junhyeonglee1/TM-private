@@ -394,6 +394,11 @@ fn mutation_response(
             serde_json::to_value(ChecklistItemDto::from(item))
                 .map_err(|_| internal_response_error(&request_id))?
         }
+        MutationOperation::MemoryCreate
+        | MutationOperation::MemoryUpdate
+        | MutationOperation::MemoryDelete => {
+            return Err(internal_response_error(&request_id));
+        }
     };
     let etag = HeaderValue::from_str(&format!("\"{}\"", result.version))
         .map_err(|_| internal_response_error(&request_id))?;
