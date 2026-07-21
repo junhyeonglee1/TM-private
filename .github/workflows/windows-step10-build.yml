@@ -2,6 +2,9 @@ name: STEP 10 Windows build
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - agent/step10-cloud-cutover
 
 permissions:
   contents: read
@@ -67,7 +70,6 @@ jobs:
           pnpm test
 
       - name: Verify Rust workspace
-        if: github.event_name == 'workflow_dispatch'
         shell: pwsh
         run: |
           cargo fmt --all -- --check
