@@ -601,7 +601,7 @@ Codex TODO:
 
 ## STEP 14 — 스케줄러·작업 큐·정기 실행 기반
 
-상태: 진행 중 — schema 8 durable scheduler 구현과 전체 로컬 회귀 검증 완료, Railway production 배포·재시작 검증 대기
+상태: 완료 — schema 8 durable scheduler·재시도·모니터링·복원 보호를 구현하고 Railway production 무과금 실행·재시작·암호화 백업 검증을 통과
 
 Codex 권장 기본안:
 
@@ -624,11 +624,17 @@ Codex TODO:
 - [x] UTC/KST·DST 경계와 missed-run 정책 테스트
 - [x] 로컬 재시작·중복·lease 만료·복원 상황의 exactly-once effect 검증
 - [x] queue depth·실패율·지연 모니터링 연결
-- [ ] 무과금 내부 정기 작업을 production에서 검증
+- [x] 무과금 내부 정기 작업을 production에서 검증
 
 완료 게이트:
 
-- 서버 재시작과 중복 실행 상황에서도 정기 작업의 효과가 한 번만 안전하게 반영된다.
+- [x] 로컬 통합 테스트에서 중복 cycle·프로세스 재시작·lease 만료·5회 재시도·dead-letter·3일 missed-run coalescing·오래된 backup 복원 뒤 effect exactly-once를 확인했다.
+- [x] GitHub Actions Windows run `29848846995`와 schema 8 backup 호환 수정 run `29851166622`에서 frontend·workspace test·clippy·Windows release artifact 빌드를 통과했다.
+- [x] Railway production 배포 `d0280abe-6195-4110-9411-ddc61f62f8e4`에서 schema 8, scheduler healthy, enabled job 2개, queue·retry·dead-letter 0건, schema 8 암호화 remote backup과 SQLite integrity `ok`를 확인했다.
+- [x] 같은 image 재시작 배포 `13e0b1a0-8043-476a-ab84-3ff3074e16e3` 뒤 effect count가 `7 → 7`, 마지막 성공 시각이 동일하게 유지되어 이미 처리한 occurrence가 재실행되지 않음을 확인했다.
+- [x] production 검증은 OpenAI 호출과 Task·Note·Memory 등 business-data mutation 없이 완료했다.
+
+구현 계약과 운영 검증 절차: [STEP 14 durable scheduler 운영 절차](step14-durable-scheduler.md)
 
 ## STEP 15 — 모바일·원격 클라이언트와 기기 인증
 

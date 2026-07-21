@@ -40,3 +40,11 @@ Run the following from `app` after deployment:
 ```
 
 The script reads the bearer token from Windows Credential Locker and waits for schema 8, two enabled jobs, one successful canary effect, zero dead letters, and a verified schema 8 encrypted remote backup. It performs no OpenAI request and no business-data mutation.
+
+## Production evidence
+
+- GitHub Actions Windows runs `29848846995` and `29851166622` succeeded.
+- Final source deployment `d0280abe-6195-4110-9411-ddc61f62f8e4` is healthy on schema 8.
+- The production scheduler reported two enabled jobs, queue/retry/dead-letter counts of zero, and a succeeded schema 8 encrypted backup with SQLite integrity `ok`.
+- Same-image restart deployment `13e0b1a0-8043-476a-ab84-3ff3074e16e3` preserved effect count `7 → 7` and the same last-success timestamp across two post-restart reads.
+- Verification performed no OpenAI call and no production business-data mutation.
