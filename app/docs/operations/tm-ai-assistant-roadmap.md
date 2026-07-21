@@ -595,7 +595,7 @@ Codex TODO:
 - [x] 명시적 기억의 승인 전 무변경, 승인 후 1회 실행, revision 충돌, append-only 출처·수정·삭제 이벤트를 확인했다.
 - [x] private·restricted와 비밀값의 OpenAI 전달을 차단하고 삭제된 원본의 파생 기억 정리와 일·주·월 retention을 확인했다.
 - [x] GitHub Actions Windows CI #13에서 fail-fast workspace test·clippy와 `tm.exe`·`tm-cli.exe` release artifact 생성을 통과했다.
-- [x] Railway production 배포 `4b850b1b-fa4a-4e68-8c9f-8b578af5c098`에서 schema 7, `step13-v1`, SQLite FTS5, 자동 저장 비활성화, 승인 필수, 컨텍스트 상한을 확인했다. 검증은 OpenAI 호출과 production 기억 mutation 없이 완료했다.
+- [x] 최종 Railway production 배포 `90f1de9e-6aed-4180-8cc3-753c73f5bce5`에서 schema 7, `step13-v1`, SQLite FTS5, 자동 저장 비활성화, 승인 필수, 컨텍스트 상한과 schema 7 암호화 remote backup을 확인했다. 검증은 OpenAI 호출과 production 기억 mutation 없이 완료했다.
 
 구현 계약과 운영 검증 절차: [STEP 13 장기 기억·검색·컨텍스트 예산](../architecture/assistant-memory-context.md), [STEP 13 기억·검색 운영 절차](step13-memory-context.md)
 

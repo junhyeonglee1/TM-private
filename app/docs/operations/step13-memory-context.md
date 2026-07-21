@@ -25,6 +25,7 @@ Set-Location 'C:\Users\tkfk0\Desktop\codex\TM\app'
 스크립트는 다음 항목만 확인한다.
 
 - 인증 상태와 DB schema 7 readiness
+- 최신 암호화 remote backup의 schema 7·무결성 검사 성공 상태
 - prompt `step13-v1`, 자동 read tool 8개
 - 명시적 기억만 저장, 모든 변경 승인 필수
 - OpenAI 전달 범위 `normal_and_explicitly_allowed_only`
@@ -45,7 +46,7 @@ Set-Location 'C:\Users\tkfk0\Desktop\codex\TM\app'
 
 ## Production 검증 기록
 
-- 2026-07-22 Railway production deployment `4b850b1b-fa4a-4e68-8c9f-8b578af5c098`가 `SUCCESS`로 완료됐다.
+- 2026-07-22 최종 Railway production deployment `90f1de9e-6aed-4180-8cc3-753c73f5bce5`가 `SUCCESS`로 완료됐다.
 - GitHub Actions Windows CI #13은 각 Rust 검증 명령의 fail-fast를 적용한 상태에서 workspace test·clippy, `tm.exe`·`tm-cli.exe` release artifact 생성을 통과했다.
 - Docker build에서 workspace 전체 test와 clippy, release `tm-server` build가 통과했다.
 - `/readyz`와 인증된 운영 상태에서 schema 7, prompt `step13-v1`, 자동 read tool 8개를 확인했다.
@@ -53,3 +54,4 @@ Set-Location 'C:\Users\tkfk0\Desktop\codex\TM\app'
 - SQLite FTS5와 구조화 filter, vector service 미사용, 컨텍스트 상한 12개·6,144 bytes를 확인했다.
 - memory 목록과 1개·256 bytes 불일치 검색만 실행했다. OpenAI 호출과 production memory mutation은 0회였다.
 - production은 singleton 1개, `/var/lib/tm` Volume `READY`, restart policy `Always`, multi-region 비활성 상태를 유지했다.
+- backup script의 schema 상한을 7로 갱신하고, DB schema가 마지막 당일 snapshot과 다르면 즉시 다시 백업하도록 했다. Docker build에서 모든 운영 shell script의 `sh -n` 검사도 통과했다.

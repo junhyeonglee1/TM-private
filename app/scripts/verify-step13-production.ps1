@@ -85,6 +85,11 @@ try {
     if ([bool]$opsJson.data.database.ok -ne $true -or [int]$opsJson.data.database.schemaVersion -ne 7) {
         throw 'Production database is not healthy on schema 7.'
     }
+    if ([string]$opsJson.data.remoteBackup.status -ne 'succeeded' -or
+        [int]$opsJson.data.remoteBackup.schemaVersion -ne 7 -or
+        [string]$opsJson.data.remoteBackup.integrityCheck -ne 'ok') {
+        throw 'The latest remote backup is not a verified schema 7 snapshot.'
+    }
 
     $stage = 'ai-status'
     $ai = Invoke-TmRequest -Client $client -Method 'GET' -Uri "$base/api/v1/ai/status" -Token $token
@@ -127,6 +132,9 @@ try {
         verifiedAtUtc = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
         baseUri = $base
         schemaVersion = [int]$opsJson.data.database.schemaVersion
+        remoteBackupStatus = [string]$opsJson.data.remoteBackup.status
+        remoteBackupSchemaVersion = [int]$opsJson.data.remoteBackup.schemaVersion
+        remoteBackupIntegrityCheck = [string]$opsJson.data.remoteBackup.integrityCheck
         promptVersion = [string]$aiJson.data.assistantPromptVersion
         automaticReadToolCount = [int]$aiJson.data.assistantAutomaticReadToolCount
         memoryEnabled = [bool]$aiJson.data.assistantMemoryEnabled
@@ -152,6 +160,7 @@ try {
     Write-Host ''
     Write-Host 'STEP 13 production non-billable, read-only verification passed.' -ForegroundColor Green
     Write-Host "Schema: $($result.schemaVersion)"
+    Write-Host "Remote backup: $($result.remoteBackupStatus), schema $($result.remoteBackupSchemaVersion)"
     Write-Host "Prompt: $($result.promptVersion)"
     Write-Host "Memory context ceiling: $($result.contextMaxItems) items / $($result.contextMaxBytes) bytes"
     Write-Host 'No OpenAI call or production memory mutation was performed.'
