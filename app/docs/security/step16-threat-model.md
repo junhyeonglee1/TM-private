@@ -57,5 +57,6 @@ flowchart LR
 - 모든 GitHub Action은 40자리 commit SHA로 고정된다.
 - secret·dependency·filesystem·container scan이 high/critical finding에서 CI를 실패시킨다.
 - RustSec vulnerability는 실패시키며, 실행 취약점이 아닌 upstream `unmaintained` 경고는 CI 로그에 남겨 별도로 검토한다. 현재 GTK3 경고는 Linux Tauri transitive dependency이고 production server runtime 및 Windows artifact 실행 경로에는 포함되지 않는다.
+- Trivy `AVD-DS-0002`는 Railway Volume의 최초 ownership 설정 때문에 2026-10-20까지만 예외로 둔다. entrypoint는 root로 directory를 준비한 직후 server와 backup loop를 모두 uid 10001 `tm`으로 실행하며, static scan이 이 전환과 예외 단일성·만료일을 강제한다.
 - production rollback과 Bucket restore drill이 활성 DB를 변경하지 않고 통과한다.
 - key/token 회전과 domain 차단 순서가 운영 runbook으로 고정된다.

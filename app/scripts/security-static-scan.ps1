@@ -97,6 +97,26 @@ if ($dockerfile -notmatch 'ENTRYPOINT \["/usr/local/bin/railway-entrypoint"\]') 
     $violations.Add('Docker runtime entrypoint is not the reviewed Railway wrapper.')
 }
 
+$entrypoint = [System.IO.File]::ReadAllText((Join-Path $appRoot 'scripts\railway-entrypoint.sh'), [System.Text.Encoding]::UTF8)
+if ($entrypoint -notmatch 'exec\s+gosu\s+tm:tm\s+/usr/local/bin/tm-server' -or
+    $entrypoint -notmatch 'gosu\s+tm:tm\s+/usr/local/bin/railway-backup-loop') {
+    $violations.Add('The Railway entrypoint does not drop server and backup processes to the tm user.')
+}
+
+$trivyIgnorePath = Join-Path $appRoot '.trivyignore.yaml'
+if (-not (Test-Path -LiteralPath $trivyIgnorePath -PathType Leaf)) {
+    $violations.Add('The reviewed Trivy exception file is missing.')
+}
+else {
+    $trivyIgnore = [System.IO.File]::ReadAllText($trivyIgnorePath, [System.Text.Encoding]::UTF8)
+    $ignoreIds = [System.Text.RegularExpressions.Regex]::Matches($trivyIgnore, '(?m)^\s*-\s+id:\s*(\S+)\s*$')
+    if ($ignoreIds.Count -ne 1 -or $ignoreIds[0].Groups[1].Value -ne 'AVD-DS-0002' -or
+        $trivyIgnore -notmatch '(?m)^\s+expired_at:\s*2026-10-20\s*$' -or
+        $trivyIgnore -notmatch '(?i)Railway entrypoint.+Volume.+gosu') {
+        $violations.Add('The Trivy exception must contain only the time-bounded reviewed Railway Volume entrypoint exception.')
+    }
+}
+
 if ($violations.Count -gt 0) {
     $violations | ForEach-Object { Write-Error $_ }
     throw "STEP 16 static security scan failed with $($violations.Count) finding(s)."

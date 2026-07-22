@@ -9,6 +9,7 @@
 - [ ] STEP 16 static secret/workflow policy scan 통과
 - [ ] RustSec vulnerability 0; upstream unmaintained warning 검토 완료
 - [ ] Trivy filesystem high/critical finding 0
+- [ ] `AVD-DS-0002` 단일 예외의 gosu 전환과 2026-10-20 만료일 검토
 - [ ] production image build와 Trivy image finding 0
 - [ ] Action reference가 모두 40자리 commit SHA
 - [ ] DB·backup·token·API key·SSH key가 source/artifact에 없음

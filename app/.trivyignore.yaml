@@ -1,0 +1,4 @@
+misconfigurations:
+  - id: AVD-DS-0002
+    expired_at: 2026-10-20
+    statement: The Railway entrypoint starts as root only to prepare the mounted Volume, then immediately executes both tm-server and the backup loop as uid 10001 through gosu.
