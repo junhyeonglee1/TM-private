@@ -1,7 +1,7 @@
 "use strict";
 
 const pairingKey = "tm.mobile.pairing.v1";
-const state = { device: null, activeTab: "assistant" };
+const state = { device: null, activeTab: "assistant", taskReport: null, taskReportTasks: new Map() };
 
 const byId = (id) => document.getElementById(id);
 const show = (id, visible = true) => byId(id).classList.toggle("hidden", !visible);
@@ -108,6 +108,7 @@ function showApp(device) {
   show("pairing-view", false);
   show("app-view", true);
   renderDevice(device);
+  void loadTaskReport();
 }
 
 async function boot() {
@@ -219,6 +220,113 @@ byId("assistant-form").addEventListener("submit", async (event) => {
     setBusy(button, false, "AI 비서에게 전송");
   }
 });
+
+byId("task-report-generate").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  setBusy(button, true, "AI 리포트 만들기");
+  try {
+    const report = await api("/api/v1/assistant/task-report", {
+      method: "POST",
+      headers: { "x-tm-confirm-ai-call": "task-report" }
+    });
+    state.taskReport = report;
+    await loadTaskReportTasks();
+    renderTaskReport(report);
+    toast("오늘의 Task AI 리포트를 만들었습니다.");
+  } catch (error) {
+    renderTaskReportError(`${error.message} 자동으로 다시 시도하지 않았습니다.`);
+  } finally {
+    setBusy(button, false, "AI 리포트 만들기");
+  }
+});
+
+async function loadTaskReport() {
+  try {
+    state.taskReport = await api("/api/v1/assistant/task-reports/latest");
+    await loadTaskReportTasks();
+    renderTaskReport(state.taskReport);
+  } catch (error) {
+    if (error.code !== "TASK_REPORT_DISABLED") renderTaskReportError(error.message);
+  }
+}
+
+async function loadTaskReportTasks() {
+  const data = await api("/api/v1/tasks?limit=100&offset=0&sort=updated_desc");
+  state.taskReportTasks = new Map(data.items.map((task) => [task.id, task]));
+}
+
+function renderTaskReport(report) {
+  const root = byId("task-report-result");
+  clear(root);
+  if (!report) {
+    root.append(text("p", "아직 생성한 리포트가 없습니다.", "empty"));
+    return;
+  }
+  const summary = text("div", "", "task-report-summary");
+  summary.append(text("h3", report.report.headline), text("p", report.report.summary));
+  root.append(summary);
+  if (report.report.priorities.length) {
+    const list = text("ol", "", "task-report-priorities");
+    report.report.priorities.forEach((priority) => {
+      const item = text("li", "");
+      item.append(text("span", String(priority.rank), "task-report-rank"));
+      const body = text("div", "");
+      const task = state.taskReportTasks.get(priority.taskId);
+      body.append(text("h3", task?.title || "현재 목록에서 찾을 수 없는 Task"));
+      body.append(text("p", priority.reason));
+      body.append(text("strong", `다음 행동 · ${priority.nextAction}`));
+      if (priority.alert) body.append(text("small", priority.alert));
+      item.append(body);
+      list.append(item);
+    });
+    root.append(list);
+  }
+  if (report.report.alerts.length) {
+    const alerts = text("ul", "", "task-report-alerts");
+    report.report.alerts.forEach((alert) => alerts.append(text("li", alert)));
+    root.append(alerts);
+  }
+  const meta = text("p", "", "task-report-meta");
+  const tokenText = report.usage ? `${Number(report.usage.totalTokens).toLocaleString("ko-KR")} tokens` : "AI 호출 없음";
+  const cost = (Number(report.estimatedCostMicrousd) / 1_000_000).toFixed(4);
+  meta.textContent = `후보 ${report.candidateCount}개 · ${tokenText} · $${cost}${report.latencyMs === null ? "" : ` · ${(report.latencyMs / 1000).toFixed(1)}초`}`;
+  root.append(meta);
+  const feedback = text("div", "", "task-report-feedback");
+  if (report.helpful === null) {
+    const helpful = text("button", "도움 됨", "secondary");
+    helpful.type = "button";
+    helpful.addEventListener("click", () => void rateTaskReport(true, helpful));
+    const unhelpful = text("button", "도움 안 됨", "secondary");
+    unhelpful.type = "button";
+    unhelpful.addEventListener("click", () => void rateTaskReport(false, unhelpful));
+    feedback.append(helpful, unhelpful);
+  } else {
+    feedback.append(text("strong", report.helpful ? "도움 됨으로 평가함" : "도움 안 됨으로 평가함"));
+  }
+  root.append(feedback);
+}
+
+async function rateTaskReport(helpful, button) {
+  if (!state.taskReport) return;
+  setBusy(button, true, helpful ? "도움 됨" : "도움 안 됨");
+  try {
+    state.taskReport = await api(`/api/v1/assistant/task-reports/${encodeURIComponent(state.taskReport.runId)}/feedback`, {
+      method: "POST",
+      body: { helpful }
+    });
+    renderTaskReport(state.taskReport);
+    toast("리포트 평가를 기록했습니다.");
+  } catch (error) {
+    toast(error.message);
+    setBusy(button, false, helpful ? "도움 됨" : "도움 안 됨");
+  }
+}
+
+function renderTaskReportError(message) {
+  const root = byId("task-report-result");
+  clear(root);
+  root.append(text("p", `리포트를 불러오지 못했습니다: ${message}`, "empty"));
+}
 
 function appendAssistant(message, role) {
   const log = byId("assistant-log");

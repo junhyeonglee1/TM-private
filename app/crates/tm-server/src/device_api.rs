@@ -104,6 +104,15 @@ pub(super) fn device_route_allowed(method: &Method, path: &str) -> bool {
     if path == "/api/v1/assistant/query" {
         return method == Method::POST;
     }
+    if path == "/api/v1/assistant/task-report" {
+        return method == Method::POST;
+    }
+    if path == "/api/v1/assistant/task-reports/latest" {
+        return method == Method::GET;
+    }
+    if path.starts_with("/api/v1/assistant/task-reports/") && path.ends_with("/feedback") {
+        return method == Method::POST;
+    }
     if path == "/api/v1/assistant/actions" {
         return method == Method::GET;
     }

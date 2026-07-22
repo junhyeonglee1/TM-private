@@ -6,6 +6,10 @@
 
 ### Added
 
+- STEP 17 첫 실제 비서 기능으로 오늘의 Task 우선순위·이유·다음 행동을 제안하는 read-only Structured Outputs API와 Windows·모바일 UI를 추가했다.
+- Task 최소 fact 최대 20개, 허위 반환 ID 재검증, 하루 4회, 요청당 USD 0.05·800 output token, 자동 재시도 없음과 `TM_TASK_REPORT_ENABLED` 기능 kill switch를 추가했다.
+- schema 10에 Task 리포트 실행 token·비용·latency·실패 기록과 보고서당 1회 append-only `도움 됨/도움 안 됨` 평가를 추가하고 backup restore rewind를 차단했다.
+
 - Railway `cloud-authenticated` profile에 `gpt-5.6-terra` Responses API 기반 read-only AI 오케스트레이터와 인증·명시적 과금 확인 route를 추가했다.
 - Project·Task·Checklist·Note·Session·Worklog만 최소 필드로 조회하는 strict tool allowlist, prompt injection 격리, 6회 tool·60초·2,000 output token·USD 0.25 요청 상한을 추가했다.
 - Windows Credential Locker의 운영 token으로 AI 상태·안전 상한·과금 확인·missing-key 차단을 검증하는 STEP 11 비과금 production 검증 스크립트를 추가했다.

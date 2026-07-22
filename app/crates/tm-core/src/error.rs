@@ -36,6 +36,9 @@ pub enum Error {
         hard_limit_microusd: u64,
     },
 
+    #[error("AI daily limit reached for {operation}: limit={limit}")]
+    AiDailyLimitExceeded { operation: String, limit: u32 },
+
     #[error("data invariant violated: {0}")]
     Invariant(String),
 

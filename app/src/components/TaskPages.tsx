@@ -8,6 +8,7 @@ import type {
   Task,
   TodaySnapshot,
 } from "../types";
+import type { TaskReportResult } from "../lib/api";
 import { EmptyState } from "./EmptyState";
 import { Icon } from "./Icon";
 import { TaskCard } from "./TaskCard";
@@ -38,8 +39,13 @@ export function InboxPage() {
 interface TodayPageProps {
   today: string;
   view: TodaySnapshot;
+  tasks: Task[];
+  report: TaskReportResult | null;
+  reportLoading: boolean;
   onOpen: (task: Task) => void;
   onResolve: (entryId: string, status: Exclude<DayEntryStatus, "planned">) => void;
+  onGenerateReport: () => Promise<void>;
+  onRateReport: (helpful: boolean) => Promise<void>;
 }
 
 const friendlyDate = (date: string): string =>
@@ -50,7 +56,17 @@ const friendlyDate = (date: string): string =>
     timeZone: "Asia/Seoul",
   }).format(new Date(`${date}T12:00:00+09:00`));
 
-export function TodayPage({ today, view, onOpen, onResolve }: TodayPageProps) {
+export function TodayPage({
+  today,
+  view,
+  tasks,
+  report,
+  reportLoading,
+  onOpen,
+  onResolve,
+  onGenerateReport,
+  onRateReport,
+}: TodayPageProps) {
   const total = view.planned.length + view.inProgress.length + view.completed.length;
   const progress = total ? Math.round((view.completed.length / total) * 100) : 0;
   return (
@@ -68,6 +84,81 @@ export function TodayPage({ today, view, onOpen, onResolve }: TodayPageProps) {
           <div><strong>{view.completed.length}</strong><span> / {total} 완료</span></div>
         </div>
       </header>
+
+      <section className="panel task-report" aria-labelledby="task-report-heading" aria-busy={reportLoading}>
+        <div className="panel__header task-report__header">
+          <div>
+            <span className="section-kicker section-kicker--accent"><Icon name="spark" size={14} /> AI 비서 · 읽기 전용</span>
+            <h2 id="task-report-heading">오늘의 Task 우선순위</h2>
+            <p>제목·상태·우선순위·마감일만 선별해 최대 3개의 다음 행동을 제안합니다.</p>
+          </div>
+          <button
+            className="primary-button"
+            disabled={reportLoading}
+            onClick={() => { void onGenerateReport(); }}
+            type="button"
+          >
+            {reportLoading ? "분석 중…" : report?.reportDate === today ? "다시 분석" : "AI 리포트 만들기"}
+          </button>
+        </div>
+
+        {!report && !reportLoading && (
+          <div className="task-report__empty">
+            <strong>아직 생성한 리포트가 없습니다.</strong>
+            <span>수동 호출만 사용하며 하루 최대 4회, 1회 비용 상한은 $0.05입니다.</span>
+          </div>
+        )}
+
+        {report && (
+          <div className="task-report__body">
+            {report.reportDate !== today && <span className="task-report__stale">이전 리포트 · {report.reportDate}</span>}
+            <div className="task-report__summary">
+              <h3>{report.report.headline}</h3>
+              <p>{report.report.summary}</p>
+            </div>
+            {report.report.priorities.length > 0 && (
+              <ol className="task-report__priorities">
+                {report.report.priorities.map((priority) => {
+                  const task = tasks.find((item) => item.id === priority.taskId);
+                  return (
+                    <li key={priority.taskId}>
+                      <span className="task-report__rank">{priority.rank}</span>
+                      <div>
+                        <button disabled={!task} onClick={() => task && onOpen(task)} type="button">
+                          {task?.title ?? "현재 목록에서 찾을 수 없는 Task"}
+                        </button>
+                        <p>{priority.reason}</p>
+                        <strong>다음 행동 · {priority.nextAction}</strong>
+                        {priority.alert && <small>{priority.alert}</small>}
+                      </div>
+                    </li>
+                  );
+                })}
+              </ol>
+            )}
+            {report.report.alerts.length > 0 && (
+              <ul className="task-report__alerts">
+                {report.report.alerts.map((alert) => <li key={alert}>{alert}</li>)}
+              </ul>
+            )}
+            <footer className="task-report__footer">
+              <span>
+                후보 {report.candidateCount}개 · {report.usage ? `${report.usage.totalTokens.toLocaleString("ko-KR")} tokens` : "AI 호출 없음"}
+                {` · $${(report.estimatedCostMicrousd / 1_000_000).toFixed(4)}`}
+                {report.latencyMs !== null ? ` · ${(report.latencyMs / 1000).toFixed(1)}초` : ""}
+              </span>
+              <div aria-label="리포트 품질 평가">
+                {report.helpful === null ? (
+                  <>
+                    <button onClick={() => { void onRateReport(true); }} type="button">도움 됨</button>
+                    <button onClick={() => { void onRateReport(false); }} type="button">도움 안 됨</button>
+                  </>
+                ) : <strong>{report.helpful ? "도움 됨으로 평가함" : "도움 안 됨으로 평가함"}</strong>}
+              </div>
+            </footer>
+          </div>
+        )}
+      </section>
 
       {view.yesterdayIncomplete.length > 0 && (
         <section className="panel panel--attention" aria-labelledby="yesterday-heading">

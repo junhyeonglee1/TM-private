@@ -224,6 +224,7 @@ impl CloudClient {
             .ok_or_else(|| "TM cloud HTTPS base URL is not configured".to_owned())?;
         endpoint.set_path(&path);
         let mut request = self.http.request(method, endpoint).bearer_auth(&token);
+        request = request.timeout(Duration::from_secs(55));
         if let Some(value) = confirmation {
             request = request.header("x-tm-confirm-device-admin", value);
         }
@@ -241,6 +242,83 @@ impl CloudClient {
         {
             return Err("TM cloud response exceeded the safety limit".to_owned());
         }
+        let request_id = response
+            .headers()
+            .get("x-request-id")
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned);
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|_| "TM cloud response could not be read".to_owned())?;
+        if bytes.len() > MAX_RESPONSE_BYTES {
+            return Err("TM cloud response exceeded the safety limit".to_owned());
+        }
+        let payload: Value = serde_json::from_slice(&bytes)
+            .map_err(|_| "TM cloud response was not valid JSON".to_owned())?;
+        if !status.is_success() {
+            return Err(response_error(status, &payload, request_id.as_deref()));
+        }
+        payload
+            .get("data")
+            .cloned()
+            .ok_or_else(|| "TM cloud response did not contain data".to_owned())
+    }
+
+    pub(crate) async fn assistant_feature(&self, command: &str, args: Value) -> CloudResult<Value> {
+        if self.mode != DataMode::Cloud {
+            return Err("TM AI assistant features require cloud mode".to_owned());
+        }
+        let (method, path, confirmation, body) = match command {
+            "generate_task_report" => (
+                Method::POST,
+                "/api/v1/assistant/task-report".to_owned(),
+                Some("task-report"),
+                None,
+            ),
+            "latest_task_report" => (
+                Method::GET,
+                "/api/v1/assistant/task-reports/latest".to_owned(),
+                None,
+                None,
+            ),
+            "rate_task_report" => {
+                let report_id = required_resource_id(&args, "reportId")?;
+                let helpful = args
+                    .get("helpful")
+                    .and_then(Value::as_bool)
+                    .ok_or_else(|| "TM Task report feedback must be a boolean".to_owned())?;
+                (
+                    Method::POST,
+                    format!("/api/v1/assistant/task-reports/{report_id}/feedback"),
+                    None,
+                    Some(serde_json::json!({ "helpful": helpful })),
+                )
+            }
+            _ => return Err("TM AI assistant feature command is not allowed".to_owned()),
+        };
+        let token = load_token_from_os_store()?;
+        if !valid_token(&token) {
+            return Err("TM cloud credential has an invalid format".to_owned());
+        }
+        let mut endpoint = self
+            .base_url
+            .clone()
+            .ok_or_else(|| "TM cloud HTTPS base URL is not configured".to_owned())?;
+        endpoint.set_path(&path);
+        let mut request = self.http.request(method, endpoint).bearer_auth(&token);
+        request = request.timeout(Duration::from_secs(55));
+        if let Some(value) = confirmation {
+            request = request.header("x-tm-confirm-ai-call", value);
+        }
+        if let Some(value) = body {
+            request = request.json(&value);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|_| "TM cloud server could not be reached over HTTPS".to_owned())?;
+        let status = response.status();
         let request_id = response
             .headers()
             .get("x-request-id")
@@ -383,7 +461,15 @@ fn response_error(status: StatusCode, payload: &Value, request_id: Option<&str>)
             format!("TM cloud authentication failed; run secure setup again{request_suffix}")
         }
         StatusCode::TOO_MANY_REQUESTS => {
-            format!("TM cloud request limit was reached; try again shortly{request_suffix}")
+            if payload.pointer("/error/code").and_then(Value::as_str)
+                == Some("TASK_REPORT_DAILY_LIMIT_REACHED")
+            {
+                format!(
+                    "오늘의 Task AI 리포트는 하루 최대 네 번까지 만들 수 있습니다{request_suffix}"
+                )
+            } else {
+                format!("TM cloud request limit was reached; try again shortly{request_suffix}")
+            }
         }
         StatusCode::PRECONDITION_REQUIRED => {
             format!("TM cloud command confirmation was rejected{request_suffix}")

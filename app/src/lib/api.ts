@@ -21,6 +21,44 @@ export interface CommandTransport {
   invoke<T>(command: string, args?: Record<string, unknown>): Promise<T>;
 }
 
+export interface TaskReportPriority {
+  taskId: string;
+  rank: number;
+  reason: string;
+  nextAction: string;
+  alert: string;
+}
+
+export interface TaskReportResult {
+  runId: string;
+  reportDate: string;
+  status: "succeeded" | "no_tasks";
+  report: {
+    headline: string;
+    summary: string;
+    priorities: TaskReportPriority[];
+    alerts: string[];
+  };
+  candidateCount: number;
+  model: string;
+  promptVersion: string;
+  usage: null | {
+    inputTokens: number;
+    cachedInputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+  };
+  estimatedCostMicrousd: number;
+  latencyMs: number | null;
+  helpful: boolean | null;
+  readOnly: true;
+  limits: {
+    dailyCalls: number;
+    maximumCostMicrousd: number;
+    maximumOutputTokens: number;
+  };
+}
+
 export interface TmApi {
   getSnapshot(): Promise<AppSnapshot>;
   createProject(name: string, description?: string): Promise<string>;
@@ -63,6 +101,9 @@ export interface TmApi {
   createBackup(): Promise<void>;
   restoreBackup(backupId: string): Promise<void>;
   exportAll(): Promise<ExportResult>;
+  generateTaskReport(): Promise<TaskReportResult>;
+  latestTaskReport(): Promise<TaskReportResult | null>;
+  rateTaskReport(reportId: string, helpful: boolean): Promise<TaskReportResult>;
 }
 
 class TauriTransport implements CommandTransport {
@@ -70,6 +111,12 @@ class TauriTransport implements CommandTransport {
 
   async invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
     if ((await this.mode) === "cloud") {
+      if (["generate_task_report", "latest_task_report", "rate_task_report"].includes(command)) {
+        return tauriInvoke<T>("invoke_cloud_assistant_feature", {
+          command,
+          args: args ?? {},
+        });
+      }
       return tauriInvoke<T>("invoke_cloud_command", { command, args: args ?? {} });
     }
     return tauriInvoke<T>(command, args);
@@ -134,6 +181,10 @@ export const createApi = (transport: CommandTransport): TmApi => ({
   createBackup: () => run(transport, "create_backup"),
   restoreBackup: (backupId) => run(transport, "restore_backup", { backupId }),
   exportAll: () => transport.invoke<ExportResult>("export_all"),
+  generateTaskReport: () => transport.invoke<TaskReportResult>("generate_task_report"),
+  latestTaskReport: () => transport.invoke<TaskReportResult | null>("latest_task_report"),
+  rateTaskReport: (reportId, helpful) =>
+    transport.invoke<TaskReportResult>("rate_task_report", { reportId, helpful }),
 });
 
 declare global {

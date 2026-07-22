@@ -8,7 +8,7 @@ import { SessionPage } from "./components/SessionPage";
 import { DeviceManagementPage } from "./components/DeviceManagementPage";
 import { TaskDetail } from "./components/TaskDetail";
 import { HistoryPage, InboxPage, ProjectsPage, TodayPage } from "./components/TaskPages";
-import { createDefaultApi, type TmApi } from "./lib/api";
+import { createDefaultApi, type TaskReportResult, type TmApi } from "./lib/api";
 import type {
   AppSnapshot,
   CreateChangeRequestInput,
@@ -66,6 +66,8 @@ export function App({ api = defaultApi }: AppProps) {
   const [fatalError, setFatalError] = useState<string | null>(null);
   const [toast, setToast] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [taskReport, setTaskReport] = useState<TaskReportResult | null>(null);
+  const [taskReportLoading, setTaskReportLoading] = useState(false);
 
   const loadSnapshot = useCallback(async () => {
     try {
@@ -82,6 +84,14 @@ export function App({ api = defaultApi }: AppProps) {
   useEffect(() => {
     void loadSnapshot();
   }, [loadSnapshot]);
+
+  useEffect(() => {
+    let active = true;
+    void api.latestTaskReport().then((report) => {
+      if (active) setTaskReport(report);
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [api]);
 
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {
@@ -156,6 +166,28 @@ export function App({ api = defaultApi }: AppProps) {
   const resolveDayEntry = (entryId: string, status: Exclude<DayEntryStatus, "planned">) => {
     const messages = { done: "완료 기록을 확정했습니다.", deferred: "어제 기록을 이월하고 오늘 계획을 만들었습니다.", skipped: "건너뛰기 기록을 확정했습니다." };
     void mutate(() => api.resolveDayEntry(entryId, status), messages[status]).catch(() => undefined);
+  };
+  const generateTaskReport = async () => {
+    setTaskReportLoading(true);
+    try {
+      const report = await api.generateTaskReport();
+      setTaskReport(report);
+      notify("오늘의 Task AI 리포트를 만들었습니다.");
+    } catch (error) {
+      notify(errorMessage(error), "error");
+    } finally {
+      setTaskReportLoading(false);
+    }
+  };
+  const rateTaskReport = async (helpful: boolean) => {
+    if (!taskReport) return;
+    try {
+      const report = await api.rateTaskReport(taskReport.runId, helpful);
+      setTaskReport(report);
+      notify("리포트 평가를 기록했습니다.");
+    } catch (error) {
+      notify(errorMessage(error), "error");
+    }
   };
   const startSession = (input: StartSessionInput) => mutateVoid(() => api.startSession(input), "집중 세션을 시작했습니다.");
   const finishSession = (input: FinishSessionInput) => mutateVoid(() => api.finishSession(input), "세션과 WorkLog를 원자적으로 저장했습니다.");
@@ -291,7 +323,7 @@ export function App({ api = defaultApi }: AppProps) {
       case "inbox":
         return <InboxPage />;
       case "today":
-        return <TodayPage onOpen={(task) => setSelectedTaskId(task.id)} onResolve={resolveDayEntry} today={snapshot.today} view={snapshot.todayView} />;
+        return <TodayPage onGenerateReport={generateTaskReport} onOpen={(task) => setSelectedTaskId(task.id)} onRateReport={rateTaskReport} onResolve={resolveDayEntry} report={taskReport} reportLoading={taskReportLoading} tasks={snapshot.tasks} today={snapshot.today} view={snapshot.todayView} />;
       case "projects":
         return <ProjectsPage onCreateProject={createProject} onCreateTask={createTask} onOpen={(task) => setSelectedTaskId(task.id)} onPlan={(task) => void planTask(task)} projects={snapshot.projects} tasks={snapshot.tasks} />;
       case "history":

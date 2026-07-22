@@ -15,13 +15,13 @@ use crate::{
     EndSessionInput, EntityLink, EntityType, Error, ExportArtifact, HealthReport, LinkTargetType,
     MigrationDryRun, MigrationManifest, Note, NoteAggregate, NotePatch, NoteType, Project, Result,
     SearchHit, SessionCompletion, SessionStatus, StartSessionInput, Tag, Task, TaskAggregate,
-    TaskDayEntry, TaskDayStatus, TaskEvent, TaskPatch, TaskStatus, TmHome, TrashEntityType,
-    TrashItem, UpdateChangeRequestInput, UpdateTaskAggregateInput, WorkLog, WorkSession, ai_budget,
-    backup, change_request,
+    TaskDayEntry, TaskDayStatus, TaskEvent, TaskPatch, TaskReportCompletion, TaskReportRun,
+    TaskStatus, TmHome, TrashEntityType, TrashItem, UpdateChangeRequestInput,
+    UpdateTaskAggregateInput, WorkLog, WorkSession, ai_budget, backup, change_request,
     database::{Database, SCHEMA_VERSION, new_id, now_utc, today_seoul},
     digest,
     error::{invalid, not_found},
-    export, migration,
+    export, migration, task_report,
 };
 
 #[derive(Debug, Clone)]
@@ -1090,6 +1090,68 @@ impl TmCore {
 
     pub fn prepare_digest(&self, kind: DigestKind, date: NaiveDate) -> Result<DigestPreparation> {
         digest::prepare(&self.database, kind, date)
+    }
+
+    pub fn preview_digest(&self, kind: DigestKind, date: NaiveDate) -> Result<crate::DigestFacts> {
+        digest::preview(&self.database, kind, date)
+    }
+
+    pub fn begin_task_report(
+        &self,
+        id: &str,
+        date: NaiveDate,
+        actor: &str,
+        candidate_count: usize,
+        prompt_version: &str,
+        model: &str,
+        daily_limit: u32,
+    ) -> Result<TaskReportRun> {
+        task_report::begin(
+            &self.database,
+            id,
+            date,
+            actor,
+            candidate_count,
+            prompt_version,
+            model,
+            daily_limit,
+        )
+    }
+
+    pub fn record_empty_task_report(
+        &self,
+        id: &str,
+        date: NaiveDate,
+        actor: &str,
+        prompt_version: &str,
+        model: &str,
+        result: &Value,
+    ) -> Result<TaskReportRun> {
+        task_report::record_no_tasks(
+            &self.database,
+            id,
+            date,
+            actor,
+            prompt_version,
+            model,
+            result,
+        )
+    }
+
+    pub fn complete_task_report(
+        &self,
+        id: &str,
+        completion: &TaskReportCompletion,
+    ) -> Result<TaskReportRun> {
+        task_report::complete(&self.database, id, completion)
+    }
+
+    pub fn latest_task_report(&self) -> Result<Option<TaskReportRun>> {
+        task_report::latest(&self.database)
+    }
+
+    pub fn rate_task_report(&self, id: &str, helpful: bool, actor: &str) -> Result<TaskReportRun> {
+        task_report::feedback(&self.database, id, helpful, actor)
     }
 
     pub fn complete_digest(&self, delivery_key: &str, slack_ref: &str) -> Result<DigestDelivery> {

@@ -20,12 +20,13 @@ mod orchestrator;
 mod pwa;
 mod read_api;
 pub mod scheduler;
+mod task_report;
 mod write_api;
 
 use axum::{
     Extension, Json, Router,
     body::Body,
-    extract::{DefaultBodyLimit, Request, State, rejection::JsonRejection},
+    extract::{DefaultBodyLimit, Path as AxumPath, Request, State, rejection::JsonRejection},
     http::{
         HeaderMap, HeaderValue, Method, StatusCode,
         header::{AUTHORIZATION, HeaderName},
@@ -34,11 +35,11 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, FixedOffset, Utc};
 use serde::{Deserialize, Serialize};
 use tm_core::{
     ASSISTANT_ACTION_APPROVAL_TTL_SECONDS, AiBudgetStatus, AiTokenUsage, Error as CoreError,
-    HealthReport, SchedulerStatus, TmCore,
+    HealthReport, SchedulerStatus, TaskReportCompletion, TmCore,
 };
 use uuid::Uuid;
 
@@ -54,6 +55,10 @@ use crate::orchestrator::{
     ASSISTANT_MAXIMUM_COST_MICROUSD, ASSISTANT_PROMPT_VERSION, ASSISTANT_TIMEOUT_SECS,
     AssistantError, AssistantErrorKind, AssistantRequest, AssistantResult,
 };
+use crate::task_report::{
+    TASK_REPORT_CONFIRMATION, TASK_REPORT_DAILY_LIMIT, TASK_REPORT_MAXIMUM_COST_MICROUSD,
+    TASK_REPORT_PROMPT_VERSION, TASK_REPORT_TIMEOUT_SECS, TaskReportApiResult, TaskReportErrorKind,
+};
 
 pub const DEFAULT_BIND_ADDR: &str = "127.0.0.1:8787";
 pub const LOCAL_PROFILE: &str = "local";
@@ -62,6 +67,7 @@ pub const CLOUD_AUTHENTICATED_PROFILE: &str = "cloud-authenticated";
 pub const IMPORT_MAINTENANCE_MODE: &str = "import";
 pub const INCIDENT_MODE_ENV: &str = "TM_INCIDENT_MODE";
 pub const AI_ENABLED_ENV: &str = "TM_AI_ENABLED";
+pub const TASK_REPORT_ENABLED_ENV: &str = "TM_TASK_REPORT_ENABLED";
 const REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-request-id");
 const AI_CONFIRM_HEADER: HeaderName = HeaderName::from_static("x-tm-confirm-ai-call");
 const CACHE_CONTROL_HEADER: HeaderName = HeaderName::from_static("cache-control");
@@ -163,6 +169,7 @@ pub struct ServerConfig {
     pub maintenance_mode: MaintenanceMode,
     pub incident_mode: IncidentMode,
     pub ai_enabled: bool,
+    pub task_report_enabled: bool,
 }
 
 impl ServerConfig {
@@ -205,6 +212,19 @@ impl ServerConfig {
             Some(_) => {
                 return Err(format!(
                     "{AI_ENABLED_ENV} is only allowed in cloud-authenticated"
+                ));
+            }
+        };
+        let task_report_enabled = match optional_env(TASK_REPORT_ENABLED_ENV)? {
+            None => profile != ServerProfile::CloudAuthenticated,
+            Some(value) if profile == ServerProfile::CloudAuthenticated => match value.as_str() {
+                "true" => true,
+                "false" => false,
+                _ => return Err(format!("{TASK_REPORT_ENABLED_ENV} must be true or false")),
+            },
+            Some(_) => {
+                return Err(format!(
+                    "{TASK_REPORT_ENABLED_ENV} is only allowed in cloud-authenticated"
                 ));
             }
         };
@@ -272,6 +292,7 @@ impl ServerConfig {
             maintenance_mode,
             incident_mode,
             ai_enabled,
+            task_report_enabled,
         })
     }
 }
@@ -282,6 +303,7 @@ struct AppState {
     openai: OpenAiClient,
     incident_mode: IncidentMode,
     ai_enabled: bool,
+    task_report_enabled: bool,
     security: SecurityMonitor,
 }
 
@@ -292,6 +314,7 @@ impl AppState {
             openai,
             IncidentMode::Normal,
             true,
+            true,
             SecurityMonitor::new(),
         )
     }
@@ -301,6 +324,7 @@ impl AppState {
         openai: OpenAiClient,
         incident_mode: IncidentMode,
         ai_enabled: bool,
+        task_report_enabled: bool,
         security: SecurityMonitor,
     ) -> Self {
         Self {
@@ -308,6 +332,7 @@ impl AppState {
             openai,
             incident_mode,
             ai_enabled,
+            task_report_enabled,
             security,
         }
     }
@@ -384,6 +409,7 @@ impl SecurityMonitor {
 struct RuntimeControlState {
     incident_mode: IncidentMode,
     ai_enabled: bool,
+    task_report_enabled: bool,
     security: SecurityMonitor,
 }
 
@@ -480,6 +506,15 @@ struct AuthenticatedSession {
     token_expires_at: String,
 }
 
+impl AuthenticatedSession {
+    fn audit_actor(&self) -> String {
+        match &self.subject {
+            AuthenticatedSubject::PrimaryAdmin => "primary-admin".to_owned(),
+            AuthenticatedSubject::Device { id, .. } => format!("device:{id}"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 enum AuthenticatedSubject {
     PrimaryAdmin,
@@ -530,6 +565,10 @@ struct AiStatus {
     assistant_maximum_cost_microusd: u64,
     assistant_max_tool_calls: usize,
     assistant_timeout_seconds: u64,
+    task_report_enabled: bool,
+    task_report_prompt_version: &'static str,
+    task_report_daily_limit: u32,
+    task_report_maximum_cost_microusd: u64,
     budget: AiBudgetStatus,
 }
 
@@ -571,6 +610,7 @@ struct OperationsObjectives {
 struct OperationsControls {
     incident_mode: &'static str,
     ai_enabled: bool,
+    task_report_enabled: bool,
     primary_failed_attempt_limit_per_minute: u32,
     authenticated_request_limit_per_minute: u32,
     maximum_request_target_bytes: usize,
@@ -661,6 +701,7 @@ pub fn build_cloud_bootstrap_router(core: TmCore) -> Router {
             OpenAiClient::disabled(),
             IncidentMode::Normal,
             false,
+            false,
             SecurityMonitor::new(),
         ))
         .layer(middleware::from_fn(request_shape_guard))
@@ -688,6 +729,24 @@ pub fn build_cloud_authenticated_router_with_controls(
     incident_mode: IncidentMode,
     ai_enabled: bool,
 ) -> Router {
+    build_cloud_authenticated_router_with_feature_controls(
+        core,
+        auth,
+        openai,
+        incident_mode,
+        ai_enabled,
+        true,
+    )
+}
+
+pub fn build_cloud_authenticated_router_with_feature_controls(
+    core: TmCore,
+    auth: AuthConfig,
+    openai: OpenAiClient,
+    incident_mode: IncidentMode,
+    ai_enabled: bool,
+    task_report_enabled: bool,
+) -> Router {
     let security = SecurityMonitor::new();
     let authenticator = TokenAuthenticator::new(auth);
     let auth_state = CloudAuthState {
@@ -699,6 +758,7 @@ pub fn build_cloud_authenticated_router_with_controls(
     let runtime_state = RuntimeControlState {
         incident_mode,
         ai_enabled,
+        task_report_enabled,
         security: security.clone(),
     };
     Router::new()
@@ -713,6 +773,15 @@ pub fn build_cloud_authenticated_router_with_controls(
         .route(
             "/api/v1/assistant/query",
             post(assistant_query).layer(DefaultBodyLimit::max(ASSISTANT_MAX_BODY_BYTES)),
+        )
+        .route("/api/v1/assistant/task-report", post(generate_task_report))
+        .route(
+            "/api/v1/assistant/task-reports/latest",
+            get(latest_task_report),
+        )
+        .route(
+            "/api/v1/assistant/task-reports/{id}/feedback",
+            post(rate_task_report).layer(DefaultBodyLimit::max(1024)),
         )
         .route("/api/v1/assistant/actions", get(assistant_actions::list))
         .route("/api/v1/assistant/memories", get(memories::list))
@@ -774,6 +843,7 @@ pub fn build_cloud_authenticated_router_with_controls(
             openai,
             incident_mode,
             ai_enabled,
+            task_report_enabled,
             security,
         ))
         .layer(write_api::body_limit())
@@ -812,6 +882,7 @@ pub fn build_cloud_import_router(core: TmCore, auth: AuthConfig) -> Router {
             core,
             OpenAiClient::disabled(),
             IncidentMode::Normal,
+            false,
             false,
             security,
         ))
@@ -990,6 +1061,10 @@ async fn ai_status(
             assistant_maximum_cost_microusd: ASSISTANT_MAXIMUM_COST_MICROUSD,
             assistant_max_tool_calls: ASSISTANT_MAX_TOOL_CALLS,
             assistant_timeout_seconds: ASSISTANT_TIMEOUT_SECS,
+            task_report_enabled: state.task_report_enabled,
+            task_report_prompt_version: TASK_REPORT_PROMPT_VERSION,
+            task_report_daily_limit: TASK_REPORT_DAILY_LIMIT,
+            task_report_maximum_cost_microusd: TASK_REPORT_MAXIMUM_COST_MICROUSD,
             budget,
         },
     }))
@@ -1247,6 +1322,406 @@ async fn assistant_query(
     }))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskReportFeedbackRequest {
+    helpful: bool,
+}
+
+async fn generate_task_report(
+    State(state): State<AppState>,
+    Extension(request_id): Extension<RequestId>,
+    Extension(session): Extension<AuthenticatedSession>,
+    headers: HeaderMap,
+) -> Result<Json<ApiEnvelope<TaskReportApiResult>>, ApiError> {
+    require_task_report_enabled(&state, &request_id)?;
+    if headers
+        .get(&AI_CONFIRM_HEADER)
+        .and_then(|value| value.to_str().ok())
+        != Some(TASK_REPORT_CONFIRMATION)
+    {
+        return Err(ApiError {
+            status: StatusCode::PRECONDITION_REQUIRED,
+            code: "AI_CALL_CONFIRMATION_REQUIRED",
+            message: "set x-tm-confirm-ai-call to task-report for this billable request".to_owned(),
+            request_id: request_id.0,
+        });
+    }
+    if !state.openai.config().configured() {
+        return Err(openai_api_error(OpenAiError::NotConfigured, request_id.0));
+    }
+
+    let seoul = FixedOffset::east_opt(9 * 60 * 60).expect("Korea offset is valid");
+    let report_date = Utc::now().with_timezone(&seoul).date_naive();
+    let actor = session.audit_actor();
+    let facts_core = state.core.clone();
+    let facts = tokio::task::spawn_blocking(move || {
+        facts_core.preview_digest(tm_core::DigestKind::Morning, report_date)
+    })
+    .await
+    .map_err(|_| ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: "TASK_REPORT_WORKER_FAILED",
+        message: "the Task report worker was unavailable".to_owned(),
+        request_id: request_id.0.clone(),
+    })?
+    .map_err(|error| task_report_core_error(error, request_id.0.clone()))?;
+    let candidates = task_report::select_candidates(&facts);
+    let run_id = Uuid::now_v7().to_string();
+    let model = state.openai.config().model().to_owned();
+    let policy = state.openai.config().budget_policy();
+
+    if candidates.is_empty() {
+        let report = task_report::empty_report();
+        let report_value = serde_json::to_value(&report).map_err(|_| ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "TASK_REPORT_SERIALIZATION_FAILED",
+            message: "the empty Task report could not be serialized".to_owned(),
+            request_id: request_id.0.clone(),
+        })?;
+        let run = state
+            .core
+            .record_empty_task_report(
+                &run_id,
+                report_date,
+                &actor,
+                TASK_REPORT_PROMPT_VERSION,
+                &model,
+                &report_value,
+            )
+            .map_err(|error| task_report_core_error(error, request_id.0.clone()))?;
+        let result = task_report::api_result(
+            run,
+            Some(
+                state
+                    .core
+                    .ai_budget_status(policy)
+                    .map_err(|error| ai_budget_api_error(error, request_id.0.clone()))?,
+            ),
+        )
+        .ok_or_else(|| invalid_stored_task_report(&request_id))?;
+        return Ok(Json(ApiEnvelope {
+            request_id: request_id.0,
+            data: result,
+        }));
+    }
+
+    state
+        .core
+        .begin_task_report(
+            &run_id,
+            report_date,
+            &actor,
+            candidates.len(),
+            TASK_REPORT_PROMPT_VERSION,
+            &model,
+            TASK_REPORT_DAILY_LIMIT,
+        )
+        .map_err(|error| task_report_core_error(error, request_id.0.clone()))?;
+    let started = Instant::now();
+    let reservation = match state.core.reserve_ai_budget(
+        &run_id,
+        "openai",
+        &model,
+        "task_report",
+        TASK_REPORT_MAXIMUM_COST_MICROUSD,
+        policy,
+    ) {
+        Ok(reservation) => reservation,
+        Err(error) => {
+            record_task_report_failure(
+                &state.core,
+                &run_id,
+                "AI_BUDGET_REJECTED",
+                started.elapsed(),
+                0,
+                None,
+                None,
+            );
+            return Err(ai_budget_api_error(error, request_id.0));
+        }
+    };
+
+    let execution = tokio::time::timeout(
+        Duration::from_secs(TASK_REPORT_TIMEOUT_SECS),
+        task_report::run(state.openai.clone(), report_date, &candidates),
+    )
+    .await;
+    let execution = match execution {
+        Ok(Ok(execution)) => execution,
+        Ok(Err(error)) => {
+            let estimated_cost = if error.possibly_billed {
+                reservation.reserved_microusd
+            } else {
+                0
+            };
+            let outcome = if error.possibly_billed {
+                "upstream_cost_estimate"
+            } else {
+                "preflight_failed"
+            };
+            state
+                .core
+                .settle_ai_budget(&reservation, estimated_cost, None, outcome, policy)
+                .map_err(|ledger_error| ai_budget_api_error(ledger_error, request_id.0.clone()))?;
+            let failure_code = match &error.kind {
+                TaskReportErrorKind::OpenAi(_) => "TASK_REPORT_OPENAI_FAILED",
+                TaskReportErrorKind::InvalidResponse => "TASK_REPORT_RESPONSE_INVALID",
+            };
+            record_task_report_failure(
+                &state.core,
+                &run_id,
+                failure_code,
+                started.elapsed(),
+                estimated_cost,
+                error.response_id,
+                error.upstream_request_id,
+            );
+            return Err(task_report_api_error(error.kind, request_id.0));
+        }
+        Err(_) => {
+            state
+                .core
+                .settle_ai_budget(
+                    &reservation,
+                    reservation.reserved_microusd,
+                    None,
+                    "upstream_cost_estimate",
+                    policy,
+                )
+                .map_err(|ledger_error| ai_budget_api_error(ledger_error, request_id.0.clone()))?;
+            record_task_report_failure(
+                &state.core,
+                &run_id,
+                "TASK_REPORT_TIMEOUT",
+                started.elapsed(),
+                reservation.reserved_microusd,
+                None,
+                None,
+            );
+            return Err(ApiError {
+                status: StatusCode::GATEWAY_TIMEOUT,
+                code: "TASK_REPORT_TIMEOUT",
+                message: "the Task report exceeded its 45 second timeout".to_owned(),
+                request_id: request_id.0,
+            });
+        }
+    };
+
+    let known_cost = execution
+        .usage
+        .and_then(|usage| state.openai.config().estimate_cost_microusd(&usage));
+    let actual_cost = known_cost.unwrap_or(reservation.reserved_microusd);
+    let budget_outcome = if known_cost.is_some() {
+        "succeeded"
+    } else {
+        "upstream_cost_estimate"
+    };
+    let usage = execution.usage.map(|usage| AiTokenUsage {
+        input_tokens: usage.input_tokens,
+        cached_input_tokens: usage.cached_input_tokens,
+        output_tokens: usage.output_tokens,
+        total_tokens: usage.total_tokens,
+    });
+    let budget = state
+        .core
+        .settle_ai_budget(&reservation, actual_cost, usage, budget_outcome, policy)
+        .map_err(|error| ai_budget_api_error(error, request_id.0.clone()))?;
+    let report_value = serde_json::to_value(&execution.report).map_err(|_| ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        code: "TASK_REPORT_SERIALIZATION_FAILED",
+        message: "the Task report could not be serialized".to_owned(),
+        request_id: request_id.0.clone(),
+    })?;
+    let completion = TaskReportCompletion {
+        status: "succeeded",
+        response_id: Some(execution.response_id),
+        upstream_request_id: execution.upstream_request_id,
+        result: Some(report_value),
+        input_tokens: execution.usage.map(|usage| usage.input_tokens),
+        cached_input_tokens: execution.usage.map(|usage| usage.cached_input_tokens),
+        output_tokens: execution.usage.map(|usage| usage.output_tokens),
+        total_tokens: execution.usage.map(|usage| usage.total_tokens),
+        estimated_cost_microusd: actual_cost,
+        latency_ms: duration_millis(started.elapsed()),
+        failure_code: None,
+    };
+    let run = state
+        .core
+        .complete_task_report(&run_id, &completion)
+        .map_err(|error| task_report_core_error(error, request_id.0.clone()))?;
+    let result = task_report::api_result(run, Some(budget))
+        .ok_or_else(|| invalid_stored_task_report(&request_id))?;
+    tracing::info!(
+        event = "task_report_completed",
+        request_id = %request_id.0,
+        run_id = %result.run_id,
+        candidate_count = result.candidate_count,
+        estimated_cost_microusd = result.estimated_cost_microusd,
+        latency_ms = result.latency_ms,
+        model = %execution.model,
+        prompt_version = TASK_REPORT_PROMPT_VERSION,
+    );
+    Ok(Json(ApiEnvelope {
+        request_id: request_id.0,
+        data: result,
+    }))
+}
+
+async fn latest_task_report(
+    State(state): State<AppState>,
+    Extension(request_id): Extension<RequestId>,
+) -> Result<Json<ApiEnvelope<Option<TaskReportApiResult>>>, ApiError> {
+    require_task_report_enabled(&state, &request_id)?;
+    let run = state
+        .core
+        .latest_task_report()
+        .map_err(|error| task_report_core_error(error, request_id.0.clone()))?;
+    let result = run
+        .map(|run| task_report::api_result(run, None))
+        .transpose_option()
+        .ok_or_else(|| invalid_stored_task_report(&request_id))?;
+    Ok(Json(ApiEnvelope {
+        request_id: request_id.0,
+        data: result,
+    }))
+}
+
+async fn rate_task_report(
+    State(state): State<AppState>,
+    Extension(request_id): Extension<RequestId>,
+    Extension(session): Extension<AuthenticatedSession>,
+    AxumPath(id): AxumPath<String>,
+    payload: Result<Json<TaskReportFeedbackRequest>, JsonRejection>,
+) -> Result<Json<ApiEnvelope<TaskReportApiResult>>, ApiError> {
+    require_task_report_enabled(&state, &request_id)?;
+    let body = payload.map_err(|_| ApiError {
+        status: StatusCode::BAD_REQUEST,
+        code: "INVALID_TASK_REPORT_FEEDBACK",
+        message: "Task report feedback must contain only a helpful boolean".to_owned(),
+        request_id: request_id.0.clone(),
+    })?;
+    let run = state
+        .core
+        .rate_task_report(&id, body.helpful, &session.audit_actor())
+        .map_err(|error| task_report_core_error(error, request_id.0.clone()))?;
+    let result = task_report::api_result(run, None)
+        .ok_or_else(|| invalid_stored_task_report(&request_id))?;
+    Ok(Json(ApiEnvelope {
+        request_id: request_id.0,
+        data: result,
+    }))
+}
+
+trait TransposeOption<T> {
+    fn transpose_option(self) -> Option<Option<T>>;
+}
+
+impl<T> TransposeOption<T> for Option<Option<T>> {
+    fn transpose_option(self) -> Option<Option<T>> {
+        match self {
+            Some(Some(value)) => Some(Some(value)),
+            Some(None) => None,
+            None => Some(None),
+        }
+    }
+}
+
+fn require_task_report_enabled(state: &AppState, request_id: &RequestId) -> Result<(), ApiError> {
+    if state.task_report_enabled {
+        Ok(())
+    } else {
+        Err(ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "TASK_REPORT_DISABLED",
+            message: "the Today Task report feature is disabled".to_owned(),
+            request_id: request_id.0.clone(),
+        })
+    }
+}
+
+fn record_task_report_failure(
+    core: &TmCore,
+    run_id: &str,
+    failure_code: &str,
+    elapsed: Duration,
+    estimated_cost_microusd: u64,
+    response_id: Option<String>,
+    upstream_request_id: Option<String>,
+) {
+    let completion = TaskReportCompletion {
+        status: "failed",
+        response_id,
+        upstream_request_id,
+        result: None,
+        input_tokens: None,
+        cached_input_tokens: None,
+        output_tokens: None,
+        total_tokens: None,
+        estimated_cost_microusd,
+        latency_ms: duration_millis(elapsed),
+        failure_code: Some(failure_code.to_owned()),
+    };
+    if let Err(error) = core.complete_task_report(run_id, &completion) {
+        tracing::error!(%error, run_id, failure_code, "failed to persist Task report failure");
+    }
+}
+
+fn duration_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn invalid_stored_task_report(request_id: &RequestId) -> ApiError {
+    ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        code: "TASK_REPORT_STORED_RESULT_INVALID",
+        message: "the stored Task report result is invalid".to_owned(),
+        request_id: request_id.0.clone(),
+    }
+}
+
+fn task_report_api_error(error: TaskReportErrorKind, request_id: String) -> ApiError {
+    match error {
+        TaskReportErrorKind::OpenAi(error) => openai_api_error(error, request_id),
+        TaskReportErrorKind::InvalidResponse => ApiError {
+            status: StatusCode::BAD_GATEWAY,
+            code: "TASK_REPORT_RESPONSE_INVALID",
+            message: "OpenAI returned an invalid structured Task report".to_owned(),
+            request_id,
+        },
+    }
+}
+
+fn task_report_core_error(error: CoreError, request_id: String) -> ApiError {
+    tracing::warn!(%error, %request_id, "Task report persistence rejected an operation");
+    match error {
+        CoreError::AiDailyLimitExceeded { .. } => ApiError {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "TASK_REPORT_DAILY_LIMIT_REACHED",
+            message: "the daily limit of four Task report attempts has been reached".to_owned(),
+            request_id,
+        },
+        CoreError::NotFound { .. } => ApiError {
+            status: StatusCode::NOT_FOUND,
+            code: "TASK_REPORT_NOT_FOUND",
+            message: "the Task report was not found".to_owned(),
+            request_id,
+        },
+        CoreError::Conflict(message) => ApiError {
+            status: StatusCode::CONFLICT,
+            code: "TASK_REPORT_CONFLICT",
+            message,
+            request_id,
+        },
+        _ => ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "TASK_REPORT_STORAGE_FAILED",
+            message: "the Task report usage record could not be updated".to_owned(),
+            request_id,
+        },
+    }
+}
+
 async fn operations_status(
     State(state): State<AppState>,
     Extension(request_id): Extension<RequestId>,
@@ -1312,6 +1787,7 @@ async fn operations_status(
             controls: OperationsControls {
                 incident_mode: state.incident_mode.as_str(),
                 ai_enabled: state.ai_enabled,
+                task_report_enabled: state.task_report_enabled,
                 primary_failed_attempt_limit_per_minute: FAILED_ATTEMPT_LIMIT,
                 authenticated_request_limit_per_minute: AUTHENTICATED_REQUEST_LIMIT,
                 maximum_request_target_bytes: MAX_REQUEST_TARGET_BYTES,
@@ -1839,12 +2315,20 @@ async fn runtime_controls_guard(
             "OpenAI execution is disabled by the TM kill switch",
         ))
     });
+    let blocked = blocked.or_else(|| {
+        (!runtime.task_report_enabled && path.starts_with("/api/v1/assistant/task-report"))
+            .then_some((
+                "TASK_REPORT_DISABLED",
+                "the Today Task report feature is disabled",
+            ))
+    });
     if let Some((code, message)) = blocked {
         runtime.security.incident_blocked();
         tracing::warn!(
             event = "security_runtime_control_blocked",
             incident_mode = runtime.incident_mode.as_str(),
             ai_enabled = runtime.ai_enabled,
+            task_report_enabled = runtime.task_report_enabled,
             method = %request.method(),
             route = safe_route_family(path),
             request_id = %request_id.0,
@@ -1862,8 +2346,10 @@ async fn runtime_controls_guard(
 
 fn ai_execution_path(method: &Method, path: &str) -> bool {
     *method == Method::POST
-        && (matches!(path, "/api/v1/ai/probe" | "/api/v1/assistant/query")
-            || (path.starts_with("/api/v1/assistant/actions/") && path.ends_with("/approve")))
+        && (matches!(
+            path,
+            "/api/v1/ai/probe" | "/api/v1/assistant/query" | "/api/v1/assistant/task-report"
+        ) || (path.starts_with("/api/v1/assistant/actions/") && path.ends_with("/approve")))
 }
 
 fn auth_decision_error(decision: AuthDecision, request_id: String) -> Response {
@@ -2045,6 +2531,14 @@ fn safe_route_family(path: &str) -> &'static str {
         "/api/v1/ai/status" => "/api/v1/ai/status",
         "/api/v1/ai/probe" => "/api/v1/ai/probe",
         "/api/v1/assistant/query" => "/api/v1/assistant/query",
+        "/api/v1/assistant/task-report" => "/api/v1/assistant/task-report",
+        "/api/v1/assistant/task-reports/latest" => "/api/v1/assistant/task-reports/latest",
+        value
+            if value.starts_with("/api/v1/assistant/task-reports/")
+                && value.ends_with("/feedback") =>
+        {
+            "/api/v1/assistant/task-reports/{id}/feedback"
+        }
         "/api/v1/assistant/actions" => "/api/v1/assistant/actions",
         "/api/v1/assistant/memories" => "/api/v1/assistant/memories",
         "/api/v1/assistant/memories/search" => "/api/v1/assistant/memories/search",
@@ -2344,6 +2838,60 @@ mod tests {
         (response_headers, Json(body))
     }
 
+    #[derive(Clone, Default)]
+    struct MockTaskReportCapture {
+        payload: Arc<Mutex<Option<Value>>>,
+    }
+
+    async fn mock_task_report_response(
+        State(capture): State<MockTaskReportCapture>,
+        Json(payload): Json<Value>,
+    ) -> impl IntoResponse {
+        let input = payload["input"][0]["content"]
+            .as_str()
+            .and_then(|value| serde_json::from_str::<Value>(value).ok())
+            .expect("parse Task report input");
+        let task_id = input["candidateTasks"][0]["taskId"]
+            .as_str()
+            .expect("candidate Task ID");
+        *capture.payload.lock().expect("lock Task report payload") = Some(payload);
+        let report = json!({
+            "headline": "오늘은 첫 번째 Task부터 시작하세요",
+            "summary": "제공된 상태와 기한만 기준으로 정했습니다.",
+            "priorities": [{
+                "taskId": task_id,
+                "rank": 1,
+                "reason": "오늘 계획과 우선순위를 함께 고려했습니다.",
+                "nextAction": "첫 단계를 10분 동안 시작하세요.",
+                "alert": ""
+            }],
+            "alerts": []
+        });
+        let mut response_headers = HeaderMap::new();
+        response_headers.insert(
+            "x-request-id",
+            HeaderValue::from_static("openai-task-report-1"),
+        );
+        (
+            response_headers,
+            Json(json!({
+                "id": "resp_task_report_1",
+                "status": "completed",
+                "model": "gpt-5.6-terra",
+                "output": [{
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": report.to_string()}]
+                }],
+                "usage": {
+                    "input_tokens": 240,
+                    "input_tokens_details": {"cached_tokens": 40},
+                    "output_tokens": 80,
+                    "total_tokens": 320
+                }
+            })),
+        )
+    }
+
     async fn mock_disallowed_tool_response(
         State(calls): State<Arc<AtomicUsize>>,
         Json(_payload): Json<Value>,
@@ -2460,7 +3008,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
         assert_eq!(body["data"]["status"], "ready");
-        assert_eq!(body["data"]["schemaVersion"], 9);
+        assert_eq!(body["data"]["schemaVersion"], 10);
         assert_eq!(body["data"]["journalMode"], "wal");
     }
 
@@ -2847,6 +3395,97 @@ mod tests {
         assert!(!tool_output.contains("TM_AUTH"));
         drop(payloads);
 
+        mock_server.abort();
+    }
+
+    #[tokio::test]
+    async fn task_report_is_structured_minimized_budgeted_and_rateable() {
+        let capture = MockTaskReportCapture::default();
+        let mock_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind Task report mock server");
+        let mock_address = mock_listener.local_addr().expect("read mock address");
+        let mock_router = Router::new()
+            .route("/v1/responses", post(mock_task_report_response))
+            .with_state(capture.clone());
+        let mock_server = tokio::spawn(async move {
+            axum::serve(mock_listener, mock_router)
+                .await
+                .expect("serve Task report mock response");
+        });
+        let config = OpenAiConfig::for_test(
+            Some("test-api-key"),
+            "gpt-5.6-terra",
+            &format!("http://{mock_address}/v1"),
+            Duration::from_secs(5),
+        )
+        .expect("build Task report OpenAI config");
+        let client = OpenAiClient::new(config).expect("build Task report OpenAI client");
+        let (_temporary, core, _project_id, task_id) = populated_test_core();
+        let router =
+            build_cloud_authenticated_router_with_openai(core.clone(), test_auth_config(), client);
+
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/assistant/task-report")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("x-tm-confirm-ai-call", "task-report")
+                    .body(Body::empty())
+                    .expect("build Task report request"),
+            )
+            .await
+            .expect("call Task report route");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["data"]["status"], "succeeded");
+        assert_eq!(body["data"]["report"]["priorities"][0]["taskId"], task_id);
+        assert_eq!(body["data"]["usage"]["totalTokens"], 320);
+        assert_eq!(body["data"]["estimatedCostMicrousd"], 1_710);
+        assert_eq!(body["data"]["limits"]["dailyCalls"], 4);
+        assert_eq!(body["data"]["limits"]["maximumCostMicrousd"], 50_000);
+        assert_eq!(body["data"]["readOnly"], true);
+        let run_id = body["data"]["runId"]
+            .as_str()
+            .expect("Task report run ID")
+            .to_owned();
+
+        {
+            let payload = capture.payload.lock().expect("lock capture");
+            let payload = payload.as_ref().expect("captured Task report payload");
+            assert_eq!(payload["store"], false);
+            assert_eq!(payload["max_output_tokens"], 800);
+            assert_eq!(payload["text"]["format"]["type"], "json_schema");
+            let input = payload["input"][0]["content"]
+                .as_str()
+                .expect("Task report input");
+            assert!(!input.contains("description"));
+            assert!(!input.contains("worklog"));
+        }
+
+        let feedback = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/assistant/task-reports/{run_id}/feedback"))
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"helpful":true}"#))
+                    .expect("build Task report feedback request"),
+            )
+            .await
+            .expect("rate Task report");
+        assert_eq!(feedback.status(), StatusCode::OK);
+        assert_eq!(response_json(feedback).await["data"]["helpful"], true);
+        assert_eq!(
+            core.latest_task_report()
+                .expect("load latest Task report")
+                .expect("latest Task report")
+                .helpful,
+            Some(true)
+        );
         mock_server.abort();
     }
 
@@ -3263,7 +3902,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
         assert_eq!(body["data"]["database"]["ok"], true);
-        assert_eq!(body["data"]["database"]["schemaVersion"], 9);
+        assert_eq!(body["data"]["database"]["schemaVersion"], 10);
         assert_eq!(body["data"]["scheduler"]["status"], "healthy");
         assert_eq!(body["data"]["scheduler"]["openaiCallsEnabled"], false);
         assert_eq!(body["data"]["scheduler"]["effectCount"], 0);

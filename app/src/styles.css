@@ -362,6 +362,32 @@ kbd { background: var(--surface-subtle); border: 1px solid var(--border); border
 .today-progress > div:last-child { color: var(--text-faint); font-size: 10.5px; }
 .today-progress > div:last-child strong { color: var(--text); font-size: 16px; }
 .today-grid { display: grid; gap: 18px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.task-report { border-color: color-mix(in srgb, var(--accent) 28%, var(--border)); overflow: hidden; }
+.task-report__header { align-items: center; background: color-mix(in srgb, var(--accent) 5%, var(--surface)); gap: 18px; }
+.task-report__header .primary-button { flex: 0 0 auto; }
+.task-report__empty { color: var(--text-soft); display: grid; gap: 4px; padding: 22px 20px; }
+.task-report__empty strong { color: var(--text); font-size: 13px; }
+.task-report__empty span { font-size: 11.5px; }
+.task-report__body { display: grid; gap: 16px; padding: 20px; }
+.task-report__stale { background: var(--surface-muted); border-radius: 999px; color: var(--text-soft); font-size: 10.5px; justify-self: start; padding: 4px 8px; }
+.task-report__summary h3 { font-size: 18px; letter-spacing: -.03em; }
+.task-report__summary p { color: var(--text-soft); font-size: 12.5px; line-height: 1.65; margin-top: 5px; }
+.task-report__priorities { display: grid; gap: 10px; list-style: none; margin: 0; padding: 0; }
+.task-report__priorities li { align-items: flex-start; background: var(--surface-muted); border: 1px solid var(--border); border-radius: 12px; display: flex; gap: 12px; padding: 13px; }
+.task-report__rank { align-items: center; background: var(--accent); border-radius: 50%; color: white; display: inline-flex; flex: 0 0 26px; font-size: 12px; font-weight: 750; height: 26px; justify-content: center; }
+.task-report__priorities li > div { display: grid; gap: 4px; min-width: 0; }
+.task-report__priorities button { background: none; border: 0; color: var(--text); cursor: pointer; font: inherit; font-size: 13px; font-weight: 700; justify-self: start; padding: 0; text-align: left; }
+.task-report__priorities button:hover:not(:disabled) { color: var(--accent); text-decoration: underline; }
+.task-report__priorities p { color: var(--text-soft); font-size: 11.5px; line-height: 1.55; }
+.task-report__priorities strong { color: var(--text); font-size: 11.5px; font-weight: 650; }
+.task-report__priorities small { color: var(--attention-text); font-size: 10.5px; }
+.task-report__alerts { background: var(--attention-bg); border-radius: 10px; color: var(--attention-text); display: grid; font-size: 11.5px; gap: 5px; margin: 0; padding: 11px 14px 11px 30px; }
+.task-report__footer { align-items: center; border-top: 1px solid var(--border); display: flex; gap: 12px; justify-content: space-between; padding-top: 14px; }
+.task-report__footer > span { color: var(--text-soft); font-size: 10.5px; }
+.task-report__footer > div { display: flex; gap: 6px; }
+.task-report__footer button { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; color: var(--text-soft); cursor: pointer; font-size: 10.5px; min-height: 29px; padding: 0 9px; }
+.task-report__footer button:hover { border-color: var(--accent); color: var(--accent); }
+.task-report__footer strong { color: var(--text-soft); font-size: 10.5px; }
 
 .project-workspace { align-items: start; display: grid; gap: 16px; grid-template-columns: minmax(220px, 285px) minmax(0, 1fr); }
 .project-master { min-width: 0; }
@@ -792,6 +818,10 @@ button.search-result:hover { background: var(--surface-subtle); }
   .page-header h1 { font-size: 26px; }
   .page-header p { font-size: 11px; }
   .page-header--today { align-items: center; }
+  .task-report__header, .task-report__footer { align-items: stretch; flex-direction: column; }
+  .task-report__header .primary-button { width: 100%; }
+  .task-report__body { padding: 16px 14px; }
+  .task-report__footer > div { justify-content: flex-end; }
   .today-grid, .note-grid, .data-action-grid, .data-overview, .note-link-grid, .log-card__result { grid-template-columns: 1fr; }
   .project-workspace { grid-template-columns: 1fr; }
   .project-quick-add { grid-template-areas: "context context" "title title" "description description" "priority date" "submit submit"; grid-template-columns: 1fr 1fr; }

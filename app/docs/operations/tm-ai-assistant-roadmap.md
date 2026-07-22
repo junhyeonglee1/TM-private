@@ -719,7 +719,7 @@ Codex TODO:
 
 ## STEP 17 — 첫 실제 AI 비서 기능
 
-상태: 대기
+상태: 구현 완료 · production 점진 배포 대기
 
 첫 기능 후보:
 
@@ -730,14 +730,14 @@ Codex TODO:
 
 사용자 결정 게이트:
 
-- [ ] 첫 기능 1개와 성공 기준 승인
-- [ ] 허용 비용·실행 빈도·자동화 수준 승인
-- [ ] 사용할 실제 데이터 범위와 알림 채널 승인
+- [x] 첫 기능은 `오늘의 Task AI 리포트`, 성공 기준은 1~3개 실제 후보 우선순위·구체적 다음 행동·허위 ID 0건으로 승인
+- [x] 수동 호출, 하루 4회, 1회 USD 0.05·800 output token, 자동 재시도 없음으로 승인
+- [x] Task ID·제목·프로젝트 이름·상태·우선순위·마감일·선정 category만 사용하고 Windows `오늘` 화면과 모바일 PWA에 표시하기로 승인
 
 Codex TODO:
 
-- [ ] 기존 API·오케스트레이터·승인·스케줄러만 이용해 최소 기능 구현
-- [ ] 기능 전용 권한·prompt·tool·비용 상한 정의
+- [x] 기존 OpenAI client·인증·비용 원장과 side-effect 없는 digest fact 조회를 이용해 최소 기능 구현
+- [x] 전용 read-only prompt·Structured Outputs·후보 ID 재검증·하루/요청별 비용 상한·feature kill switch 정의
 - [ ] staging 검증 후 production 점진 활성화
 - [ ] 실제 품질·비용·실패·사용 편의성 측정
 - [ ] rollback과 기능 kill switch 검증
@@ -746,6 +746,13 @@ Codex TODO:
 완료 게이트:
 
 - 시스템 기반을 유지한 채 실제 비서 기능 하나가 안전하게 운영되고 품질·비용·편의성을 측정할 수 있다.
+
+구현 메모:
+
+- schema 10에 `task_report_runs`와 append-only `task_report_feedback`을 추가했으며 backup restore가 이 기록을 되감지 못한다.
+- production cloud에서는 `TM_TASK_REPORT_ENABLED` 기본값이 false다. schema 10을 먼저 배포·검증한 뒤 별도 배포로 켠다.
+- Windows와 PWA는 동일한 결과·token·추정 비용·latency를 표시하고 보고서당 한 번 `도움 됨/도움 안 됨`을 기록한다.
+- 자동 일정 알림, 정기 지출, 운동, 주식은 이번 기능에 포함하지 않고 별도 selector·prompt·endpoint로 확장한다.
 
 ## 단계 진행 규칙
 

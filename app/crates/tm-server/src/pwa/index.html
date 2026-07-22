@@ -54,6 +54,14 @@
         <section id="tab-assistant" class="tab-panel panel">
           <p class="eyebrow">OpenAI API · 명시적 전송만</p>
           <h1>무엇을 도와드릴까요?</h1>
+          <section class="task-report-card" aria-labelledby="mobile-task-report-heading">
+            <div class="task-report-heading">
+              <div><p class="eyebrow">읽기 전용 · 하루 최대 4회</p><h2 id="mobile-task-report-heading">오늘의 Task 우선순위</h2></div>
+              <button id="task-report-generate" class="secondary" type="button">AI 리포트 만들기</button>
+            </div>
+            <p class="muted task-report-description">Task 제목·상태·우선순위·마감일만 선별합니다. 1회 비용 상한은 $0.05입니다.</p>
+            <div id="task-report-result" class="task-report-result" aria-live="polite"><p class="empty">아직 생성한 리포트가 없습니다.</p></div>
+          </section>
           <div id="assistant-log" class="assistant-log" aria-live="polite">
             <article class="assistant-message assistant-message--tm">질문을 전송할 때만 AI 사용료가 발생합니다. 답변과 TM 데이터는 이 브라우저의 오프라인 캐시에 저장하지 않습니다.</article>
           </div>

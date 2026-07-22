@@ -58,6 +58,27 @@ button { border: 0; border-radius: 13px; font-weight: 800; }
 .assistant-message { max-width: 92%; padding: 13px 14px; border-radius: 16px; line-height: 1.58; white-space: pre-wrap; }
 .assistant-message--tm { align-self: flex-start; background: var(--surface-2); }
 .assistant-message--user { align-self: flex-end; background: #35457c; }
+.task-report-card { margin: 18px 0; padding: 16px; border: 1px solid #3d4d7b; border-radius: 18px; background: #151c2e; }
+.task-report-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.task-report-heading h2 { margin: 3px 0 0; font-size: 19px; }
+.task-report-heading .secondary { min-height: 38px; padding: 7px 11px; white-space: nowrap; }
+.task-report-description { margin: 10px 0 0; font-size: 12px; }
+.task-report-result { display: grid; gap: 12px; margin-top: 13px; }
+.task-report-result .empty { margin: 0; padding: 16px 4px 4px; }
+.task-report-summary h3 { margin: 0 0 5px; font-size: 18px; }
+.task-report-summary p, .task-report-priorities p { margin: 0; color: var(--muted); line-height: 1.55; }
+.task-report-priorities { display: grid; gap: 9px; margin: 0; padding: 0; list-style: none; }
+.task-report-priorities li { display: flex; gap: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 14px; background: #121720; }
+.task-report-rank { display: grid; flex: 0 0 25px; height: 25px; place-items: center; border-radius: 50%; background: var(--accent-strong); color: #10131c; font-weight: 900; }
+.task-report-priorities li > div { display: grid; gap: 4px; min-width: 0; }
+.task-report-priorities h3 { margin: 0; font-size: 15px; }
+.task-report-priorities strong { font-size: 12px; line-height: 1.5; }
+.task-report-priorities small { color: #ffc28d; }
+.task-report-alerts { margin: 0; padding: 11px 13px 11px 28px; border-radius: 12px; background: #31261f; color: #ffc28d; font-size: 12px; }
+.task-report-meta { margin: 0; color: var(--muted); font-size: 11px; }
+.task-report-feedback { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.task-report-feedback .secondary { min-height: 38px; padding: 7px; }
+.task-report-feedback strong { grid-column: 1 / -1; color: var(--muted); font-size: 12px; text-align: right; }
 .composer { border-top: 1px solid var(--line); padding-top: 4px; }
 .section-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
 .section-heading h1 { margin-bottom: 18px; }

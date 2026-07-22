@@ -31,6 +31,19 @@ describe("TM 데스크톱 UI", () => {
     expect(within(plannedSection as HTMLElement).queryByRole("button", { name: "이월" })).not.toBeInTheDocument();
   });
 
+  it("오늘의 Task AI 리포트를 만들고 품질 평가를 기록한다", async () => {
+    const user = userEvent.setup();
+    renderApp();
+
+    await screen.findByRole("heading", { name: "오늘", level: 1 });
+    await user.click(screen.getByRole("button", { name: "AI 리포트 만들기" }));
+
+    expect(await screen.findByRole("heading", { name: "가장 중요한 일부터 하나씩 시작하세요" })).toBeInTheDocument();
+    expect(screen.getByText(/500 tokens/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "도움 됨" }));
+    expect(await screen.findByText("도움 됨으로 평가함")).toBeInTheDocument();
+  });
+
   it("Inbox는 기능 없는 기획 대기 화면으로 유지한다", async () => {
     const user = userEvent.setup();
     renderApp();

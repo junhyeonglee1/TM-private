@@ -61,6 +61,21 @@ async fn invoke_cloud_device_admin(
         .await
 }
 
+#[tauri::command]
+async fn invoke_cloud_assistant_feature(
+    command: String,
+    args: Option<Value>,
+    state: tauri::State<'_, AppState>,
+) -> Result<Value, String> {
+    let cloud = state.cloud.clone();
+    cloud
+        .assistant_feature(
+            &command,
+            args.unwrap_or_else(|| Value::Object(serde_json::Map::new())),
+        )
+        .await
+}
+
 pub fn run() {
     let application = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -114,6 +129,7 @@ pub fn run() {
             data_mode,
             invoke_cloud_command,
             invoke_cloud_device_admin,
+            invoke_cloud_assistant_feature,
             commands::get_app_snapshot,
             commands::create_project,
             commands::create_task,

@@ -127,6 +127,7 @@ pub(crate) fn restore_database(
     let ai_budget_ledger = read_ai_budget_ledger(&current)?;
     let assistant_action_ledger = read_assistant_action_ledger(&current)?;
     let assistant_memory_ledger = read_assistant_memory_ledger(&current)?;
+    let task_report_ledger = read_task_report_ledger(&current)?;
     let safety_backup = online_backup_connection_inner(
         &current,
         backup_directory,
@@ -144,6 +145,7 @@ pub(crate) fn restore_database(
     validate_ai_budget_restore_source(&source, &ai_budget_ledger)?;
     validate_assistant_action_restore_source(&source, &assistant_action_ledger)?;
     validate_assistant_memory_restore_source(&source, &assistant_memory_ledger)?;
+    validate_task_report_restore_source(&source, &task_report_ledger)?;
     let mut destination = Connection::open(database_path)?;
     destination.busy_timeout(Duration::from_secs(15))?;
     register_runtime_functions(&destination)?;
@@ -595,6 +597,68 @@ fn validate_ai_budget_restore_source(source: &Connection, current: &[String]) ->
     if restored != current {
         return Err(Error::Conflict(
             "restore would alter the append-only AI cost and budget ledger".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct TaskReportLedger {
+    runs: Vec<String>,
+    feedback: Vec<String>,
+}
+
+fn read_task_report_ledger(connection: &Connection) -> Result<TaskReportLedger> {
+    let has_runs: bool = connection.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'task_report_runs'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    let has_feedback: bool = connection.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'task_report_feedback'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_runs && !has_feedback {
+        return Ok(TaskReportLedger::default());
+    }
+    if !has_runs || !has_feedback {
+        return Err(Error::Invariant(
+            "Task report ledger tables must exist together".to_owned(),
+        ));
+    }
+    let runs = canonical_json_rows(
+        connection,
+        "SELECT json_array(
+            id, report_date, actor, status, candidate_count, prompt_version, model,
+            response_id, upstream_request_id, result_json, input_tokens,
+            cached_input_tokens, output_tokens, total_tokens, estimated_cost_microusd,
+            latency_ms, failure_code, created_at, completed_at
+         ) FROM task_report_runs ORDER BY id",
+    )?;
+    let feedback = canonical_json_rows(
+        connection,
+        "SELECT json_array(id, run_id, helpful, actor, created_at)
+         FROM task_report_feedback ORDER BY id",
+    )?;
+    Ok(TaskReportLedger { runs, feedback })
+}
+
+fn validate_task_report_restore_source(
+    source: &Connection,
+    current: &TaskReportLedger,
+) -> Result<()> {
+    if current.runs.is_empty() && current.feedback.is_empty() {
+        return Ok(());
+    }
+    let restored = read_task_report_ledger(source)?;
+    if &restored != current {
+        return Err(Error::Conflict(
+            "restore would alter the Task report usage and feedback ledger".to_owned(),
         ));
     }
     Ok(())

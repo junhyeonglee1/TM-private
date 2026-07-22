@@ -1,4 +1,4 @@
-import type { CommandTransport } from "./api";
+import type { CommandTransport, TaskReportResult } from "./api";
 import type {
   AppSnapshot,
   BackupInfo,
@@ -498,6 +498,7 @@ const textValue = (value: unknown): string => (typeof value === "string" ? value
 
 export class MemoryTransport implements CommandTransport {
   private snapshot = buildSample();
+  private taskReport: TaskReportResult | null = null;
 
   async invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
     const result = this.handle(command, args);
@@ -582,9 +583,52 @@ export class MemoryTransport implements CommandTransport {
           markdownPath: `C:\\Users\\tkfk0\\Desktop\\codex\\TM\\exports\\tm-${this.snapshot.today}.md`,
           exportedAt: now(),
         } satisfies ExportResult;
+      case "latest_task_report":
+        return this.taskReport;
+      case "generate_task_report":
+        return this.generateTaskReport();
+      case "rate_task_report":
+        if (!this.taskReport || this.taskReport.runId !== args.reportId) {
+          throw new Error("Task 리포트를 찾지 못했습니다.");
+        }
+        this.taskReport.helpful = Boolean(args.helpful);
+        return this.taskReport;
       default:
         throw new Error(`지원하지 않는 mock command: ${command}`);
     }
+  }
+
+  private generateTaskReport(): TaskReportResult {
+    const candidates = this.snapshot.tasks
+      .filter((task) => !task.deletedAt && !["done", "cancelled"].includes(task.status))
+      .slice(0, 3);
+    this.taskReport = {
+      runId: id("report"),
+      reportDate: this.snapshot.today,
+      status: candidates.length ? "succeeded" : "no_tasks",
+      report: {
+        headline: candidates.length ? "가장 중요한 일부터 하나씩 시작하세요" : "오늘 처리할 열린 Task가 없습니다",
+        summary: candidates.length ? "마감일과 진행 상태를 기준으로 우선순위를 정했습니다." : "새 Task를 만들면 우선순위를 제안합니다.",
+        priorities: candidates.map((task, index) => ({
+          taskId: task.id,
+          rank: index + 1,
+          reason: index === 0 ? "현재 상태와 우선순위를 함께 고려했습니다." : "다음으로 이어서 처리하기 좋습니다.",
+          nextAction: `${task.title}의 첫 단계를 10분 동안 시작하기`,
+          alert: task.status === "blocked" ? "막힘 원인을 먼저 확인하세요." : "",
+        })),
+        alerts: [],
+      },
+      candidateCount: candidates.length,
+      model: "mock-step17",
+      promptVersion: "step17-task-report-v1",
+      usage: candidates.length ? { inputTokens: 320, cachedInputTokens: 0, outputTokens: 180, totalTokens: 500 } : null,
+      estimatedCostMicrousd: candidates.length ? 3500 : 0,
+      latencyMs: candidates.length ? 420 : 0,
+      helpful: null,
+      readOnly: true,
+      limits: { dailyCalls: 4, maximumCostMicrousd: 50_000, maximumOutputTokens: 800 },
+    };
+    return this.taskReport;
   }
 
   private createProject(name: string, description: string): string {

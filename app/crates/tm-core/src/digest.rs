@@ -1,7 +1,7 @@
 use std::{fmt, str::FromStr};
 
 use chrono::{Duration, NaiveDate, SecondsFormat, Utc};
-use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -176,6 +176,15 @@ pub(crate) fn prepare(
     })
 }
 
+pub(crate) fn preview(
+    database: &Database,
+    kind: DigestKind,
+    date: NaiveDate,
+) -> Result<DigestFacts> {
+    let connection = database.connect()?;
+    collect_facts(&connection, kind, date)
+}
+
 pub(crate) fn complete(
     database: &Database,
     delivery_key: &str,
@@ -303,7 +312,7 @@ fn map_delivery(row: &rusqlite::Row<'_>) -> rusqlite::Result<DigestDelivery> {
 }
 
 fn collect_facts(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     kind: DigestKind,
     date: NaiveDate,
 ) -> Result<DigestFacts> {
@@ -417,7 +426,7 @@ fn collect_facts(
 }
 
 fn query_tasks(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     sql: &str,
     parameters: [NaiveDate; 1],
 ) -> Result<Vec<DigestTaskFact>> {
@@ -427,7 +436,7 @@ fn query_tasks(
         .map_err(Into::into)
 }
 
-fn query_tasks_no_params(transaction: &Transaction<'_>, sql: &str) -> Result<Vec<DigestTaskFact>> {
+fn query_tasks_no_params(transaction: &Connection, sql: &str) -> Result<Vec<DigestTaskFact>> {
     let mut statement = transaction.prepare(sql)?;
     let rows = statement.query_map([], map_task_fact)?;
     rows.collect::<std::result::Result<Vec<_>, _>>()
@@ -435,7 +444,7 @@ fn query_tasks_no_params(transaction: &Transaction<'_>, sql: &str) -> Result<Vec
 }
 
 fn query_tasks_two_dates(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     start: NaiveDate,
     end: NaiveDate,
 ) -> Result<Vec<DigestTaskFact>> {
@@ -465,7 +474,7 @@ fn map_task_fact(row: &rusqlite::Row<'_>) -> rusqlite::Result<DigestTaskFact> {
 }
 
 fn query_session_facts(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     start: &str,
     end: &str,
 ) -> Result<Vec<DigestSessionFact>> {
@@ -490,7 +499,7 @@ fn query_session_facts(
 }
 
 fn query_worklog_facts(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     date: NaiveDate,
 ) -> Result<Vec<DigestWorkLogFact>> {
     let mut statement = transaction.prepare(

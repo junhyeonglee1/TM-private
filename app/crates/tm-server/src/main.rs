@@ -3,7 +3,7 @@ use std::{env, error::Error, io};
 use tm_core::{TmCore, TmHome};
 use tm_server::{
     IncidentMode, MaintenanceMode, ServerConfig, ServerProfile,
-    build_cloud_authenticated_router_with_controls, build_cloud_bootstrap_router,
+    build_cloud_authenticated_router_with_feature_controls, build_cloud_bootstrap_router,
     build_cloud_import_router, build_router_with_openai, openai::OpenAiClient, scheduler,
 };
 
@@ -40,12 +40,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
             match config.maintenance_mode {
                 MaintenanceMode::Disabled => {
                     let openai = OpenAiClient::new(config.openai).map_err(io::Error::other)?;
-                    build_cloud_authenticated_router_with_controls(
+                    build_cloud_authenticated_router_with_feature_controls(
                         core,
                         auth,
                         openai,
                         config.incident_mode,
                         config.ai_enabled,
+                        config.task_report_enabled,
                     )
                 }
                 MaintenanceMode::Import => build_cloud_import_router(core, auth),
