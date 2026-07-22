@@ -679,23 +679,39 @@ Codex TODO:
 
 ## STEP 16 — 보안 강화·사고 대응·운영 준비
 
-상태: 대기
+상태: 완료
 
 사용자 결정 게이트:
 
-- [ ] 장애·침해·비용 초과 알림 수신 채널 승인
-- [ ] 허용 가능한 복구 시간과 서비스 중단 기준 승인
+- [x] 장애·침해·비용 초과 알림 수신 채널 승인
+- [x] 허용 가능한 복구 시간과 서비스 중단 기준 승인
 
 Codex TODO:
 
-- [ ] 최신 위협 model과 데이터 흐름 검토
-- [ ] 의존성 취약점·컨테이너 이미지·secret scan 자동화
-- [ ] TLS·header·rate limit·입력 제한·권한 우회 재검증
-- [ ] API key·인증 token·기기 token 회전 훈련
-- [ ] CSRF·replay·중복 실행·prompt injection 공격 테스트
-- [ ] backup restore와 production rollback 모의훈련
-- [ ] 사고 시 domain 차단·secret 폐기·복구 runbook 작성
-- [ ] 운영 dashboard, SLO, 비용 ceiling, 배포 checklist 확정
+- [x] 최신 위협 model과 데이터 흐름 검토
+- [x] 의존성 취약점·컨테이너 이미지·secret scan 자동화
+- [x] TLS·header·rate limit·입력 제한·권한 우회 재검증
+- [x] API key·인증 token·기기 token 회전 훈련
+- [x] CSRF·replay·중복 실행·prompt injection 공격 테스트
+- [x] backup restore와 production rollback 모의훈련
+- [x] 사고 시 domain 차단·secret 폐기·복구 runbook 작성
+- [x] 운영 dashboard, SLO, 비용 ceiling, 배포 checklist 확정
+
+확정 운영 기준:
+
+- Railway·OpenAI email/provider in-app와 TM 내부 운영 상태판을 사용한다.
+- RPO 24시간, RTO 2시간, 잘못된 배포 rollback 15분을 목표로 한다.
+- Railway $10 경고/$30 hard limit, OpenAI $10 email 경고/TM $20 hard stop을 적용한다.
+- 침해 의심 시 가용성보다 차단과 데이터 보존을 우선한다.
+
+검증 결과:
+
+- GitHub Actions Windows build `29903708320`과 STEP 16 security `29903711604` 통과: frontend/Rust test·Clippy, RustSec vulnerability 0, Trivy filesystem/image high·critical 0, secret/workflow policy scan 통과
+- production rollback `17a670b6-524a-44bc-8553-5f8fb013bae4`과 현재 source 재승격 `702b3853-4b03-4610-8ae3-0fc005d8821d`이 15분 목표 안에 완료됨
+- 최신 backup을 격리된 `/tmp`에 복원해 schema 9, SHA-256 `6844b4681ba36c4af43ac066ab91adb26b9c16aa48d410924b8ef400972abe8c`, integrity/foreign key 검증 통과; 활성 Volume은 변경하지 않음
+- production `read-only + AI off` 배포 `8e417f95-4d8b-49c8-905b-571ac7560cd3`에서 mutation이 `INCIDENT_READ_ONLY`로 차단되고, `normal + AI on` 복구 배포 `d7e1375c-b77a-4052-ad66-b10d2f8a54d5`에서 `healthy`로 복귀함
+- primary token 실제 회전, 임시 기기 등록·scope 검증·폐기, 임시 Railway SSH key 등록·MFA 폐기·로컬 key 삭제를 완료함. OpenAI key는 새 원문을 노출하지 않는 restricted-key 회전 절차와 보안 입력 경로를 runbook으로 훈련했으며 실제 침해가 없어 기존 key를 유지함
+- 최종 production 검증은 schema 9, backup `succeeded`/integrity `ok`, scheduler dead letter 0, 보안 header·인증·request limit·비용 ceiling을 통과했고 OpenAI 호출과 Task·Note mutation은 0건임
 
 완료 게이트:
 

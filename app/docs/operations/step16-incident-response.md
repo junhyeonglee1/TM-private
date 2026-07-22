@@ -40,23 +40,23 @@ DB는 정상이지만 backup이 24시간 이상 오래됐거나 scheduler dead l
 
 ## runtime control 적용
 
-기본은 dry run이다. 실제 변경에는 `-Apply`와 PowerShell 확인이 모두 필요하다.
+기본은 dry run이다. 실제 변경에는 `-Apply`와 PowerShell 확인이 모두 필요하다. 이미 별도 승인된 자동 훈련이나 P0 자동화만 `-Apply -Force`로 확인 입력을 생략한다.
 
 ```powershell
 Set-Location 'C:\Users\tkfk0\Desktop\codex\TM\app'
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File '.\scripts\set-step16-runtime-controls.ps1' -IncidentMode read-only -AiEnabled $false -Apply
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File '.\scripts\set-step16-runtime-controls.ps1' -IncidentMode read-only -AiEnabled false -Apply
 ```
 
 완전 차단:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File '.\scripts\set-step16-runtime-controls.ps1' -IncidentMode lockdown -AiEnabled $false -Apply
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File '.\scripts\set-step16-runtime-controls.ps1' -IncidentMode lockdown -AiEnabled false -Apply
 ```
 
 복귀:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File '.\scripts\set-step16-runtime-controls.ps1' -IncidentMode normal -AiEnabled $true -Apply
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File '.\scripts\set-step16-runtime-controls.ps1' -IncidentMode normal -AiEnabled true -Apply
 ```
 
 각 변경은 새 Railway deployment를 만든다. 다음 변경 전 deployment `SUCCESS`, `/readyz`, primary `/api/v1/ops/status`를 확인한다.

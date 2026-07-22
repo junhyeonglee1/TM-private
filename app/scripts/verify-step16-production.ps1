@@ -6,6 +6,12 @@ param(
     [ValidateRange(60, 900)]
     [int]$TimeoutSeconds = 420,
 
+    [ValidateSet('normal', 'read-only')]
+    [string]$ExpectedIncidentMode = 'normal',
+
+    [ValidateSet('true', 'false')]
+    [string]$ExpectedAiEnabled = 'true',
+
     [string]$OutputPath
 )
 
@@ -16,6 +22,7 @@ Add-Type -AssemblyName System.Net.Http
 
 $resource = 'TM Cloud Production'
 $userName = 'single-user'
+$expectedAiEnabledBoolean = $ExpectedAiEnabled -eq 'true'
 $tmRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 if ([string]::IsNullOrWhiteSpace($OutputPath)) {
     $OutputPath = Join-Path $tmRoot 'dist\manual-step16-production-verification\result.json'
@@ -148,14 +155,28 @@ try {
         throw 'Production credential was not identified as primary admin.'
     }
 
-    $stage = 'ai-preflight-no-billing'
+    $stage = 'runtime-control-no-billing'
     $ai = Invoke-TmRequest -Client $client -Method ([System.Net.Http.HttpMethod]::Post) `
         -Uri "$base/api/v1/assistant/query" -Token $token `
         -JsonBody (@{ message = 'STEP 16 preflight must not call OpenAI' } | ConvertTo-Json -Compress)
-    Assert-Status -Response $ai -Expected 428 -Stage $stage
     $aiJson = $ai.Body | ConvertFrom-Json
-    if ([string]$aiJson.error.code -ne 'AI_CALL_CONFIRMATION_REQUIRED') {
-        throw 'AI preflight was not rejected before an OpenAI call.'
+    if ($ExpectedIncidentMode -eq 'read-only') {
+        Assert-Status -Response $ai -Expected 503 -Stage $stage
+        if ([string]$aiJson.error.code -ne 'INCIDENT_READ_ONLY') {
+            throw 'Read-only mode did not reject the mutation before an OpenAI call.'
+        }
+    }
+    elseif (-not $expectedAiEnabledBoolean) {
+        Assert-Status -Response $ai -Expected 503 -Stage $stage
+        if ([string]$aiJson.error.code -ne 'AI_KILL_SWITCH_ACTIVE') {
+            throw 'The AI kill switch did not reject the request before an OpenAI call.'
+        }
+    }
+    else {
+        Assert-Status -Response $ai -Expected 428 -Stage $stage
+        if ([string]$aiJson.error.code -ne 'AI_CALL_CONFIRMATION_REQUIRED') {
+            throw 'AI preflight was not rejected before an OpenAI call.'
+        }
     }
 
     $stage = 'operations-status'
@@ -170,8 +191,8 @@ try {
         if (-not $backupReady) { Start-Sleep -Seconds 5 }
     } while (-not $backupReady -and [DateTime]::UtcNow -lt $deadline)
     if (-not $backupReady) { throw 'A fresh verified schema 9 remote backup was not observed.' }
-    if ([string]$opsJson.data.controls.incidentMode -ne 'normal' -or
-        [bool]$opsJson.data.controls.aiEnabled -ne $true -or
+    if ([string]$opsJson.data.controls.incidentMode -ne $ExpectedIncidentMode -or
+        [bool]$opsJson.data.controls.aiEnabled -ne $expectedAiEnabledBoolean -or
         [int]$opsJson.data.objectives.rpoHours -ne 24 -or
         [int]$opsJson.data.objectives.rtoHours -ne 2 -or
         [int]$opsJson.data.objectives.rollbackTargetMinutes -ne 15 -or
@@ -198,6 +219,7 @@ try {
         requestLimitsVerified = $true
         authenticationBoundaryVerified = $true
         aiPreflightBlockedBeforeBilling = $true
+        runtimeControlBlockedBeforeBilling = $true
         billableAiCallPerformed = $false
         productionBusinessMutationPerformed = $false
         secretsPersistedByScript = $false

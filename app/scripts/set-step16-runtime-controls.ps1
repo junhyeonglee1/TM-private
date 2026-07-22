@@ -3,12 +3,15 @@ param(
     [ValidateSet('normal', 'read-only', 'lockdown')]
     [string]$IncidentMode = 'normal',
 
-    [bool]$AiEnabled = $true,
+    [ValidateSet('true', 'false')]
+    [string]$AiEnabled = 'true',
 
     [ValidateSet('production', 'staging')]
     [string]$Environment = 'production',
 
-    [switch]$Apply
+    [switch]$Apply,
+
+    [switch]$Force
 )
 
 $ErrorActionPreference = 'Stop'
@@ -24,12 +27,16 @@ if ([string]::IsNullOrWhiteSpace($railway)) {
     throw 'Railway CLI was not found.'
 }
 
-$aiValue = $AiEnabled.ToString().ToLowerInvariant()
+$aiValue = $AiEnabled
 $summary = "environment=$Environment service=$service incident=$IncidentMode aiEnabled=$aiValue"
 if (-not $Apply) {
     Write-Host "Dry run: $summary"
     Write-Host 'Re-run with -Apply after confirming the incident response decision.'
     exit 0
+}
+
+if ($Force) {
+    $ConfirmPreference = 'None'
 }
 
 if (-not $PSCmdlet.ShouldProcess("Railway $Environment/$service", "Apply STEP 16 runtime controls: $summary")) {
