@@ -107,16 +107,20 @@ try {
     $ready = Invoke-TmRequest -Client $client -Method ([System.Net.Http.HttpMethod]::Get) -Uri "$base/readyz" -Token $token
     Require-Status $ready 200 $stage
     $readyJson = $ready.Body | ConvertFrom-Json
-    if ([int]$readyJson.data.schemaVersion -ne 10) { throw 'Production schema is not 10.' }
+    if ([string]$readyJson.data.status -ne 'ready') { throw 'Production readiness status is not ready.' }
 
     $stage = 'operations-status'
     $ops = Invoke-TmRequest -Client $client -Method ([System.Net.Http.HttpMethod]::Get) -Uri "$base/api/v1/ops/status" -Token $token
     Require-Status $ops 200 $stage
     $opsJson = $ops.Body | ConvertFrom-Json
-    if ([bool]$opsJson.data.controls.taskReportEnabled -ne $true -or
+    if ([int]$opsJson.data.database.schemaVersion -ne 10 -or
+        [string]$opsJson.data.remoteBackup.status -ne 'succeeded' -or
+        [int]$opsJson.data.remoteBackup.schemaVersion -ne 10 -or
+        [string]$opsJson.data.remoteBackup.integrityCheck -ne 'ok' -or
+        [bool]$opsJson.data.controls.taskReportEnabled -ne $true -or
         [bool]$opsJson.data.controls.aiEnabled -ne $true -or
         [string]$opsJson.data.controls.incidentMode -ne 'normal') {
-        throw 'STEP 17 production controls are not enabled in normal mode.'
+        throw 'STEP 17 production schema, backup, or controls are not ready.'
     }
 
     $stage = 'ai-contract'
@@ -236,5 +240,6 @@ finally {
     $token = $null
     if ($null -ne $client) { $client.Dispose() }
     if ($null -ne $handler) { $handler.Dispose() }
-    if ($null -ne $credential) { $credential.Password = $null }
+    $credential = $null
+    $vault = $null
 }
