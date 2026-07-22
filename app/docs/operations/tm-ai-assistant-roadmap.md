@@ -638,7 +638,7 @@ Codex TODO:
 
 ## STEP 15 — 모바일·원격 클라이언트와 기기 인증
 
-상태: 구현 및 로컬 검증 진행 중 — 사용자 기본안 전체 승인 완료
+상태: 완료 — 2026-07-22 production 배포·검증 완료
 
 Codex 권장 기본안:
 
@@ -663,7 +663,15 @@ Codex TODO:
 - [x] app shell만 캐시하고 safe GET 외 자동 재시도·중복 mutation 제출을 금지
 - [x] 작은 화면용 AI 비서·Task·Note·승인·현재 기기 UI와 Windows 기기 관리 UI 구현
 - [x] 로컬 통합 테스트에서 페어링·scope·CSRF·즉시 폐기·복원 후 비부활 검증
-- [ ] 로컬 PC가 꺼진 상태에서 cloud 접근 검증
+- [x] 로컬 `tm-server` 없이 Railway HTTPS origin에서 PWA·기기 인증·폐기·backup 검증
+
+완료 기록:
+
+- GitHub Actions run `29893865763`: frontend, 전체 Rust workspace, Clippy, Windows `tm.exe`·`tm-cli.exe` build 통과
+- Railway production deployment `07d84e55-e0ce-41f1-b2fc-516238a527bf`: health check 통과, schema 9 적용
+- production 검증: PWA shell·CSP·no-CORS, 6자리 페어링, Secure cookie, device scope, CSRF, 개별 폐기 직후 401 통과
+- schema 9 원격 backup `succeeded`, integrity check `ok`; 검증 중 OpenAI 호출과 Task·Note business mutation 없음
+- 390×844 mobile viewport에서 가로 overflow와 browser console error 없음
 
 완료 게이트:
 

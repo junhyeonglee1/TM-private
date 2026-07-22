@@ -72,3 +72,16 @@
 - frontend typecheck·lint
 
 production 검증은 `scripts/verify-step15-production.ps1`로 수행한다. 스크립트는 Credential Locker에서 관리자 token을 읽고 임시 기기 하나를 등록한 뒤 scope를 확인하고 즉시 폐기한다. OpenAI와 Task·Note business mutation은 호출하지 않는다. 성공·실패와 관계없이 생성된 임시 활성 기기의 폐기를 시도하며 결과 파일에는 secret을 저장하지 않는다.
+
+## 2026-07-22 production 완료 기록
+
+- PWA: `https://tm-server-production-5573.up.railway.app/mobile/`
+- GitHub Actions run: `29893865763` (`tm.exe`·`tm-cli.exe` SHA-256 검증 포함)
+- Railway deployment: `07d84e55-e0ce-41f1-b2fc-516238a527bf`
+- production schema: 9
+- remote backup: `succeeded`, schema 9, integrity check `ok`
+- temporary verification device: 등록·scope 검사·폐기 완료, 폐기 직후 `401`
+- local `tm-server`: 불필요. production Railway service만으로 PWA 접근 검증
+- AI·business data 영향: OpenAI 호출 없음, Task·Note mutation 없음
+- 시각 검증: 390×844 viewport에서 가로 overflow·console error 없음
+- secret: 검증 파일에 저장하지 않았고 관리자 token은 Credential Locker에서만 읽음
