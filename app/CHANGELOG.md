@@ -6,6 +6,9 @@
 
 ### Added
 
+- schema 11 기반 개인 캘린더와 Windows·모바일 일정 추가·편집·삭제 화면을 추가했다.
+- 개인 일정과 납부일을 일회성, 매월 특정일, 매월 초일, 매월 말일로 반복 등록하고 선택적 종료일·시간·메모를 저장할 수 있다.
+- 매월 31일은 31일이 없는 달을 건너뛰고 매월 말일은 윤년을 포함한 실제 월말로 계산하며, optimistic version과 soft delete로 동시 수정을 보호한다.
 - STEP 17 첫 실제 비서 기능으로 오늘의 Task 우선순위·이유·다음 행동을 제안하는 read-only Structured Outputs API와 Windows·모바일 UI를 추가했다.
 - Task 최소 fact 최대 20개, 허위 반환 ID 재검증, 하루 4회, 요청당 USD 0.05·800 output token, 자동 재시도 없음과 `TM_TASK_REPORT_ENABLED` 기능 kill switch를 추가했다.
 - schema 10에 Task 리포트 실행 token·비용·latency·실패 기록과 보고서당 1회 append-only `도움 됨/도움 안 됨` 평가를 추가하고 backup restore rewind를 차단했다.

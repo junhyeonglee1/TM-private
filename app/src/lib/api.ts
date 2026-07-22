@@ -2,6 +2,9 @@ import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 
 import type {
   AppSnapshot,
+  CalendarEvent,
+  CalendarMonth,
+  CreateCalendarEventInput,
   CreateChangeRequestInput,
   CreateNoteInput,
   CreateTaskInput,
@@ -14,6 +17,7 @@ import type {
   StartSessionInput,
   UpdateTaskInput,
   UpdateChangeRequestInput,
+  UpdateCalendarEventInput,
 } from "../types";
 import { createMemoryTransport } from "./mock-transport";
 
@@ -79,6 +83,10 @@ export interface CostStatus {
 export interface TmApi {
   getSnapshot(): Promise<AppSnapshot>;
   getCostStatus(): Promise<CostStatus>;
+  getCalendarMonth(month: string): Promise<CalendarMonth>;
+  createCalendarEvent(input: CreateCalendarEventInput): Promise<CalendarEvent>;
+  updateCalendarEvent(eventId: string, input: UpdateCalendarEventInput): Promise<CalendarEvent>;
+  deleteCalendarEvent(eventId: string, expectedVersion: number): Promise<void>;
   createProject(name: string, description?: string): Promise<string>;
   createTask(input: CreateTaskInput): Promise<void>;
   updateTask(input: UpdateTaskInput): Promise<void>;
@@ -155,6 +163,10 @@ const run = async (
 export const createApi = (transport: CommandTransport): TmApi => ({
   getSnapshot: () => transport.invoke<AppSnapshot>("get_app_snapshot"),
   getCostStatus: () => transport.invoke<CostStatus>("get_cost_status"),
+  getCalendarMonth: (month) => transport.invoke<CalendarMonth>("get_calendar_month", { month }),
+  createCalendarEvent: (input) => transport.invoke<CalendarEvent>("create_calendar_event", { input }),
+  updateCalendarEvent: (eventId, input) => transport.invoke<CalendarEvent>("update_calendar_event", { eventId, input }),
+  deleteCalendarEvent: (eventId, expectedVersion) => run(transport, "delete_calendar_event", { eventId, expectedVersion }),
   createProject: (name, description = "") =>
     transport.invoke<string>("create_project", { name, description }),
   createTask: (input) => run(transport, "create_task", { input }),

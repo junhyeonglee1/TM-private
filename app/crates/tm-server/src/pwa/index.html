@@ -51,6 +51,7 @@
       <section id="app-view" class="hidden">
         <nav class="tabs" aria-label="모바일 메뉴">
           <button data-tab="assistant" aria-current="page">비서</button>
+          <button data-tab="calendar">캘린더</button>
           <button data-tab="tasks">할 일</button>
           <button data-tab="notes">노트</button>
           <button data-tab="approvals">승인</button>
@@ -76,6 +77,57 @@
             <textarea id="assistant-message" maxlength="8192" rows="4" placeholder="예: 오늘 해야 할 일을 요약해줘" required></textarea>
             <button class="primary" type="submit">AI 비서에게 전송</button>
           </form>
+        </section>
+
+        <section id="tab-calendar" class="tab-panel panel hidden">
+          <div class="section-heading calendar-heading">
+            <div><p class="eyebrow">개인 일정 · 서울 시간</p><h1>캘린더</h1></div>
+            <button id="calendar-add" class="secondary" type="button">일정 추가</button>
+          </div>
+          <div class="calendar-toolbar" aria-label="월 이동">
+            <button id="calendar-prev" class="secondary calendar-nav" aria-label="이전 달" type="button">‹</button>
+            <strong id="calendar-month-label"></strong>
+            <button id="calendar-next" class="secondary calendar-nav" aria-label="다음 달" type="button">›</button>
+            <button id="calendar-today" class="secondary calendar-today" type="button">오늘</button>
+          </div>
+          <div class="calendar-weekdays" aria-hidden="true"><span>월</span><span>화</span><span>수</span><span>목</span><span>금</span><span>토</span><span>일</span></div>
+          <div id="calendar-grid" class="calendar-grid" aria-label="월간 캘린더"></div>
+          <section class="calendar-agenda" aria-labelledby="calendar-selected-label">
+            <div class="calendar-subheading"><h2 id="calendar-selected-label"></h2><button id="calendar-add-selected" class="secondary" type="button">이 날짜에 추가</button></div>
+            <div id="calendar-agenda-list" class="calendar-agenda-list"></div>
+          </section>
+          <form id="calendar-form" class="calendar-form hidden">
+            <div class="calendar-subheading"><h2 id="calendar-form-title">일정 추가</h2><button id="calendar-form-close" class="text-button calendar-close" type="button">닫기</button></div>
+            <label for="calendar-title">제목</label>
+            <input id="calendar-title" maxlength="200" required>
+            <label for="calendar-kind">종류</label>
+            <select id="calendar-kind"><option value="personal">개인 일정</option><option value="payment">납부일</option></select>
+            <label for="calendar-start-date">날짜·시작일</label>
+            <input id="calendar-start-date" type="date" required>
+            <label for="calendar-time">시간 (선택)</label>
+            <input id="calendar-time" type="time">
+            <label for="calendar-recurrence">반복</label>
+            <select id="calendar-recurrence"><option value="none">반복 없음</option><option value="monthly_day">매월 특정일</option><option value="monthly_first_day">매월 초일</option><option value="monthly_last_day">매월 말일</option></select>
+            <div id="calendar-day-field" class="hidden">
+              <label for="calendar-day-of-month">매월 날짜</label>
+              <input id="calendar-day-of-month" type="number" min="1" max="31">
+              <small>31일이 없는 달에는 건너뜁니다. 매월 실제 마지막 날은 ‘말일’을 선택하세요.</small>
+            </div>
+            <div id="calendar-end-field" class="hidden">
+              <label for="calendar-ends-on">반복 종료일 (선택)</label>
+              <input id="calendar-ends-on" type="date">
+            </div>
+            <label for="calendar-description">메모 (선택)</label>
+            <textarea id="calendar-description" maxlength="4000" rows="3"></textarea>
+            <div class="calendar-form-actions">
+              <button id="calendar-delete" class="danger hidden" type="button">일정 삭제</button>
+              <button id="calendar-save" class="primary" type="submit">일정 추가</button>
+            </div>
+          </form>
+          <section class="calendar-recurring" aria-labelledby="calendar-recurring-title">
+            <h2 id="calendar-recurring-title">반복 일정</h2>
+            <div id="calendar-recurring-list" class="card-list"></div>
+          </section>
         </section>
 
         <section id="tab-tasks" class="tab-panel panel hidden">

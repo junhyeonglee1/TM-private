@@ -32,6 +32,8 @@ STEP 16은 schema 변경 없이 `normal`·`read-only`·`lockdown` 사고 모드�
 
 STEP 17은 schema 10의 첫 전용 비서 기능으로 `오늘의 Task AI 리포트`를 추가한다. 최대 20개의 최소 Task fact만 Structured Outputs에 전달하고 반환 ID를 서버가 후보 allowlist와 다시 대조한다. 사용자 수동 호출, 하루 4회, 호출당 USD 0.05, 800 output token, 기능별 kill switch를 적용하며 Windows·모바일에서 결과·비용·latency와 append-only 품질 평가를 공유한다.
 
+개인 캘린더는 schema 11의 `calendar_events`를 Windows와 모바일이 함께 사용한다. 일회성, 매월 특정일, 매월 초일, 매월 말일 규칙은 원본 일정 한 건으로 저장하고 조회하는 달에 occurrence를 계산한다. 변경·삭제는 version precondition과 soft delete를 사용하며, 이 기능 자체는 OpenAI를 호출하거나 결제를 실행하지 않는다.
+
 상단 비용 상태는 별도 OpenAI Admin key 없이 TM의 월간 AI 비용 원장을 사용하고, Railway workspace billing usage는 10분 캐시된 공식 GraphQL 조회로 보완한다. Windows와 모바일에는 비용/한도 두 값만 표시하며 외부 provider 장애가 핵심 기능으로 전파되지 않는다.
 
 - [수동 승인 개선 요청 흐름](change-request-workflow.md)
@@ -56,6 +58,7 @@ STEP 17은 schema 10의 첫 전용 비서 기능으로 `오늘의 Task AI 리포
 - [STEP 17 오늘의 Task AI 리포트](today-task-report.md)
 - [STEP 17 Task 리포트 운영 절차](../operations/step17-task-report.md)
 - [상단 비용 상태 운영 절차](../operations/cost-status.md)
+- [개인 캘린더 운영·사용 절차](../operations/personal-calendar.md)
 - [STEP 5 단일 사용자 인증](../operations/single-user-auth-setup.md)
 
 기본 홈은 `C:\Users\tkfk0\Desktop\codex\TM`이다. 테스트는 프로세스별 임시 `TM_HOME`을 사용한다. 모든 저장 시각은 UTC RFC 3339로 기록하고, 사용자 날짜는 `Asia/Seoul`로 계산한다.

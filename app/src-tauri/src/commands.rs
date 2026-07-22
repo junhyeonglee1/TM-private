@@ -3,20 +3,20 @@ use std::{
     str::FromStr,
 };
 
-use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, SecondsFormat, Utc};
 use chrono_tz::Asia::Seoul;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tauri::State;
 use tm_core::{
-    ChangeRequest, ChangeRequestKind, ChecklistMutationInput,
-    CreateChangeRequestInput as CoreCreateChangeRequestInput, CreateNoteAggregateInput,
-    CreateNoteInput, CreateProjectInput, CreateTaskAggregateInput, CreateTaskInput,
-    CreateWorkLogInput, EndSessionInput, EntityLink, EntityType, LinkTargetType, Note,
-    NoteLinksInput, NoteType, SearchHit, SessionStatus, StartSessionInput, Task, TaskDayEntry,
-    TaskDayStatus, TaskPatch, TaskStatus, TmCore, TrashEntityType,
-    UpdateChangeRequestInput as CoreUpdateChangeRequestInput, UpdateTaskAggregateInput,
-    WorkSession,
+    CalendarEvent, CalendarMonth, ChangeRequest, ChangeRequestKind, ChecklistMutationInput,
+    CreateCalendarEventInput, CreateChangeRequestInput as CoreCreateChangeRequestInput,
+    CreateNoteAggregateInput, CreateNoteInput, CreateProjectInput, CreateTaskAggregateInput,
+    CreateTaskInput, CreateWorkLogInput, EndSessionInput, EntityLink, EntityType, LinkTargetType,
+    Note, NoteLinksInput, NoteType, SearchHit, SessionStatus, StartSessionInput, Task,
+    TaskDayEntry, TaskDayStatus, TaskPatch, TaskStatus, TmCore, TrashEntityType,
+    UpdateCalendarEventInput, UpdateChangeRequestInput as CoreUpdateChangeRequestInput,
+    UpdateTaskAggregateInput, WorkSession,
 };
 
 use crate::AppState;
@@ -222,6 +222,53 @@ pub(crate) fn create_project(
             color: None,
         })
         .map(|project| project.id)
+        .map_err(command_error)
+}
+
+#[tauri::command]
+pub(crate) fn get_calendar_month(
+    month: String,
+    state: State<'_, AppState>,
+) -> CommandResult<CalendarMonth> {
+    let month = parse_month(&month)?;
+    state
+        .core
+        .calendar_month(month.year(), month.month())
+        .map_err(command_error)
+}
+
+#[tauri::command]
+pub(crate) fn create_calendar_event(
+    input: CreateCalendarEventInput,
+    state: State<'_, AppState>,
+) -> CommandResult<CalendarEvent> {
+    state
+        .core
+        .create_calendar_event(input)
+        .map_err(command_error)
+}
+
+#[tauri::command]
+pub(crate) fn update_calendar_event(
+    event_id: String,
+    input: UpdateCalendarEventInput,
+    state: State<'_, AppState>,
+) -> CommandResult<CalendarEvent> {
+    state
+        .core
+        .update_calendar_event(&event_id, input)
+        .map_err(command_error)
+}
+
+#[tauri::command]
+pub(crate) fn delete_calendar_event(
+    event_id: String,
+    expected_version: u64,
+    state: State<'_, AppState>,
+) -> CommandResult<()> {
+    state
+        .core
+        .delete_calendar_event(&event_id, expected_version)
         .map_err(command_error)
 }
 
@@ -620,6 +667,13 @@ fn parse_trash_type(value: &str) -> CommandResult<TrashEntityType> {
         "session" => Ok(TrashEntityType::Session),
         other => Err(format!("알 수 없는 휴지통 유형입니다: {other}")),
     }
+}
+
+fn parse_month(value: &str) -> CommandResult<NaiveDate> {
+    if value.len() != 7 {
+        return Err(format!("월 형식은 YYYY-MM이어야 합니다: {value}"));
+    }
+    NaiveDate::parse_from_str(&format!("{value}-01"), "%Y-%m-%d").map_err(command_error)
 }
 
 #[tauri::command]

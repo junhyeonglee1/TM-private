@@ -4,18 +4,19 @@ use std::{
     str::FromStr,
 };
 
-use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, SecondsFormat, Utc};
 use chrono_tz::Asia::Seoul;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
-    ChangeRequest, ChangeRequestKind, ChecklistMutationInput, CreateChangeRequestInput,
-    CreateNoteAggregateInput, CreateNoteInput, CreateProjectInput, CreateTaskAggregateInput,
-    CreateTaskInput, CreateWorkLogInput, EndSessionInput, EntityLink, EntityType, Error,
-    LinkTargetType, Note, NoteLinksInput, NoteType, Result, SearchHit, SessionStatus,
-    StartSessionInput, Task, TaskDayEntry, TaskDayStatus, TaskPatch, TaskStatus, TmCore,
-    TrashEntityType, UpdateChangeRequestInput, UpdateTaskAggregateInput, WorkSession,
+    ChangeRequest, ChangeRequestKind, ChecklistMutationInput, CreateCalendarEventInput,
+    CreateChangeRequestInput, CreateNoteAggregateInput, CreateNoteInput, CreateProjectInput,
+    CreateTaskAggregateInput, CreateTaskInput, CreateWorkLogInput, EndSessionInput, EntityLink,
+    EntityType, Error, LinkTargetType, Note, NoteLinksInput, NoteType, Result, SearchHit,
+    SessionStatus, StartSessionInput, Task, TaskDayEntry, TaskDayStatus, TaskPatch, TaskStatus,
+    TmCore, TrashEntityType, UpdateCalendarEventInput, UpdateChangeRequestInput,
+    UpdateTaskAggregateInput, WorkSession,
 };
 
 const DESKTOP_ACTOR: &str = "desktop-user";
@@ -25,6 +26,10 @@ const DESKTOP_ACTOR: &str = "desktop-user";
 #[serde(rename_all = "snake_case")]
 pub enum DesktopCommand {
     GetAppSnapshot,
+    GetCalendarMonth,
+    CreateCalendarEvent,
+    UpdateCalendarEvent,
+    DeleteCalendarEvent,
     CreateProject,
     CreateTask,
     UpdateTask,
@@ -51,12 +56,19 @@ pub enum DesktopCommand {
 
 impl DesktopCommand {
     pub const fn is_read_only(self) -> bool {
-        matches!(self, Self::GetAppSnapshot | Self::Search)
+        matches!(
+            self,
+            Self::GetAppSnapshot | Self::GetCalendarMonth | Self::Search
+        )
     }
 
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::GetAppSnapshot => "get_app_snapshot",
+            Self::GetCalendarMonth => "get_calendar_month",
+            Self::CreateCalendarEvent => "create_calendar_event",
+            Self::UpdateCalendarEvent => "update_calendar_event",
+            Self::DeleteCalendarEvent => "delete_calendar_event",
             Self::CreateProject => "create_project",
             Self::CreateTask => "create_task",
             Self::UpdateTask => "update_task",
@@ -274,6 +286,43 @@ pub fn execute_desktop_command(
 ) -> Result<Value> {
     match command {
         DesktopCommand::GetAppSnapshot => build_snapshot(core),
+        DesktopCommand::GetCalendarMonth => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Args {
+                month: String,
+            }
+            let args: Args = parse_args(args)?;
+            let month = parse_month(&args.month)?;
+            serde_json::to_value(core.calendar_month(month.year(), month.month())?)
+                .map_err(Into::into)
+        }
+        DesktopCommand::CreateCalendarEvent => {
+            let args: InputArg<CreateCalendarEventInput> = parse_args(args)?;
+            serde_json::to_value(core.create_calendar_event(args.input)?).map_err(Into::into)
+        }
+        DesktopCommand::UpdateCalendarEvent => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase", deny_unknown_fields)]
+            struct Args {
+                event_id: String,
+                input: UpdateCalendarEventInput,
+            }
+            let args: Args = parse_args(args)?;
+            serde_json::to_value(core.update_calendar_event(&args.event_id, args.input)?)
+                .map_err(Into::into)
+        }
+        DesktopCommand::DeleteCalendarEvent => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase", deny_unknown_fields)]
+            struct Args {
+                event_id: String,
+                expected_version: u64,
+            }
+            let args: Args = parse_args(args)?;
+            core.delete_calendar_event(&args.event_id, args.expected_version)?;
+            Ok(Value::Null)
+        }
         DesktopCommand::CreateProject => {
             #[derive(Deserialize)]
             #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -650,6 +699,16 @@ fn execute_change_request_transition(
         }
     };
     Ok(Value::Null)
+}
+
+fn parse_month(value: &str) -> Result<NaiveDate> {
+    if value.len() != 7 {
+        return Err(Error::InvalidInput(format!(
+            "calendar month must use YYYY-MM: {value}"
+        )));
+    }
+    NaiveDate::parse_from_str(&format!("{value}-01"), "%Y-%m-%d")
+        .map_err(|_| Error::InvalidInput(format!("invalid calendar month: {value}")))
 }
 
 fn parse_trash_type(value: &str) -> Result<TrashEntityType> {
@@ -1099,6 +1158,10 @@ mod tests {
     fn desktop_command_allowlist_round_trips() -> crate::Result<()> {
         let commands = [
             DesktopCommand::GetAppSnapshot,
+            DesktopCommand::GetCalendarMonth,
+            DesktopCommand::CreateCalendarEvent,
+            DesktopCommand::UpdateCalendarEvent,
+            DesktopCommand::DeleteCalendarEvent,
             DesktopCommand::CreateProject,
             DesktopCommand::CreateTask,
             DesktopCommand::UpdateTask,

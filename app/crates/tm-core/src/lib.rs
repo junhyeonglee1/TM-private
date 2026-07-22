@@ -3,6 +3,7 @@
 mod ai_budget;
 mod assistant_action;
 mod backup;
+mod calendar;
 mod change_request;
 mod core;
 mod database;
@@ -21,6 +22,7 @@ mod task_report;
 
 pub use assistant_action::*;
 pub use backup::BackupArtifact;
+pub use calendar::*;
 pub use core::TmCore;
 pub use desktop_api::{DesktopCommand, execute_desktop_command};
 pub use device_auth::*;

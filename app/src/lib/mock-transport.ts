@@ -2,8 +2,11 @@ import type { CommandTransport, TaskReportResult } from "./api";
 import type {
   AppSnapshot,
   BackupInfo,
+  CalendarEvent,
+  CalendarMonth,
   ChangeRequest,
   CreateChangeRequestInput,
+  CreateCalendarEventInput,
   CreateNoteInput,
   CreateTaskInput,
   CreateWorkLogInput,
@@ -19,6 +22,7 @@ import type {
   TaskDayEntry,
   TrashItem,
   UpdateTaskInput,
+  UpdateCalendarEventInput,
   UpdateChangeRequestInput,
   WorkLog,
   WorkSession,
@@ -496,9 +500,46 @@ const buildSample = (): AppSnapshot => {
 
 const textValue = (value: unknown): string => (typeof value === "string" ? value : "");
 
+const sampleCalendarEvents = (today: string): CalendarEvent[] => {
+  const timestamp = now();
+  return [
+    {
+      id: "calendar-rent",
+      title: "월세 납부",
+      description: "매월 마지막 날 확인",
+      kind: "payment",
+      startDate: `${today.slice(0, 7)}-01`,
+      eventTime: null,
+      recurrence: "monthly_last_day",
+      dayOfMonth: null,
+      endsOn: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      deletedAt: null,
+      version: 1,
+    },
+    {
+      id: "calendar-insurance",
+      title: "보험료 납부",
+      description: "자동이체 잔액 확인",
+      kind: "payment",
+      startDate: `${today.slice(0, 7)}-01`,
+      eventTime: "09:00:00",
+      recurrence: "monthly_day",
+      dayOfMonth: 10,
+      endsOn: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      deletedAt: null,
+      version: 1,
+    },
+  ];
+};
+
 export class MemoryTransport implements CommandTransport {
   private snapshot = buildSample();
   private taskReport: TaskReportResult | null = null;
+  private calendarEvents = sampleCalendarEvents(this.snapshot.today);
 
   async invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
     const result = this.handle(command, args);
@@ -526,6 +567,17 @@ export class MemoryTransport implements CommandTransport {
             stale: false,
           },
         };
+      case "get_calendar_month":
+        return this.getCalendarMonth(textValue(args.month));
+      case "create_calendar_event":
+        return this.createCalendarEvent(args.input as CreateCalendarEventInput);
+      case "update_calendar_event":
+        return this.updateCalendarEvent(
+          textValue(args.eventId),
+          args.input as UpdateCalendarEventInput,
+        );
+      case "delete_calendar_event":
+        return this.deleteCalendarEvent(textValue(args.eventId), Number(args.expectedVersion));
       case "create_project":
         return this.createProject(textValue(args.name), textValue(args.description));
       case "create_task":
@@ -646,6 +698,102 @@ export class MemoryTransport implements CommandTransport {
       limits: { dailyCalls: 4, maximumCostMicrousd: 50_000, maximumOutputTokens: 800 },
     };
     return this.taskReport;
+  }
+
+  private getCalendarMonth(month: string): CalendarMonth {
+    if (!/^\d{4}-\d{2}$/.test(month)) throw new Error("월 형식이 올바르지 않습니다.");
+    const [year, monthNumber] = month.split("-").map(Number);
+    if (monthNumber < 1 || monthNumber > 12) throw new Error("월 형식이 올바르지 않습니다.");
+    const lastDay = new Date(Date.UTC(year, monthNumber, 0)).getUTCDate();
+    const monthStart = `${month}-01`;
+    const monthEnd = `${month}-${String(lastDay).padStart(2, "0")}`;
+    const occurrences = this.calendarEvents.flatMap((event) => {
+      if (event.deletedAt) return [];
+      let day: number | null = null;
+      if (event.recurrence === "none") {
+        if (!event.startDate.startsWith(`${month}-`)) return [];
+        day = Number(event.startDate.slice(8, 10));
+      } else if (event.recurrence === "monthly_first_day") day = 1;
+      else if (event.recurrence === "monthly_last_day") day = lastDay;
+      else if (event.dayOfMonth && event.dayOfMonth <= lastDay) day = event.dayOfMonth;
+      if (day === null) return [];
+      const date = `${month}-${String(day).padStart(2, "0")}`;
+      if (date < event.startDate || (event.endsOn && date > event.endsOn)) return [];
+      return [{
+        occurrenceKey: `${event.id}:${date}`,
+        eventId: event.id,
+        title: event.title,
+        description: event.description,
+        kind: event.kind,
+        date,
+        eventTime: event.eventTime,
+        recurrence: event.recurrence,
+      }];
+    }).sort((left, right) => left.date.localeCompare(right.date)
+      || (left.eventTime ?? "").localeCompare(right.eventTime ?? "")
+      || left.title.localeCompare(right.title, "ko-KR"));
+    return {
+      month,
+      monthStart,
+      monthEnd,
+      events: this.calendarEvents.filter((event) => !event.deletedAt),
+      occurrences,
+    };
+  }
+
+  private createCalendarEvent(input: CreateCalendarEventInput): CalendarEvent {
+    this.validateCalendarInput(input);
+    const timestamp = now();
+    const event: CalendarEvent = {
+      id: id("calendar"),
+      ...input,
+      eventTime: input.eventTime ? `${input.eventTime.slice(0, 5)}:00` : null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      deletedAt: null,
+      version: 1,
+    };
+    this.calendarEvents.push(event);
+    return event;
+  }
+
+  private updateCalendarEvent(
+    eventId: string,
+    input: UpdateCalendarEventInput,
+  ): CalendarEvent {
+    const event = this.calendarEvents.find((item) => item.id === eventId && !item.deletedAt);
+    if (!event) throw new Error("일정을 찾지 못했습니다.");
+    if (event.version !== input.expectedVersion) throw new Error("일정이 먼저 변경되었습니다.");
+    this.validateCalendarInput(input);
+    Object.assign(event, input, {
+      eventTime: input.eventTime ? `${input.eventTime.slice(0, 5)}:00` : null,
+      updatedAt: now(),
+      version: event.version + 1,
+    });
+    return event;
+  }
+
+  private deleteCalendarEvent(eventId: string, expectedVersion: number): null {
+    const event = this.calendarEvents.find((item) => item.id === eventId && !item.deletedAt);
+    if (!event) throw new Error("일정을 찾지 못했습니다.");
+    if (event.version !== expectedVersion) throw new Error("일정이 먼저 변경되었습니다.");
+    event.deletedAt = now();
+    event.updatedAt = event.deletedAt;
+    event.version += 1;
+    return null;
+  }
+
+  private validateCalendarInput(input: CreateCalendarEventInput): void {
+    if (!input.title.trim()) throw new Error("일정 제목을 입력하세요.");
+    if (input.recurrence === "monthly_day" && (!input.dayOfMonth || input.dayOfMonth > 31)) {
+      throw new Error("매월 반복 날짜는 1일부터 31일까지 입력하세요.");
+    }
+    if (input.recurrence !== "monthly_day" && input.dayOfMonth !== null) {
+      throw new Error("특정일 반복에서만 날짜를 지정할 수 있습니다.");
+    }
+    if (input.recurrence === "none" && input.endsOn !== null) {
+      throw new Error("한 번 일정에는 반복 종료일을 지정할 수 없습니다.");
+    }
   }
 
   private createProject(name: string, description: string): string {

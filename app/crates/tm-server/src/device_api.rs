@@ -125,6 +125,15 @@ pub(super) fn device_route_allowed(method: &Method, path: &str) -> bool {
     if path.starts_with("/api/v1/assistant/memories") {
         return method == Method::GET;
     }
+    if matches!(
+        path,
+        "/api/v1/desktop/commands/get_calendar_month"
+            | "/api/v1/desktop/commands/create_calendar_event"
+            | "/api/v1/desktop/commands/update_calendar_event"
+            | "/api/v1/desktop/commands/delete_calendar_event"
+    ) {
+        return method == Method::POST;
+    }
     match path {
         "/api/v1/projects" | "/api/v1/tags" | "/api/v1/sessions" | "/api/v1/worklogs" => {
             method == Method::GET
@@ -588,5 +597,21 @@ mod tests {
     fn registered_devices_can_read_cost_status_but_cannot_write_it() {
         assert!(device_route_allowed(&Method::GET, "/api/v1/costs/status"));
         assert!(!device_route_allowed(&Method::POST, "/api/v1/costs/status"));
+    }
+
+    #[test]
+    fn registered_devices_can_only_use_calendar_desktop_commands() {
+        assert!(device_route_allowed(
+            &Method::POST,
+            "/api/v1/desktop/commands/get_calendar_month"
+        ));
+        assert!(device_route_allowed(
+            &Method::POST,
+            "/api/v1/desktop/commands/create_calendar_event"
+        ));
+        assert!(!device_route_allowed(
+            &Method::POST,
+            "/api/v1/desktop/commands/create_task"
+        ));
     }
 }

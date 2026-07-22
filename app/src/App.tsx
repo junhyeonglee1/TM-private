@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { DataPage, TrashPage } from "./components/DataPages";
 import { ChangeRequestsPage } from "./components/ChangeRequestsPage";
+import { CalendarPage } from "./components/CalendarPage";
 import { Icon, type IconName } from "./components/Icon";
 import { NotesPage, SearchPage, WorkLogsPage } from "./components/KnowledgePages";
 import { SessionPage } from "./components/SessionPage";
@@ -32,6 +33,7 @@ import type {
 type PageId =
   | "inbox"
   | "today"
+  | "calendar"
   | "projects"
   | "history"
   | "sessions"
@@ -151,8 +153,8 @@ export function App({ api = defaultApi }: AppProps) {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
-  const notify = (message: string, type: "success" | "error" = "success") =>
-    setToast({ message, type });
+  const notify = useCallback((message: string, type: "success" | "error" = "success") =>
+    setToast({ message, type }), []);
 
   const mutate = useCallback(
     async (action: () => Promise<void>, successMessage: string) => {
@@ -166,7 +168,7 @@ export function App({ api = defaultApi }: AppProps) {
         return false;
       }
     },
-    [loadSnapshot],
+    [loadSnapshot, notify],
   );
 
   const mutateVoid = useCallback(
@@ -336,6 +338,7 @@ export function App({ api = defaultApi }: AppProps) {
       items: [
         { id: "inbox", label: "Inbox", icon: "inbox" },
         { id: "today", label: "오늘", icon: "today", count: snapshot.todayView.planned.length + snapshot.todayView.inProgress.length },
+        { id: "calendar", label: "캘린더", icon: "calendar" },
         { id: "projects", label: "프로젝트", icon: "projects" },
         { id: "history", label: "히스토리", icon: "history" },
       ],
@@ -366,6 +369,8 @@ export function App({ api = defaultApi }: AppProps) {
         return <InboxPage />;
       case "today":
         return <TodayPage onGenerateReport={generateTaskReport} onOpen={(task) => setSelectedTaskId(task.id)} onRateReport={rateTaskReport} onResolve={resolveDayEntry} report={taskReport} reportLoading={taskReportLoading} tasks={snapshot.tasks} today={snapshot.today} view={snapshot.todayView} />;
+      case "calendar":
+        return <CalendarPage onCreate={api.createCalendarEvent} onDelete={api.deleteCalendarEvent} onLoad={api.getCalendarMonth} onNotify={notify} onUpdate={api.updateCalendarEvent} today={snapshot.today} />;
       case "projects":
         return <ProjectsPage onCreateProject={createProject} onCreateTask={createTask} onOpen={(task) => setSelectedTaskId(task.id)} onPlan={(task) => void planTask(task)} projects={snapshot.projects} tasks={snapshot.tasks} />;
       case "history":

@@ -68,6 +68,35 @@ describe("TM 데스크톱 UI", () => {
     expect(screen.queryByRole("button", { name: "정리 완료" })).not.toBeInTheDocument();
   });
 
+  it("개인 캘린더에 매월 말일 납부 일정을 추가한다", async () => {
+    const user = userEvent.setup();
+    const { api } = renderApp();
+    await screen.findByRole("heading", { name: "오늘", level: 1 });
+    const snapshot = await api.getSnapshot();
+
+    await user.click(screen.getAllByRole("button", { name: "캘린더" })[0]);
+    expect(await screen.findByRole("heading", { name: "캘린더", level: 1 })).toBeInTheDocument();
+    expect((await screen.findAllByText("보험료 납부")).length).toBeGreaterThan(0);
+    await user.click(screen.getByRole("button", { name: "일정 추가" }));
+
+    const formHeading = screen.getByRole("heading", { name: "일정 추가", level: 2 });
+    const formPanel = formHeading.closest("section");
+    expect(formPanel).not.toBeNull();
+    const form = within(formPanel as HTMLElement);
+    await user.type(form.getByLabelText("제목"), "관리비 납부");
+    await user.selectOptions(form.getByLabelText("종류"), "payment");
+    await user.selectOptions(form.getByLabelText("반복"), "monthly_last_day");
+    await user.click(form.getByRole("button", { name: "일정 추가" }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent("일정을 추가했습니다");
+    expect((await screen.findAllByText("관리비 납부")).length).toBeGreaterThan(0);
+    const month = await api.getCalendarMonth(snapshot.today.slice(0, 7));
+    const created = month.events.find((event) => event.title === "관리비 납부");
+    expect(created).toMatchObject({ kind: "payment", recurrence: "monthly_last_day" });
+    expect(month.occurrences.find((occurrence) => occurrence.eventId === created?.id)?.date)
+      .toBe(month.monthEnd);
+  });
+
   it("새 프로젝트를 자동 선택하고 compact 입력으로 todo Task를 추가한다", async () => {
     const user = userEvent.setup();
     const { api } = renderApp();

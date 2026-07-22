@@ -1,7 +1,16 @@
 "use strict";
 
 const pairingKey = "tm.mobile.pairing.v1";
-const state = { device: null, activeTab: "assistant", taskReport: null, taskReportTasks: new Map() };
+const state = {
+  device: null,
+  activeTab: "assistant",
+  taskReport: null,
+  taskReportTasks: new Map(),
+  calendar: null,
+  calendarMonth: null,
+  selectedCalendarDate: null,
+  editingCalendarEvent: null
+};
 const costRefreshIntervalMs = 5 * 60 * 1000;
 const defaultApiHardLimitMicrousd = 20_000_000;
 const defaultCloudHardLimitMicrousd = 30_000_000;
@@ -58,6 +67,34 @@ async function api(path, options = {}) {
   }
   if (!payload || !("data" in payload)) throw new Error("서버 응답 형식이 올바르지 않습니다.");
   return payload.data;
+}
+
+async function calendarCommand(command, args = {}, mutating = false) {
+  const headers = mutating ? { "x-tm-confirm-desktop-command": command } : {};
+  return api(`/api/v1/desktop/commands/${command}`, {
+    method: "POST",
+    headers,
+    body: { args }
+  });
+}
+
+function todaySeoul() {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Seoul", year: "numeric", month: "2-digit", day: "2-digit"
+  }).format(new Date());
+}
+
+function shiftMonth(month, amount) {
+  const [year, monthNumber] = month.split("-").map(Number);
+  const shifted = new Date(Date.UTC(year, monthNumber - 1 + amount, 1));
+  return `${shifted.getUTCFullYear()}-${String(shifted.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+
+function recurrenceText(event) {
+  if (event.recurrence === "monthly_day") return `매월 ${event.dayOfMonth}일`;
+  if (event.recurrence === "monthly_first_day") return "매월 초일";
+  if (event.recurrence === "monthly_last_day") return "매월 말일";
+  return "한 번";
 }
 
 function toast(message) {
@@ -246,6 +283,7 @@ function selectTab(tab) {
   });
   document.querySelectorAll(".tab-panel").forEach((panel) => panel.classList.add("hidden"));
   byId(`tab-${tab}`).classList.remove("hidden");
+  if (tab === "calendar") void loadCalendar();
   if (tab === "tasks") void loadTasks();
   if (tab === "notes") void loadNotes();
   if (tab === "approvals") void loadApprovals();
@@ -390,6 +428,213 @@ function appendAssistant(message, role) {
   log.append(text("article", message, `assistant-message assistant-message--${role}`));
   log.scrollTop = log.scrollHeight;
 }
+
+async function loadCalendar(month = state.calendarMonth || todaySeoul().slice(0, 7)) {
+  state.calendarMonth = month;
+  if (!state.selectedCalendarDate || !state.selectedCalendarDate.startsWith(`${month}-`)) {
+    state.selectedCalendarDate = month === todaySeoul().slice(0, 7) ? todaySeoul() : `${month}-01`;
+  }
+  byId("calendar-month-label").textContent = "불러오는 중…";
+  try {
+    state.calendar = await calendarCommand("get_calendar_month", { month });
+    renderCalendar();
+  } catch (error) {
+    byId("calendar-month-label").textContent = month;
+    listError(byId("calendar-agenda-list"), error);
+  }
+}
+
+function renderCalendar() {
+  if (!state.calendar) return;
+  const month = state.calendar.month;
+  const [year, monthNumber] = month.split("-").map(Number);
+  const lastDay = new Date(Date.UTC(year, monthNumber, 0)).getUTCDate();
+  const leading = (new Date(Date.UTC(year, monthNumber - 1, 1)).getUTCDay() + 6) % 7;
+  const totalCells = Math.ceil((leading + lastDay) / 7) * 7;
+  const occurrencesByDate = new Map();
+  state.calendar.occurrences.forEach((occurrence) => {
+    const values = occurrencesByDate.get(occurrence.date) || [];
+    values.push(occurrence);
+    occurrencesByDate.set(occurrence.date, values);
+  });
+
+  byId("calendar-month-label").textContent = `${year}년 ${monthNumber}월`;
+  const grid = byId("calendar-grid");
+  clear(grid);
+  for (let index = 0; index < totalCells; index += 1) {
+    if (index < leading || index >= leading + lastDay) {
+      grid.append(text("span", "", "calendar-day empty-day"));
+      continue;
+    }
+    const day = index - leading + 1;
+    const date = `${month}-${String(day).padStart(2, "0")}`;
+    const occurrences = occurrencesByDate.get(date) || [];
+    const button = text("button", "", `calendar-day${date === todaySeoul() ? " today" : ""}`);
+    button.type = "button";
+    button.setAttribute("aria-label", `${day}일${occurrences.length ? ` 일정 ${occurrences.length}개` : ""}`);
+    button.setAttribute("aria-pressed", String(date === state.selectedCalendarDate));
+    button.append(text("strong", String(day)));
+    const dots = text("span", "", "calendar-dots");
+    occurrences.slice(0, 5).forEach((occurrence) => dots.append(text("i", "", `calendar-dot ${occurrence.kind}`)));
+    button.append(dots);
+    button.addEventListener("click", () => {
+      state.selectedCalendarDate = date;
+      renderCalendar();
+    });
+    grid.append(button);
+  }
+  renderCalendarAgenda();
+  renderRecurringCalendarEvents();
+}
+
+function renderCalendarAgenda() {
+  const date = state.selectedCalendarDate;
+  const [year, month, day] = date.split("-").map(Number);
+  byId("calendar-selected-label").textContent = `${year}년 ${month}월 ${day}일`;
+  const list = byId("calendar-agenda-list");
+  clear(list);
+  const events = new Map(state.calendar.events.map((event) => [event.id, event]));
+  const occurrences = state.calendar.occurrences.filter((occurrence) => occurrence.date === date);
+  if (!occurrences.length) {
+    list.append(text("p", "등록된 일정이 없습니다.", "empty"));
+    return;
+  }
+  occurrences.forEach((occurrence) => {
+    const button = text("button", "", `calendar-agenda-item ${occurrence.kind}`);
+    button.type = "button";
+    const body = text("span", "");
+    body.append(text("strong", occurrence.title));
+    const source = events.get(occurrence.eventId);
+    const time = occurrence.eventTime ? occurrence.eventTime.slice(0, 5) : "하루 종일";
+    body.append(text("small", `${time} · ${recurrenceText(source || occurrence)}`));
+    button.append(body);
+    if (source) button.addEventListener("click", () => openCalendarForm(source));
+    list.append(button);
+  });
+}
+
+function renderRecurringCalendarEvents() {
+  const list = byId("calendar-recurring-list");
+  clear(list);
+  const recurring = state.calendar.events.filter((event) => event.recurrence !== "none");
+  if (!recurring.length) {
+    list.append(text("p", "등록된 반복 일정이 없습니다.", "empty"));
+    return;
+  }
+  recurring.forEach((event) => {
+    const button = text("button", "", "calendar-rule");
+    button.type = "button";
+    button.append(text("strong", event.title));
+    button.append(text("small", `${recurrenceText(event)} · ${event.startDate}부터${event.endsOn ? ` ${event.endsOn}까지` : " 계속"}`));
+    button.addEventListener("click", () => openCalendarForm(event));
+    list.append(button);
+  });
+}
+
+function updateCalendarFormFields() {
+  const recurring = byId("calendar-recurrence").value;
+  show("calendar-day-field", recurring === "monthly_day");
+  show("calendar-end-field", recurring !== "none");
+  byId("calendar-day-of-month").required = recurring === "monthly_day";
+  byId("calendar-ends-on").min = byId("calendar-start-date").value;
+}
+
+function openCalendarForm(calendarEvent = null, date = state.selectedCalendarDate || todaySeoul()) {
+  state.editingCalendarEvent = calendarEvent;
+  const startDate = calendarEvent?.startDate || date;
+  byId("calendar-form-title").textContent = calendarEvent ? "일정 편집" : "일정 추가";
+  byId("calendar-title").value = calendarEvent?.title || "";
+  byId("calendar-kind").value = calendarEvent?.kind || "personal";
+  byId("calendar-start-date").value = startDate;
+  byId("calendar-time").value = calendarEvent?.eventTime?.slice(0, 5) || "";
+  byId("calendar-recurrence").value = calendarEvent?.recurrence || "none";
+  byId("calendar-day-of-month").value = calendarEvent?.dayOfMonth || Number(startDate.slice(8, 10));
+  byId("calendar-ends-on").value = calendarEvent?.endsOn || "";
+  byId("calendar-description").value = calendarEvent?.description || "";
+  byId("calendar-save").textContent = calendarEvent ? "변경 저장" : "일정 추가";
+  show("calendar-delete", Boolean(calendarEvent));
+  show("calendar-form", true);
+  updateCalendarFormFields();
+  byId("calendar-title").focus();
+  byId("calendar-form").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function closeCalendarForm() {
+  state.editingCalendarEvent = null;
+  show("calendar-form", false);
+}
+
+byId("calendar-add").addEventListener("click", () => openCalendarForm());
+byId("calendar-add-selected").addEventListener("click", () => openCalendarForm());
+byId("calendar-form-close").addEventListener("click", closeCalendarForm);
+byId("calendar-prev").addEventListener("click", () => void loadCalendar(shiftMonth(state.calendarMonth || todaySeoul().slice(0, 7), -1)));
+byId("calendar-next").addEventListener("click", () => void loadCalendar(shiftMonth(state.calendarMonth || todaySeoul().slice(0, 7), 1)));
+byId("calendar-today").addEventListener("click", () => {
+  state.selectedCalendarDate = todaySeoul();
+  void loadCalendar(todaySeoul().slice(0, 7));
+});
+byId("calendar-recurrence").addEventListener("change", updateCalendarFormFields);
+byId("calendar-start-date").addEventListener("change", (event) => {
+  const value = event.currentTarget.value;
+  if (value) byId("calendar-day-of-month").value = Number(value.slice(8, 10));
+  updateCalendarFormFields();
+});
+
+byId("calendar-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const recurrence = byId("calendar-recurrence").value;
+  const input = {
+    title: byId("calendar-title").value.trim(),
+    description: byId("calendar-description").value.trim(),
+    kind: byId("calendar-kind").value,
+    startDate: byId("calendar-start-date").value,
+    eventTime: byId("calendar-time").value ? `${byId("calendar-time").value}:00` : null,
+    recurrence,
+    dayOfMonth: recurrence === "monthly_day" ? Number(byId("calendar-day-of-month").value) : null,
+    endsOn: recurrence === "none" || !byId("calendar-ends-on").value ? null : byId("calendar-ends-on").value
+  };
+  const editing = state.editingCalendarEvent;
+  const button = byId("calendar-save");
+  setBusy(button, true, editing ? "변경 저장" : "일정 추가");
+  try {
+    if (editing) {
+      await calendarCommand("update_calendar_event", {
+        eventId: editing.id,
+        input: { ...input, expectedVersion: editing.version }
+      }, true);
+    } else {
+      await calendarCommand("create_calendar_event", { input }, true);
+    }
+    const targetMonth = input.startDate.slice(0, 7);
+    state.selectedCalendarDate = input.startDate;
+    closeCalendarForm();
+    await loadCalendar(targetMonth);
+    toast(editing ? "일정을 변경했습니다." : "일정을 추가했습니다.");
+  } catch (error) {
+    toast(`${error.message} 자동으로 다시 시도하지 않았습니다.`);
+  } finally {
+    setBusy(button, false, editing ? "변경 저장" : "일정 추가");
+  }
+});
+
+byId("calendar-delete").addEventListener("click", async (event) => {
+  const editing = state.editingCalendarEvent;
+  if (!editing || !window.confirm(`‘${editing.title}’ 일정을 삭제할까요?`)) return;
+  const button = event.currentTarget;
+  setBusy(button, true, "일정 삭제");
+  try {
+    await calendarCommand("delete_calendar_event", {
+      eventId: editing.id, expectedVersion: editing.version
+    }, true);
+    closeCalendarForm();
+    await loadCalendar();
+    toast("일정을 삭제했습니다.");
+  } catch (error) {
+    toast(`${error.message} 자동으로 다시 시도하지 않았습니다.`);
+  } finally {
+    setBusy(button, false, "일정 삭제");
+  }
+});
 
 async function loadTasks() {
   const list = byId("tasks-list");

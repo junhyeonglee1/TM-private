@@ -37,10 +37,10 @@ fn manifest_is_deterministic_and_does_not_expose_row_contents() -> Result<()> {
     let first = core.migration_manifest()?;
     let second = core.migration_manifest()?;
     assert!(first.logically_matches(&second));
-    assert_eq!(first.schema_version, 10);
+    assert_eq!(first.schema_version, 11);
     assert_eq!(
         first.migration_versions,
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     );
     assert_eq!(first.logical_sha256.len(), 64);
     assert_eq!(first.tables["tasks"].row_count, 1);

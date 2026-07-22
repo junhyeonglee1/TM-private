@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use crate::{Error, Result, TmHome};
 
-pub(crate) const SCHEMA_VERSION: i64 = 10;
+pub(crate) const SCHEMA_VERSION: i64 = 11;
 const INITIAL_MIGRATION: &str = include_str!("../migrations/0001_initial.sql");
 const CHANGE_REQUESTS_MIGRATION: &str = include_str!("../migrations/0002_change_requests.sql");
 const CHANGE_REQUESTS_STRICT_CAS_MIGRATION: &str =
@@ -27,6 +27,7 @@ const ASSISTANT_MEMORY_MIGRATION: &str = include_str!("../migrations/0007_assist
 const DURABLE_SCHEDULER_MIGRATION: &str = include_str!("../migrations/0008_durable_scheduler.sql");
 const DEVICE_AUTH_MIGRATION: &str = include_str!("../migrations/0009_device_auth.sql");
 const TASK_REPORTS_MIGRATION: &str = include_str!("../migrations/0010_task_reports.sql");
+const CALENDAR_EVENTS_MIGRATION: &str = include_str!("../migrations/0011_calendar_events.sql");
 const BUSY_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone)]
@@ -224,6 +225,18 @@ impl Database {
                 [now_utc()],
             )?;
             transaction.pragma_update(None, "user_version", 10_i64)?;
+            transaction.commit()?;
+        }
+        if current_version < 11 {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(CALENDAR_EVENTS_MIGRATION)?;
+            transaction.execute(
+                "INSERT INTO schema_migrations(version, name, applied_at)
+                 VALUES (11, 'personal-calendar-and-monthly-recurrence', ?1)",
+                [now_utc()],
+            )?;
+            transaction.pragma_update(None, "user_version", 11_i64)?;
             transaction.commit()?;
         }
         Ok(())

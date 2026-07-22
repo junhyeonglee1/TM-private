@@ -27,6 +27,7 @@ pub(crate) const EXPORTED_TABLES: &[&str] = &[
     "session_tasks",
     "worklogs",
     "notes",
+    "calendar_events",
     "task_report_runs",
     "task_report_feedback",
     "entity_links",

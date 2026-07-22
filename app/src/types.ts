@@ -17,6 +17,62 @@ export type ChangeRequestStatus =
   | "completed"
   | "failed"
   | "cancelled";
+export type CalendarEventKind = "personal" | "payment";
+export type CalendarRecurrence =
+  | "none"
+  | "monthly_day"
+  | "monthly_first_day"
+  | "monthly_last_day";
+
+export interface CalendarEvent {
+  id: string;
+  title: string;
+  description: string;
+  kind: CalendarEventKind;
+  startDate: string;
+  eventTime: string | null;
+  recurrence: CalendarRecurrence;
+  dayOfMonth: number | null;
+  endsOn: string | null;
+  createdAt: string;
+  updatedAt: string;
+  deletedAt: string | null;
+  version: number;
+}
+
+export interface CalendarOccurrence {
+  occurrenceKey: string;
+  eventId: string;
+  title: string;
+  description: string;
+  kind: CalendarEventKind;
+  date: string;
+  eventTime: string | null;
+  recurrence: CalendarRecurrence;
+}
+
+export interface CalendarMonth {
+  month: string;
+  monthStart: string;
+  monthEnd: string;
+  events: CalendarEvent[];
+  occurrences: CalendarOccurrence[];
+}
+
+export interface CreateCalendarEventInput {
+  title: string;
+  description: string;
+  kind: CalendarEventKind;
+  startDate: string;
+  eventTime: string | null;
+  recurrence: CalendarRecurrence;
+  dayOfMonth: number | null;
+  endsOn: string | null;
+}
+
+export interface UpdateCalendarEventInput extends CreateCalendarEventInput {
+  expectedVersion: number;
+}
 
 export interface Project {
   id: string;
