@@ -7,10 +7,12 @@ use std::{
 use axum::http::{HeaderMap, header::AUTHORIZATION};
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 pub const AUTH_TOKEN_HASH_ENV: &str = "TM_AUTH_TOKEN_SHA256";
 pub const AUTH_TOKEN_EXPIRY_ENV: &str = "TM_AUTH_TOKEN_EXPIRES_AT";
 pub const TOKEN_PREFIX: &str = "tm_pat_v1_";
+pub(crate) const DEVICE_TOKEN_PREFIX: &str = "tm_dev_v1_";
 
 const TOKEN_SECRET_LENGTH: usize = 43;
 const FAILED_ATTEMPT_LIMIT: u32 = 20;
@@ -142,6 +144,18 @@ impl TokenAuthenticator {
         }
     }
 
+    pub(crate) fn accept_authenticated_request(&self) -> bool {
+        self.take_authenticated_request()
+    }
+
+    pub(crate) fn reject_failed_attempt(&self) -> AuthDecision {
+        if self.take_failed_attempt() {
+            AuthDecision::AuthenticationRequired
+        } else {
+            AuthDecision::FailedAttemptRateLimited
+        }
+    }
+
     fn take_failed_attempt(&self) -> bool {
         take_window_slot(
             &self.failed_attempts,
@@ -183,6 +197,42 @@ fn valid_token_shape(token: &str) -> bool {
 
 fn hash_token(token: &str) -> [u8; 32] {
     Sha256::digest(token.as_bytes()).into()
+}
+
+pub(crate) fn sha256_hex(value: &str) -> String {
+    let digest = hash_token(value);
+    let mut output = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(output, "{byte:02x}");
+    }
+    output
+}
+
+pub(crate) fn generate_secret(prefix: &str) -> String {
+    let material = format!(
+        "{}:{}:{}:{}",
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    );
+    format!("{prefix}{}", sha256_hex(&material))
+}
+
+pub(crate) fn generate_pairing_code() -> String {
+    let material = generate_secret("pairing_");
+    let digest = hash_token(&material);
+    let number = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]) % 1_000_000;
+    format!("{number:06}")
+}
+
+pub(crate) fn valid_device_token(value: &str) -> bool {
+    value
+        .strip_prefix(DEVICE_TOKEN_PREFIX)
+        .is_some_and(|secret| {
+            secret.len() == 64 && secret.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
 }
 
 fn constant_time_equal(left: &[u8; 32], right: &[u8; 32]) -> bool {

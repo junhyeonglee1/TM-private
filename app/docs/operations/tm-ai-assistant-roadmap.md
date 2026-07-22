@@ -638,29 +638,31 @@ Codex TODO:
 
 ## STEP 15 — 모바일·원격 클라이언트와 기기 인증
 
-상태: 대기
+상태: 구현 및 로컬 검증 진행 중 — 사용자 기본안 전체 승인 완료
 
 Codex 권장 기본안:
 
-- 첫 원격 클라이언트는 설치 부담이 낮은 PWA로 시작한다.
-- 하나의 공용 장기 토큰 대신 기기별 토큰 해시·만료·폐기 기록으로 확장한다.
-- 초기 PWA는 온라인 전용으로 두고 offline mutation은 보류한다.
-- CORS는 배포된 PWA origin 하나만 정확히 허용한다.
+- 첫 원격 클라이언트는 기존 Railway `tm-server`와 같은 origin에서 제공하는 설치형 PWA로 시작한다. 별도 서비스·도메인·고정비는 추가하지 않는다.
+- 모바일은 이름과 6자리 코드를 만들고 Windows TM의 기기 관리 화면에서 관리자가 코드를 대조해 승인한다. 페어링은 10분, 등록 기기 인증은 90일이다.
+- 장기 기기 인증 원문은 `HttpOnly + Secure + SameSite=Strict` 쿠키에만 두고 DB에는 SHA-256 해시만 저장한다. 기존 bearer token은 기기 승인·폐기용 primary admin credential로만 유지한다.
+- 초기 PWA는 온라인 전용이다. app shell만 오프라인 캐시하고 TM 데이터·AI 응답·mutation은 캐시하지 않는다. 안전한 GET만 네트워크 실패 시 한 번 재시도하고 POST/PATCH·AI·승인은 자동 재전송하지 않는다.
+- 다른 origin에는 CORS 응답을 제공하지 않고 기기 mutation은 exact HTTPS origin과 CSRF token을 함께 검증한다.
+- STEP 15 알림은 PWA 내부 상태 표시만 사용하며 push·SMS·email은 STEP 16 이후로 보류한다.
 
 사용자 결정 게이트:
 
-- [ ] PWA, native mobile 또는 다른 hardware client 선택
-- [ ] 기기 등록 승인 방식과 분실 기기 폐기 방식 승인
-- [ ] 알림 채널과 offline 사용 범위 승인
+- [x] 동일 Railway origin의 설치형 PWA 선택
+- [x] 모바일 6자리 코드 + Windows TM 승인, 기기별 즉시 폐기와 전체 폐기 승인
+- [x] app-shell-only offline과 in-app 상태만 승인; 외부 알림 채널 보류
 
 Codex TODO:
 
-- [ ] 기기 등록·목록·폐기·만료 API와 감사 기록 구현
-- [ ] OS/browser 보안 저장소에 token을 저장하고 UI·로그 노출 차단
-- [ ] exact-origin CORS와 CSRF·replay 경계 검증
-- [ ] 네트워크 끊김·재시도·중복 제출 처리
-- [ ] 작은 화면용 최소 비서 UI 구현
-- [ ] 원격 기기 폐기와 token rotation end-to-end 훈련
+- [x] schema 9 기기 등록·목록·개별/전체 폐기·만료 API와 append-only 감사 기록 구현
+- [x] HttpOnly browser cookie에 token 원문을 저장하고 DB·UI·로그에는 원문을 노출하지 않도록 구현
+- [x] no-CORS same-origin, exact HTTPS Origin, CSRF, 일회성 페어링·중복 완료 차단 경계 구현
+- [x] app shell만 캐시하고 safe GET 외 자동 재시도·중복 mutation 제출을 금지
+- [x] 작은 화면용 AI 비서·Task·Note·승인·현재 기기 UI와 Windows 기기 관리 UI 구현
+- [x] 로컬 통합 테스트에서 페어링·scope·CSRF·즉시 폐기·복원 후 비부활 검증
 - [ ] 로컬 PC가 꺼진 상태에서 cloud 접근 검증
 
 완료 게이트:

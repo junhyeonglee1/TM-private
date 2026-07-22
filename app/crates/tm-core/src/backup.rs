@@ -158,6 +158,7 @@ pub(crate) fn restore_database(
     merge_delivery_ledger(&destination, &delivery_ledger)?;
     merge_change_request_ledger(&mut destination, &change_request_ledger)?;
     merge_scheduler_ledger(&destination, Path::new(&safety_backup.path))?;
+    merge_device_auth_ledger(&destination, Path::new(&safety_backup.path))?;
     destination.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
     drop(destination);
     validate_database(database_path, true)?;
@@ -813,6 +814,66 @@ fn merge_scheduler_ledger(connection: &Connection, preserved_database: &Path) ->
         let _ = connection.execute_batch("ROLLBACK;");
     }
     let detach_result = connection.execute_batch("DETACH DATABASE scheduler_preserved;");
+    merge_result?;
+    detach_result?;
+    Ok(())
+}
+
+fn merge_device_auth_ledger(connection: &Connection, preserved_database: &Path) -> Result<()> {
+    connection.execute(
+        "ATTACH DATABASE ?1 AS device_auth_preserved",
+        [preserved_database.to_string_lossy().as_ref()],
+    )?;
+    let merge_result = connection.execute_batch(
+        "BEGIN IMMEDIATE;
+         INSERT INTO device_pairings(
+            id, device_label, code_sha256, polling_sha256, status, requested_at,
+            expires_at, approved_at, completed_at, approved_by, created_at,
+            updated_at, revision
+         )
+         SELECT id, device_label, code_sha256, polling_sha256, status, requested_at,
+                expires_at, approved_at, completed_at, approved_by, created_at,
+                updated_at, revision
+         FROM device_auth_preserved.device_pairings WHERE true
+         ON CONFLICT(id) DO UPDATE SET
+            device_label = excluded.device_label,
+            code_sha256 = excluded.code_sha256,
+            polling_sha256 = excluded.polling_sha256,
+            status = excluded.status,
+            requested_at = excluded.requested_at,
+            expires_at = excluded.expires_at,
+            approved_at = excluded.approved_at,
+            completed_at = excluded.completed_at,
+            approved_by = excluded.approved_by,
+            created_at = excluded.created_at,
+            updated_at = excluded.updated_at,
+            revision = excluded.revision;
+
+         INSERT INTO registered_devices(
+            id, pairing_id, label, token_sha256, csrf_sha256, status, created_at,
+            last_seen_at, expires_at, revoked_at, revoked_by, revision
+         )
+         SELECT id, pairing_id, label, token_sha256, csrf_sha256, status, created_at,
+                last_seen_at, expires_at, revoked_at, revoked_by, revision
+         FROM device_auth_preserved.registered_devices WHERE true
+         ON CONFLICT(id) DO UPDATE SET
+            status = excluded.status,
+            last_seen_at = excluded.last_seen_at,
+            revoked_at = excluded.revoked_at,
+            revoked_by = excluded.revoked_by,
+            revision = excluded.revision;
+
+         INSERT OR IGNORE INTO device_auth_events(
+            id, pairing_id, device_id, event_type, actor, created_at
+         )
+         SELECT id, pairing_id, device_id, event_type, actor, created_at
+         FROM device_auth_preserved.device_auth_events;
+         COMMIT;",
+    );
+    if merge_result.is_err() {
+        let _ = connection.execute_batch("ROLLBACK;");
+    }
+    let detach_result = connection.execute_batch("DETACH DATABASE device_auth_preserved;");
     merge_result?;
     detach_result?;
     Ok(())

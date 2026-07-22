@@ -5,6 +5,7 @@ import { ChangeRequestsPage } from "./components/ChangeRequestsPage";
 import { Icon, type IconName } from "./components/Icon";
 import { NotesPage, SearchPage, WorkLogsPage } from "./components/KnowledgePages";
 import { SessionPage } from "./components/SessionPage";
+import { DeviceManagementPage } from "./components/DeviceManagementPage";
 import { TaskDetail } from "./components/TaskDetail";
 import { HistoryPage, InboxPage, ProjectsPage, TodayPage } from "./components/TaskPages";
 import { createDefaultApi, type TmApi } from "./lib/api";
@@ -34,6 +35,7 @@ type PageId =
   | "search"
   | "change-requests"
   | "trash"
+  | "devices"
   | "data";
 
 interface AppProps {
@@ -278,6 +280,7 @@ export function App({ api = defaultApi }: AppProps) {
         { id: "search", label: "통합 검색", icon: "search" },
         { id: "change-requests", label: "개선 요청함", icon: "spark", count: pendingApprovalCount || undefined },
         { id: "trash", label: "휴지통", icon: "trash", count: snapshot.trash.length || undefined },
+        { id: "devices", label: "기기 관리", icon: "shield" },
         { id: "data", label: "백업 · 내보내기", icon: "database" },
       ],
     },
@@ -305,6 +308,8 @@ export function App({ api = defaultApi }: AppProps) {
         return <ChangeRequestsPage onAbandon={abandonChangeRequest} onApprove={approveChangeRequest} onCancel={cancelChangeRequest} onCreate={createChangeRequest} onReturnToDraft={returnChangeRequestToDraft} onUpdate={updateChangeRequest} projects={snapshot.projects} requests={snapshot.changeRequests} tasks={snapshot.tasks} />;
       case "trash":
         return <TrashPage items={snapshot.trash} onRestore={(itemId) => mutateVoid(() => api.restoreTrashItem(itemId), "항목과 연결을 복원했습니다.")} />;
+      case "devices":
+        return <DeviceManagementPage />;
       case "data":
         return <DataPage backups={snapshot.backups} databasePath={snapshot.databasePath} lastBackupAt={snapshot.lastBackupAt} onBackup={() => mutateVoid(() => api.createBackup(), "최신 상태를 새 백업 파일로 저장했습니다.")} onExport={() => api.exportAll()} onRestore={(backupId) => mutateVoid(() => api.restoreBackup(backupId), "백업 복원을 완료했습니다.")} />;
     }

@@ -1,0 +1,360 @@
+"use strict";
+
+const pairingKey = "tm.mobile.pairing.v1";
+const state = { device: null, activeTab: "assistant" };
+
+const byId = (id) => document.getElementById(id);
+const show = (id, visible = true) => byId(id).classList.toggle("hidden", !visible);
+const clear = (element) => { while (element.firstChild) element.removeChild(element.firstChild); };
+const text = (tag, value, className) => {
+  const node = document.createElement(tag);
+  node.textContent = value ?? "";
+  if (className) node.className = className;
+  return node;
+};
+
+function cookie(name) {
+  const prefix = `${name}=`;
+  const matches = document.cookie.split(";").map((value) => value.trim()).filter((value) => value.startsWith(prefix));
+  return matches.length === 1 ? matches[0].slice(prefix.length) : null;
+}
+
+async function api(path, options = {}) {
+  const method = options.method || "GET";
+  const headers = new Headers(options.headers || {});
+  const unsafe = method !== "GET" && method !== "HEAD";
+  if (options.body !== undefined) headers.set("content-type", "application/json");
+  if (unsafe) {
+    const csrf = cookie("__Host-tm_csrf");
+    if (csrf) headers.set("x-tm-csrf", csrf);
+  }
+  const request = () => fetch(path, {
+    method,
+    headers,
+    body: options.body === undefined ? undefined : JSON.stringify(options.body),
+    credentials: "same-origin",
+    cache: "no-store",
+    redirect: "error"
+  });
+
+  let response;
+  try {
+    response = await request();
+  } catch (error) {
+    if (method !== "GET") throw error;
+    response = await request();
+  }
+  let payload = null;
+  try { payload = await response.json(); } catch { /* JSON error handled below */ }
+  if (!response.ok) {
+    const error = new Error(payload?.error?.message || `요청 실패 (${response.status})`);
+    error.status = response.status;
+    error.code = payload?.error?.code || "REQUEST_FAILED";
+    throw error;
+  }
+  if (!payload || !("data" in payload)) throw new Error("서버 응답 형식이 올바르지 않습니다.");
+  return payload.data;
+}
+
+function toast(message) {
+  const node = byId("toast");
+  node.textContent = message;
+  node.classList.remove("hidden");
+  window.clearTimeout(toast.timer);
+  toast.timer = window.setTimeout(() => node.classList.add("hidden"), 3600);
+}
+
+function setBusy(button, busy, label) {
+  button.disabled = busy;
+  if (label) button.textContent = busy ? "처리 중…" : label;
+}
+
+function updateNetwork() {
+  const node = byId("network-state");
+  const online = navigator.onLine;
+  node.textContent = online ? "온라인" : "오프라인 · 화면만 사용 가능";
+  node.classList.toggle("online", online);
+  node.classList.toggle("offline", !online);
+}
+
+function savedPairing() {
+  try {
+    const value = JSON.parse(sessionStorage.getItem(pairingKey) || "null");
+    return value && value.id && value.pollingSecret && value.code ? value : null;
+  } catch { return null; }
+}
+
+function renderPairing(pairing) {
+  show("pairing-code-card", Boolean(pairing));
+  byId("pairing-form").classList.toggle("hidden", Boolean(pairing));
+  if (!pairing) return;
+  byId("pairing-code").textContent = pairing.code;
+  const expiry = new Date(pairing.expiresAt);
+  byId("pairing-expiry").textContent = `유효 시간: ${expiry.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })}까지`;
+}
+
+function showPairing(message = "") {
+  state.device = null;
+  show("loading-view", false);
+  show("app-view", false);
+  show("pairing-view", true);
+  renderPairing(savedPairing());
+  byId("pairing-message").textContent = message;
+}
+
+function showApp(device) {
+  state.device = device;
+  show("loading-view", false);
+  show("pairing-view", false);
+  show("app-view", true);
+  renderDevice(device);
+}
+
+async function boot() {
+  updateNetwork();
+  try {
+    const device = await api("/api/v1/device/self");
+    showApp(device);
+  } catch (error) {
+    if (error.status === 401 || error.status === 403) showPairing();
+    else showPairing(`서버 연결 확인이 필요합니다: ${error.message}`);
+  }
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("/mobile/sw.js", { scope: "/mobile/" }).catch(() => undefined);
+  }
+}
+
+byId("pairing-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = event.currentTarget.querySelector("button[type=submit]");
+  setBusy(button, true, "6자리 코드 만들기");
+  byId("pairing-message").textContent = "";
+  try {
+    const data = await api("/api/v1/device-pairings", {
+      method: "POST",
+      body: { deviceLabel: byId("device-label").value }
+    });
+    const pairing = {
+      id: data.pairing.id,
+      code: data.code,
+      pollingSecret: data.pollingSecret,
+      expiresAt: data.pairing.expiresAt
+    };
+    sessionStorage.setItem(pairingKey, JSON.stringify(pairing));
+    renderPairing(pairing);
+  } catch (error) {
+    byId("pairing-message").textContent = error.message;
+  } finally {
+    setBusy(button, false, "6자리 코드 만들기");
+  }
+});
+
+byId("complete-pairing").addEventListener("click", async (event) => {
+  const pairing = savedPairing();
+  if (!pairing) return renderPairing(null);
+  const button = event.currentTarget;
+  setBusy(button, true, "Windows에서 승인했어요");
+  byId("pairing-message").textContent = "";
+  try {
+    const device = await api(`/api/v1/device-pairings/${encodeURIComponent(pairing.id)}/complete`, {
+      method: "POST",
+      body: { pollingSecret: pairing.pollingSecret }
+    });
+    sessionStorage.removeItem(pairingKey);
+    showApp(device);
+    toast("이 기기가 안전하게 등록되었습니다.");
+  } catch (error) {
+    byId("pairing-message").textContent = error.code === "DEVICE_CONFLICT"
+      ? "아직 Windows TM 승인이 확인되지 않았습니다. 승인 후 다시 눌러 주세요."
+      : error.message;
+  } finally {
+    setBusy(button, false, "Windows에서 승인했어요");
+  }
+});
+
+byId("cancel-pairing").addEventListener("click", () => {
+  sessionStorage.removeItem(pairingKey);
+  renderPairing(null);
+  byId("pairing-message").textContent = "기존 코드는 만료될 때까지 사용할 수 없으며 새 코드만 사용하세요.";
+});
+
+document.querySelectorAll(".tabs button").forEach((button) => {
+  button.addEventListener("click", () => selectTab(button.dataset.tab));
+});
+
+function selectTab(tab) {
+  state.activeTab = tab;
+  document.querySelectorAll(".tabs button").forEach((button) => {
+    if (button.dataset.tab === tab) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
+  });
+  document.querySelectorAll(".tab-panel").forEach((panel) => panel.classList.add("hidden"));
+  byId(`tab-${tab}`).classList.remove("hidden");
+  if (tab === "tasks") void loadTasks();
+  if (tab === "notes") void loadNotes();
+  if (tab === "approvals") void loadApprovals();
+  if (tab === "device" && state.device) renderDevice(state.device);
+}
+
+byId("assistant-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const input = byId("assistant-message");
+  const message = input.value.trim();
+  if (!message) return;
+  const button = event.currentTarget.querySelector("button[type=submit]");
+  appendAssistant(message, "user");
+  input.value = "";
+  setBusy(button, true, "AI 비서에게 전송");
+  try {
+    const result = await api("/api/v1/assistant/query", {
+      method: "POST",
+      headers: { "x-tm-confirm-ai-call": "assistant" },
+      body: { message }
+    });
+    appendAssistant(result.answer, "tm");
+    if (result.proposedActions?.length) toast("승인이 필요한 AI 제안이 생겼습니다.");
+  } catch (error) {
+    appendAssistant(`요청을 완료하지 못했습니다. ${error.message}\n자동으로 다시 보내지 않았습니다.`, "tm");
+  } finally {
+    setBusy(button, false, "AI 비서에게 전송");
+  }
+});
+
+function appendAssistant(message, role) {
+  const log = byId("assistant-log");
+  log.append(text("article", message, `assistant-message assistant-message--${role}`));
+  log.scrollTop = log.scrollHeight;
+}
+
+async function loadTasks() {
+  const list = byId("tasks-list");
+  loadingList(list);
+  try {
+    const data = await api("/api/v1/tasks?limit=30&offset=0&sort=updated_desc");
+    clear(list);
+    if (!data.items.length) return list.append(text("p", "등록된 할 일이 없습니다.", "empty"));
+    data.items.forEach((task) => {
+      const card = text("article", "", "item-card");
+      card.append(text("h2", task.title));
+      if (task.description) card.append(text("p", task.description));
+      const meta = text("div", "", "item-meta");
+      meta.append(text("span", task.status));
+      meta.append(text("span", `우선순위 ${task.priority}`));
+      if (task.dueDate) meta.append(text("span", `기한 ${task.dueDate}`));
+      card.append(meta);
+      list.append(card);
+    });
+  } catch (error) { listError(list, error); }
+}
+
+async function loadNotes() {
+  const list = byId("notes-list");
+  loadingList(list);
+  try {
+    const data = await api("/api/v1/notes?limit=30&offset=0&sort=updated_desc");
+    clear(list);
+    if (!data.items.length) return list.append(text("p", "등록된 노트가 없습니다.", "empty"));
+    data.items.forEach((note) => {
+      const card = text("article", "", "item-card");
+      card.append(text("h2", note.title));
+      card.append(text("p", note.body || note.content || ""));
+      card.append(text("div", note.noteType || note.type || "note", "item-meta"));
+      list.append(card);
+    });
+  } catch (error) { listError(list, error); }
+}
+
+async function loadApprovals() {
+  const list = byId("approvals-list");
+  loadingList(list);
+  try {
+    const data = await api("/api/v1/assistant/actions");
+    const pending = data.items.filter((action) => action.status === "pending");
+    clear(list);
+    if (!pending.length) return list.append(text("p", "대기 중인 승인이 없습니다.", "empty"));
+    pending.forEach((action) => list.append(actionCard(action)));
+  } catch (error) { listError(list, error); }
+}
+
+function actionCard(action) {
+  const card = text("article", "", "item-card");
+  card.append(text("h2", action.operation));
+  card.append(text("p", JSON.stringify(action.preview, null, 2)));
+  card.append(text("div", `만료 ${new Date(action.expiresAt).toLocaleString("ko-KR")}`, "item-meta"));
+  const row = text("div", "", "action-row");
+  const approve = text("button", "승인하고 실행", "approve");
+  approve.type = "button";
+  approve.addEventListener("click", () => void decideAction(action, true, approve));
+  const reject = text("button", "거절", "reject");
+  reject.type = "button";
+  reject.addEventListener("click", () => void decideAction(action, false, reject));
+  row.append(approve, reject);
+  card.append(row);
+  return card;
+}
+
+async function decideAction(action, approve, button) {
+  const label = approve ? "승인하고 실행" : "거절";
+  if (!window.confirm(approve ? "표시된 내용을 지금 실행할까요?" : "이 제안을 거절할까요?")) return;
+  setBusy(button, true, label);
+  try {
+    const suffix = approve ? "approve" : "reject";
+    const headers = { "x-tm-confirm-action": approve ? action.operation : "reject" };
+    if (approve) headers["idempotency-key"] = crypto.randomUUID();
+    const body = {
+      expectedRevision: action.revision,
+      payloadSha256: action.payloadSha256
+    };
+    if (!approve) body.reason = "mobile user rejected";
+    await api(`/api/v1/assistant/actions/${encodeURIComponent(action.id)}/${suffix}`, {
+      method: "POST", headers, body
+    });
+    toast(approve ? "승인한 작업을 완료했습니다." : "제안을 거절했습니다.");
+    await loadApprovals();
+  } catch (error) {
+    toast(`${error.message} 자동으로 다시 시도하지 않았습니다.`);
+  } finally {
+    setBusy(button, false, label);
+  }
+}
+
+function loadingList(list) { clear(list); list.append(text("p", "온라인 데이터를 불러오는 중…", "empty")); }
+function listError(list, error) { clear(list); list.append(text("p", `불러오지 못했습니다: ${error.message}`, "empty")); }
+
+function renderDevice(device) {
+  const details = byId("device-details");
+  clear(details);
+  const values = [
+    ["이름", device.label],
+    ["등록", new Date(device.createdAt).toLocaleString("ko-KR")],
+    ["최근 사용", new Date(device.lastSeenAt).toLocaleString("ko-KR")],
+    ["만료", new Date(device.expiresAt).toLocaleString("ko-KR")]
+  ];
+  values.forEach(([key, value]) => details.append(text("dt", key), text("dd", value)));
+}
+
+byId("logout").addEventListener("click", async (event) => {
+  if (!window.confirm("이 브라우저의 TM 연결을 즉시 해제할까요?")) return;
+  const button = event.currentTarget;
+  setBusy(button, true, "이 기기 연결 해제");
+  try {
+    await api("/api/v1/device/logout", { method: "POST", body: {} });
+    showPairing("이 기기 연결을 해제했습니다.");
+  } catch (error) {
+    toast(`${error.message} 자동으로 다시 시도하지 않았습니다.`);
+  } finally {
+    setBusy(button, false, "이 기기 연결 해제");
+  }
+});
+
+document.querySelectorAll("[data-refresh]").forEach((button) => {
+  button.addEventListener("click", () => {
+    if (button.dataset.refresh === "tasks") void loadTasks();
+    if (button.dataset.refresh === "notes") void loadNotes();
+    if (button.dataset.refresh === "approvals") void loadApprovals();
+  });
+});
+
+window.addEventListener("online", updateNetwork);
+window.addEventListener("offline", updateNetwork);
+void boot();

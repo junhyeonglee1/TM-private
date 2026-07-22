@@ -8,10 +8,12 @@ use std::{
 mod assistant_actions;
 pub mod auth;
 mod desktop_api;
+mod device_api;
 mod import_api;
 mod memories;
 pub mod openai;
 mod orchestrator;
+mod pwa;
 mod read_api;
 pub mod scheduler;
 mod write_api;
@@ -20,7 +22,10 @@ use axum::{
     Extension, Json, Router,
     body::Body,
     extract::{DefaultBodyLimit, Request, State, rejection::JsonRejection},
-    http::{HeaderMap, HeaderValue, StatusCode, header::HeaderName},
+    http::{
+        HeaderMap, HeaderValue, Method, StatusCode,
+        header::{AUTHORIZATION, HeaderName},
+    },
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -35,6 +40,7 @@ use uuid::Uuid;
 
 use crate::auth::{
     AUTH_TOKEN_EXPIRY_ENV, AUTH_TOKEN_HASH_ENV, AuthConfig, AuthDecision, TokenAuthenticator,
+    sha256_hex, valid_device_token,
 };
 use crate::openai::{
     OpenAiClient, OpenAiConfig, OpenAiError, OpenAiProbeResult, PROBE_MAXIMUM_COST_MICROUSD,
@@ -290,7 +296,21 @@ struct CloudReadiness {
 
 #[derive(Debug, Clone)]
 struct AuthenticatedSession {
+    subject: AuthenticatedSubject,
     token_expires_at: String,
+}
+
+#[derive(Debug, Clone)]
+enum AuthenticatedSubject {
+    PrimaryAdmin,
+    Device { id: String, label: String },
+}
+
+#[derive(Clone)]
+struct CloudAuthState {
+    authenticator: TokenAuthenticator,
+    core: TmCore,
+    allow_public_device_routes: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -298,6 +318,8 @@ struct AuthenticatedSession {
 struct AuthStatus {
     authenticated: bool,
     subject: &'static str,
+    device_id: Option<String>,
+    device_label: Option<String>,
     token_expires_at: String,
 }
 
@@ -424,9 +446,16 @@ pub fn build_cloud_authenticated_router_with_openai(
     openai: OpenAiClient,
 ) -> Router {
     let authenticator = TokenAuthenticator::new(auth);
+    let auth_state = CloudAuthState {
+        authenticator,
+        core: core.clone(),
+        allow_public_device_routes: true,
+    };
     Router::new()
         .route("/healthz", get(cloud_healthz))
         .route("/readyz", get(cloud_readyz))
+        .merge(device_api::routes())
+        .merge(pwa::routes())
         .route("/api/v1/auth/status", get(auth_status))
         .route("/api/v1/ops/status", get(operations_status))
         .route("/api/v1/ai/status", get(ai_status))
@@ -493,7 +522,7 @@ pub fn build_cloud_authenticated_router_with_openai(
         .with_state(AppState { core, openai })
         .layer(write_api::body_limit())
         .layer(middleware::from_fn_with_state(
-            authenticator,
+            auth_state,
             authenticate_cloud_request,
         ))
         .layer(middleware::from_fn(security_headers))
@@ -503,6 +532,11 @@ pub fn build_cloud_authenticated_router_with_openai(
 
 pub fn build_cloud_import_router(core: TmCore, auth: AuthConfig) -> Router {
     let authenticator = TokenAuthenticator::new(auth);
+    let auth_state = CloudAuthState {
+        authenticator,
+        core: core.clone(),
+        allow_public_device_routes: false,
+    };
     Router::new()
         .route("/healthz", get(cloud_healthz))
         .route("/readyz", get(cloud_readyz))
@@ -517,7 +551,7 @@ pub fn build_cloud_import_router(core: TmCore, auth: AuthConfig) -> Router {
         })
         .layer(import_api::body_limit())
         .layer(middleware::from_fn_with_state(
-            authenticator,
+            auth_state,
             authenticate_cloud_request,
         ))
         .layer(middleware::from_fn(security_headers))
@@ -637,7 +671,18 @@ async fn auth_status(
         request_id: request_id.0,
         data: AuthStatus {
             authenticated: true,
-            subject: "single-user",
+            subject: match session.subject {
+                AuthenticatedSubject::PrimaryAdmin => "primary-admin",
+                AuthenticatedSubject::Device { .. } => "device",
+            },
+            device_id: match &session.subject {
+                AuthenticatedSubject::Device { id, .. } => Some(id.clone()),
+                AuthenticatedSubject::PrimaryAdmin => None,
+            },
+            device_label: match &session.subject {
+                AuthenticatedSubject::Device { label, .. } => Some(label.clone()),
+                AuthenticatedSubject::PrimaryAdmin => None,
+            },
             token_expires_at: session.token_expires_at,
         },
     })
@@ -1222,61 +1267,199 @@ async fn method_not_allowed(Extension(request_id): Extension<RequestId>) -> ApiE
 }
 
 async fn authenticate_cloud_request(
-    State(authenticator): State<TokenAuthenticator>,
+    State(auth_state): State<CloudAuthState>,
     Extension(request_id): Extension<RequestId>,
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
-    if matches!(request.uri().path(), "/healthz" | "/readyz") {
+    if matches!(request.uri().path(), "/healthz" | "/readyz")
+        || (auth_state.allow_public_device_routes
+            && device_api::is_public_path(request.uri().path()))
+    {
         return next.run(request).await;
     }
 
-    match authenticator.authorize(request.headers()) {
-        AuthDecision::Authenticated { expires_at } => {
-            request.extensions_mut().insert(AuthenticatedSession {
-                token_expires_at: expires_at.to_rfc3339(),
-            });
-            next.run(request).await
-        }
-        AuthDecision::AuthenticationRequired => ApiError {
-            status: StatusCode::UNAUTHORIZED,
-            code: "AUTHENTICATION_REQUIRED",
-            message: "a valid TM bearer token is required".to_owned(),
-            request_id: request_id.0,
-        }
-        .into_response(),
-        AuthDecision::TokenExpired => ApiError {
-            status: StatusCode::UNAUTHORIZED,
-            code: "AUTH_TOKEN_EXPIRED",
-            message: "the TM bearer token has expired".to_owned(),
-            request_id: request_id.0,
-        }
-        .into_response(),
-        AuthDecision::FailedAttemptRateLimited => ApiError {
-            status: StatusCode::TOO_MANY_REQUESTS,
-            code: "AUTHENTICATION_RATE_LIMITED",
-            message: "too many failed authentication attempts".to_owned(),
-            request_id: request_id.0,
-        }
-        .into_response(),
-        AuthDecision::RequestRateLimited => ApiError {
-            status: StatusCode::TOO_MANY_REQUESTS,
-            code: "API_RATE_LIMITED",
-            message: "authenticated request rate limit exceeded".to_owned(),
-            request_id: request_id.0,
-        }
-        .into_response(),
+    if request.headers().contains_key(AUTHORIZATION) {
+        return match auth_state.authenticator.authorize(request.headers()) {
+            AuthDecision::Authenticated { expires_at } => {
+                request.extensions_mut().insert(AuthenticatedSession {
+                    subject: AuthenticatedSubject::PrimaryAdmin,
+                    token_expires_at: expires_at.to_rfc3339(),
+                });
+                next.run(request).await
+            }
+            AuthDecision::AuthenticationRequired => ApiError {
+                status: StatusCode::UNAUTHORIZED,
+                code: "AUTHENTICATION_REQUIRED",
+                message: "a valid TM bearer token is required".to_owned(),
+                request_id: request_id.0,
+            }
+            .into_response(),
+            AuthDecision::TokenExpired => ApiError {
+                status: StatusCode::UNAUTHORIZED,
+                code: "AUTH_TOKEN_EXPIRED",
+                message: "the TM bearer token has expired".to_owned(),
+                request_id: request_id.0,
+            }
+            .into_response(),
+            AuthDecision::FailedAttemptRateLimited => ApiError {
+                status: StatusCode::TOO_MANY_REQUESTS,
+                code: "AUTHENTICATION_RATE_LIMITED",
+                message: "too many failed authentication attempts".to_owned(),
+                request_id: request_id.0,
+            }
+            .into_response(),
+            AuthDecision::RequestRateLimited => ApiError {
+                status: StatusCode::TOO_MANY_REQUESTS,
+                code: "API_RATE_LIMITED",
+                message: "authenticated request rate limit exceeded".to_owned(),
+                request_id: request_id.0,
+            }
+            .into_response(),
+        };
     }
+
+    let Some(device_token) = device_api::cookie_value(request.headers(), device_api::DEVICE_COOKIE)
+        .filter(|token| valid_device_token(token))
+        .map(ToOwned::to_owned)
+    else {
+        return auth_decision_error(
+            auth_state.authenticator.reject_failed_attempt(),
+            request_id.0,
+        );
+    };
+    let token_sha256 = sha256_hex(&device_token);
+    let core = auth_state.core.clone();
+    let authentication = match tokio::task::spawn_blocking(move || {
+        core.authenticate_device_session(&token_sha256, Utc::now())
+    })
+    .await
+    {
+        Ok(Ok(Some(authentication))) => authentication,
+        Ok(Ok(None)) => {
+            return auth_decision_error(
+                auth_state.authenticator.reject_failed_attempt(),
+                request_id.0,
+            );
+        }
+        Ok(Err(error)) => {
+            tracing::error!(%error, request_id = %request_id.0, "device authentication failed");
+            return ApiError {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                code: "DEVICE_AUTH_UNAVAILABLE",
+                message: "device authentication is temporarily unavailable".to_owned(),
+                request_id: request_id.0,
+            }
+            .into_response();
+        }
+        Err(_) => {
+            return ApiError {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                code: "DEVICE_AUTH_WORKER_FAILED",
+                message: "device authentication worker was unavailable".to_owned(),
+                request_id: request_id.0,
+            }
+            .into_response();
+        }
+    };
+    if !auth_state.authenticator.accept_authenticated_request() {
+        return auth_decision_error(AuthDecision::RequestRateLimited, request_id.0);
+    }
+    if !device_api::device_route_allowed(request.method(), request.uri().path()) {
+        return ApiError {
+            status: StatusCode::FORBIDDEN,
+            code: "DEVICE_SCOPE_FORBIDDEN",
+            message: "this route is outside the registered device scope".to_owned(),
+            request_id: request_id.0,
+        }
+        .into_response();
+    }
+    if !matches!(*request.method(), Method::GET | Method::HEAD)
+        && !device_api::valid_device_mutation_headers(
+            request.headers(),
+            &authentication.csrf_sha256,
+        )
+    {
+        return ApiError {
+            status: StatusCode::FORBIDDEN,
+            code: "DEVICE_CSRF_REJECTED",
+            message: "same-origin device confirmation was rejected".to_owned(),
+            request_id: request_id.0,
+        }
+        .into_response();
+    }
+    request.extensions_mut().insert(AuthenticatedSession {
+        subject: AuthenticatedSubject::Device {
+            id: authentication.device.id,
+            label: authentication.device.label,
+        },
+        token_expires_at: authentication.device.expires_at,
+    });
+    next.run(request).await
+}
+
+fn auth_decision_error(decision: AuthDecision, request_id: String) -> Response {
+    let (status, code, message) = match decision {
+        AuthDecision::AuthenticationRequired | AuthDecision::Authenticated { .. } => (
+            StatusCode::UNAUTHORIZED,
+            "AUTHENTICATION_REQUIRED",
+            "a valid TM credential is required",
+        ),
+        AuthDecision::TokenExpired => (
+            StatusCode::UNAUTHORIZED,
+            "AUTH_TOKEN_EXPIRED",
+            "the TM bearer token has expired",
+        ),
+        AuthDecision::FailedAttemptRateLimited => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "AUTHENTICATION_RATE_LIMITED",
+            "too many failed authentication attempts",
+        ),
+        AuthDecision::RequestRateLimited => (
+            StatusCode::TOO_MANY_REQUESTS,
+            "API_RATE_LIMITED",
+            "authenticated request rate limit exceeded",
+        ),
+    };
+    ApiError {
+        status,
+        code,
+        message: message.to_owned(),
+        request_id,
+    }
+    .into_response()
 }
 
 async fn security_headers(request: Request<Body>, next: Next) -> Response {
+    let path = request.uri().path().to_owned();
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
-    headers.insert(CACHE_CONTROL_HEADER, HeaderValue::from_static("no-store"));
-    headers.insert(
-        CONTENT_SECURITY_POLICY_HEADER,
-        HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'"),
-    );
+    if path.starts_with("/mobile/") || path == "/mobile" {
+        let cache_control = if matches!(
+            path.as_str(),
+            "/mobile/app.js" | "/mobile/styles.css" | "/mobile/icon.svg"
+        ) {
+            "public, max-age=300"
+        } else {
+            "no-cache"
+        };
+        headers.insert(
+            CACHE_CONTROL_HEADER,
+            HeaderValue::from_static(cache_control),
+        );
+        headers.insert(
+            CONTENT_SECURITY_POLICY_HEADER,
+            HeaderValue::from_static(
+                "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+            ),
+        );
+    } else {
+        headers.insert(CACHE_CONTROL_HEADER, HeaderValue::from_static("no-store"));
+        headers.insert(
+            CONTENT_SECURITY_POLICY_HEADER,
+            HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'"),
+        );
+    }
     headers.insert(
         REFERRER_POLICY_HEADER,
         HeaderValue::from_static("no-referrer"),
@@ -1318,6 +1501,20 @@ fn safe_route_family(path: &str) -> &'static str {
         "/healthz" => "/healthz",
         "/readyz" => "/readyz",
         "/api/v1/auth/status" => "/api/v1/auth/status",
+        "/api/v1/device-pairings" => "/api/v1/device-pairings",
+        "/api/v1/device/self" => "/api/v1/device/self",
+        "/api/v1/device/logout" => "/api/v1/device/logout",
+        "/api/v1/admin/device-pairings" => "/api/v1/admin/device-pairings",
+        "/api/v1/admin/devices" => "/api/v1/admin/devices",
+        "/api/v1/admin/devices/revoke-all" => "/api/v1/admin/devices/revoke-all",
+        value if value.starts_with("/mobile") => "/mobile/{asset}",
+        value if value.starts_with("/api/v1/device-pairings/") => {
+            "/api/v1/device-pairings/{id}/complete"
+        }
+        value if value.starts_with("/api/v1/admin/device-pairings/") => {
+            "/api/v1/admin/device-pairings/{id}/approve"
+        }
+        value if value.starts_with("/api/v1/admin/devices/") => "/api/v1/admin/devices/{id}/revoke",
         "/api/v1/ops/status" => "/api/v1/ops/status",
         "/api/v1/ops/import" => "/api/v1/ops/import",
         "/api/v1/ai/status" => "/api/v1/ai/status",
@@ -1737,7 +1934,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
         assert_eq!(body["data"]["status"], "ready");
-        assert_eq!(body["data"]["schemaVersion"], 8);
+        assert_eq!(body["data"]["schemaVersion"], 9);
         assert_eq!(body["data"]["journalMode"], "wal");
     }
 
@@ -2470,7 +2667,8 @@ mod tests {
         assert_eq!(authenticated.status(), StatusCode::OK);
         let body = response_json(authenticated).await;
         assert_eq!(body["data"]["authenticated"], true);
-        assert_eq!(body["data"]["subject"], "single-user");
+        assert_eq!(body["data"]["subject"], "primary-admin");
+        assert!(body["data"]["deviceId"].is_null());
         assert!(body["data"]["tokenExpiresAt"].is_string());
 
         let hidden_route = router
@@ -2528,7 +2726,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
         assert_eq!(body["data"]["database"]["ok"], true);
-        assert_eq!(body["data"]["database"]["schemaVersion"], 8);
+        assert_eq!(body["data"]["database"]["schemaVersion"], 9);
         assert_eq!(body["data"]["scheduler"]["status"], "healthy");
         assert_eq!(body["data"]["scheduler"]["openaiCallsEnabled"], false);
         assert_eq!(body["data"]["scheduler"]["effectCount"], 0);
@@ -3312,6 +3510,229 @@ mod tests {
             "Imported production task"
         );
         drop((source_temporary, target_temporary));
+    }
+
+    #[tokio::test]
+    async fn pwa_pairing_device_scope_csrf_and_revocation_work_end_to_end() {
+        let (_temporary, core) = test_core();
+        let router = build_cloud_authenticated_router(core, test_auth_config());
+
+        let shell = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/mobile/")
+                    .body(Body::empty())
+                    .expect("build PWA shell request"),
+            )
+            .await
+            .expect("load PWA shell");
+        assert_eq!(shell.status(), StatusCode::OK);
+        assert_eq!(
+            shell
+                .headers()
+                .get("content-security-policy")
+                .and_then(|value| value.to_str().ok()),
+            Some(
+                "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+            )
+        );
+        assert!(shell.headers().get("access-control-allow-origin").is_none());
+
+        let cross_origin = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/device-pairings")
+                    .header("host", "tm.example.test")
+                    .header("origin", "https://attacker.example.test")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"deviceLabel":"Phone"}"#))
+                    .expect("build cross-origin pairing request"),
+            )
+            .await
+            .expect("call cross-origin pairing route");
+        assert_eq!(cross_origin.status(), StatusCode::FORBIDDEN);
+
+        let started = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/device-pairings")
+                    .header("host", "tm.example.test")
+                    .header("origin", "https://tm.example.test")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"deviceLabel":"Phone"}"#))
+                    .expect("build pairing request"),
+            )
+            .await
+            .expect("start pairing");
+        assert_eq!(started.status(), StatusCode::OK);
+        let started = response_json(started).await;
+        let pairing_id = started["data"]["pairing"]["id"]
+            .as_str()
+            .expect("pairing id")
+            .to_owned();
+        let code = started["data"]["code"]
+            .as_str()
+            .expect("pairing code")
+            .to_owned();
+        let polling_secret = started["data"]["pollingSecret"]
+            .as_str()
+            .expect("polling secret")
+            .to_owned();
+
+        let approved = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/admin/device-pairings/{pairing_id}/approve"
+                    ))
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("x-tm-confirm-device-admin", "approve")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({ "code": code }).to_string()))
+                    .expect("build pairing approval request"),
+            )
+            .await
+            .expect("approve pairing");
+        assert_eq!(approved.status(), StatusCode::OK);
+
+        let completed = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/device-pairings/{pairing_id}/complete"))
+                    .header("host", "tm.example.test")
+                    .header("origin", "https://tm.example.test")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({ "pollingSecret": polling_secret }).to_string(),
+                    ))
+                    .expect("build pairing completion request"),
+            )
+            .await
+            .expect("complete pairing");
+        assert_eq!(completed.status(), StatusCode::OK);
+        let set_cookies = completed
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .map(|value| value.to_str().expect("valid set-cookie").to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(set_cookies.len(), 2);
+        assert!(set_cookies[0].contains("Secure; HttpOnly; SameSite=Strict"));
+        assert!(set_cookies[1].contains("Secure; SameSite=Strict"));
+        assert!(!set_cookies[1].contains("HttpOnly"));
+        let cookie_header = set_cookies
+            .iter()
+            .map(|value| value.split(';').next().expect("cookie pair"))
+            .collect::<Vec<_>>()
+            .join("; ");
+        let csrf = set_cookies[1]
+            .split(';')
+            .next()
+            .and_then(|value| value.split_once('='))
+            .map(|(_, value)| value.to_owned())
+            .expect("CSRF cookie value");
+        let device_id = response_json(completed).await["data"]["id"]
+            .as_str()
+            .expect("registered device id")
+            .to_owned();
+
+        let self_response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/device/self")
+                    .header("cookie", &cookie_header)
+                    .body(Body::empty())
+                    .expect("build device self request"),
+            )
+            .await
+            .expect("call device self");
+        assert_eq!(self_response.status(), StatusCode::OK);
+
+        let forbidden_admin = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/admin/devices")
+                    .header("cookie", &cookie_header)
+                    .body(Body::empty())
+                    .expect("build forbidden admin request"),
+            )
+            .await
+            .expect("call forbidden admin route");
+        assert_eq!(forbidden_admin.status(), StatusCode::FORBIDDEN);
+
+        let missing_csrf = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/notes")
+                    .header("host", "tm.example.test")
+                    .header("origin", "https://tm.example.test")
+                    .header("cookie", &cookie_header)
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .expect("build missing CSRF request"),
+            )
+            .await
+            .expect("call missing CSRF route");
+        assert_eq!(missing_csrf.status(), StatusCode::FORBIDDEN);
+
+        let csrf_passed = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/notes")
+                    .header("host", "tm.example.test")
+                    .header("origin", "https://tm.example.test")
+                    .header("cookie", &cookie_header)
+                    .header("x-tm-csrf", csrf)
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .expect("build confirmed CSRF request"),
+            )
+            .await
+            .expect("call confirmed CSRF route");
+        assert_ne!(csrf_passed.status(), StatusCode::FORBIDDEN);
+
+        let revoked = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/admin/devices/{device_id}/revoke"))
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("x-tm-confirm-device-admin", "revoke")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .expect("build revoke request"),
+            )
+            .await
+            .expect("revoke device");
+        assert_eq!(revoked.status(), StatusCode::OK);
+
+        let after_revoke = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/device/self")
+                    .header("cookie", cookie_header)
+                    .body(Body::empty())
+                    .expect("build post-revoke request"),
+            )
+            .await
+            .expect("call after revoke");
+        assert_eq!(after_revoke.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[test]

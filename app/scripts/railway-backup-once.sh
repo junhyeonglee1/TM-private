@@ -49,7 +49,7 @@ case "$schema_version" in
         exit 1
         ;;
 esac
-if [ "$schema_version" -lt 1 ] || [ "$schema_version" -gt 8 ]; then
+if [ "$schema_version" -lt 1 ] || [ "$schema_version" -gt 9 ]; then
     echo "event=tm_backup_failed reason=unsupported_schema_version" >&2
     exit 1
 fi

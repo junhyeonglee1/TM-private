@@ -881,6 +881,29 @@ button.search-result:hover { background: var(--surface-subtle); }
   .search-result__icon--note { color: #c39bf5; }
 }
 
+.device-management { display: grid; gap: 20px; }
+.device-management .page-header { align-items: flex-start; }
+.device-section-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 10px; }
+.device-section-heading--devices { margin-top: 28px; }
+.device-section-heading h2 { margin: 0 0 4px; }
+.device-section-heading p { margin: 0; color: var(--text-soft); }
+.device-section-heading > span { display: grid; min-width: 34px; height: 34px; place-items: center; border-radius: 10px; background: var(--accent-soft); color: var(--accent-text); font-weight: 800; }
+.device-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
+.device-card { padding: 18px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); box-shadow: var(--shadow-sm); }
+.device-card--revoked, .device-card--expired { opacity: .68; }
+.device-card__title { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.device-card__title strong { font-size: 16px; }
+.device-card__title span { padding: 4px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-text); font-size: 11px; font-weight: 800; text-transform: uppercase; }
+.device-card dl { display: grid; grid-template-columns: 72px 1fr; gap: 8px; margin: 16px 0; font-size: 13px; }
+.device-card dt { color: var(--text-faint); }
+.device-card dd { margin: 0; color: var(--text-soft); }
+.pairing-approval { display: grid; gap: 8px; }
+.pairing-approval label { color: var(--text-soft); font-size: 12px; font-weight: 700; }
+.pairing-approval input { letter-spacing: .24em; font-size: 19px; font-variant-numeric: tabular-nums; }
+.device-card__notice { padding: 10px; border-radius: 9px; background: var(--success-soft); color: var(--success); font-size: 13px; }
+.device-empty { grid-column: 1 / -1; padding: 28px; border: 1px dashed var(--border); border-radius: 14px; color: var(--text-soft); text-align: center; }
+.inline-alert { padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent); border-radius: 10px; background: var(--danger-soft); color: var(--danger); }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; transition-duration: .01ms !important; }
 }

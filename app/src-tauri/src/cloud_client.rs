@@ -8,7 +8,7 @@ use std::{
 #[cfg(windows)]
 use std::process::{Command, Stdio};
 
-use reqwest::{StatusCode, Url};
+use reqwest::{Method, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tm_core::TmHome;
@@ -166,6 +166,115 @@ impl CloudClient {
         }
         Ok(data)
     }
+
+    pub(crate) async fn device_admin(&self, command: &str, args: Value) -> CloudResult<Value> {
+        if self.mode != DataMode::Cloud {
+            return Err("TM device administration requires cloud mode".to_owned());
+        }
+        let (method, path, confirmation, body) = match command {
+            "list_pairings" => (
+                Method::GET,
+                "/api/v1/admin/device-pairings".to_owned(),
+                None,
+                None,
+            ),
+            "list_devices" => (Method::GET, "/api/v1/admin/devices".to_owned(), None, None),
+            "approve_pairing" => {
+                let pairing_id = required_resource_id(&args, "pairingId")?;
+                let code = args
+                    .get("code")
+                    .and_then(Value::as_str)
+                    .filter(|value| {
+                        value.len() == 6 && value.bytes().all(|byte| byte.is_ascii_digit())
+                    })
+                    .ok_or_else(|| "TM device pairing code must be six digits".to_owned())?;
+                (
+                    Method::POST,
+                    format!("/api/v1/admin/device-pairings/{pairing_id}/approve"),
+                    Some("approve"),
+                    Some(serde_json::json!({ "code": code })),
+                )
+            }
+            "revoke_device" => {
+                let device_id = required_resource_id(&args, "deviceId")?;
+                (
+                    Method::POST,
+                    format!("/api/v1/admin/devices/{device_id}/revoke"),
+                    Some("revoke"),
+                    Some(serde_json::json!({})),
+                )
+            }
+            "revoke_all_devices" => (
+                Method::POST,
+                "/api/v1/admin/devices/revoke-all".to_owned(),
+                Some("revoke-all"),
+                Some(serde_json::json!({})),
+            ),
+            _ => return Err("TM device administration command is not allowed".to_owned()),
+        };
+
+        let token = load_token_from_os_store()?;
+        if !valid_token(&token) {
+            return Err("TM cloud credential has an invalid format".to_owned());
+        }
+        let mut endpoint = self
+            .base_url
+            .clone()
+            .ok_or_else(|| "TM cloud HTTPS base URL is not configured".to_owned())?;
+        endpoint.set_path(&path);
+        let mut request = self.http.request(method, endpoint).bearer_auth(&token);
+        if let Some(value) = confirmation {
+            request = request.header("x-tm-confirm-device-admin", value);
+        }
+        if let Some(value) = body {
+            request = request.json(&value);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|_| "TM cloud server could not be reached over HTTPS".to_owned())?;
+        let status = response.status();
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+        {
+            return Err("TM cloud response exceeded the safety limit".to_owned());
+        }
+        let request_id = response
+            .headers()
+            .get("x-request-id")
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned);
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|_| "TM cloud response could not be read".to_owned())?;
+        if bytes.len() > MAX_RESPONSE_BYTES {
+            return Err("TM cloud response exceeded the safety limit".to_owned());
+        }
+        let payload: Value = serde_json::from_slice(&bytes)
+            .map_err(|_| "TM cloud response was not valid JSON".to_owned())?;
+        if !status.is_success() {
+            return Err(response_error(status, &payload, request_id.as_deref()));
+        }
+        payload
+            .get("data")
+            .cloned()
+            .ok_or_else(|| "TM cloud response did not contain data".to_owned())
+    }
+}
+
+fn required_resource_id<'a>(args: &'a Value, field: &str) -> CloudResult<&'a str> {
+    args.get(field)
+        .and_then(Value::as_str)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+        .ok_or_else(|| format!("TM device administration field is invalid: {field}"))
 }
 
 pub(crate) fn config_path(home: &TmHome) -> PathBuf {

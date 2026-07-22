@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use crate::{Error, Result, TmHome};
 
-pub(crate) const SCHEMA_VERSION: i64 = 8;
+pub(crate) const SCHEMA_VERSION: i64 = 9;
 const INITIAL_MIGRATION: &str = include_str!("../migrations/0001_initial.sql");
 const CHANGE_REQUESTS_MIGRATION: &str = include_str!("../migrations/0002_change_requests.sql");
 const CHANGE_REQUESTS_STRICT_CAS_MIGRATION: &str =
@@ -25,6 +25,7 @@ const ASSISTANT_ACTION_APPROVALS_MIGRATION: &str =
     include_str!("../migrations/0006_assistant_action_approvals.sql");
 const ASSISTANT_MEMORY_MIGRATION: &str = include_str!("../migrations/0007_assistant_memory.sql");
 const DURABLE_SCHEDULER_MIGRATION: &str = include_str!("../migrations/0008_durable_scheduler.sql");
+const DEVICE_AUTH_MIGRATION: &str = include_str!("../migrations/0009_device_auth.sql");
 const BUSY_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone)]
@@ -198,6 +199,18 @@ impl Database {
                 [now_utc()],
             )?;
             transaction.pragma_update(None, "user_version", 8_i64)?;
+            transaction.commit()?;
+        }
+        if current_version < 9 {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(DEVICE_AUTH_MIGRATION)?;
+            transaction.execute(
+                "INSERT INTO schema_migrations(version, name, applied_at)
+                 VALUES (9, 'mobile-device-pairing-and-auth', ?1)",
+                [now_utc()],
+            )?;
+            transaction.pragma_update(None, "user_version", 9_i64)?;
             transaction.commit()?;
         }
         Ok(())

@@ -44,6 +44,9 @@ pub(crate) const EXPORTED_TABLES: &[&str] = &[
     "scheduler_runs",
     "scheduler_attempts",
     "scheduler_effects",
+    "device_pairings",
+    "registered_devices",
+    "device_auth_events",
     "app_state",
 ];
 
