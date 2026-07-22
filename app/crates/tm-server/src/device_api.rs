@@ -95,7 +95,10 @@ pub(super) fn is_public_path(path: &str) -> bool {
 }
 
 pub(super) fn device_route_allowed(method: &Method, path: &str) -> bool {
-    if matches!(path, "/api/v1/auth/status" | "/api/v1/device/self") {
+    if matches!(
+        path,
+        "/api/v1/auth/status" | "/api/v1/device/self" | "/api/v1/costs/status"
+    ) {
         return method == Method::GET;
     }
     if path == "/api/v1/device/logout" {
@@ -572,5 +575,18 @@ fn map_core_error(error: CoreError, request_id: &RequestId) -> ApiError {
                 request_id: request_id.0.clone(),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::Method;
+
+    use super::device_route_allowed;
+
+    #[test]
+    fn registered_devices_can_read_cost_status_but_cannot_write_it() {
+        assert!(device_route_allowed(&Method::GET, "/api/v1/costs/status"));
+        assert!(!device_route_allowed(&Method::POST, "/api/v1/costs/status"));
     }
 }

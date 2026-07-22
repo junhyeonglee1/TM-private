@@ -12,6 +12,7 @@ describe("Tauri invoke payload 계약", () => {
     };
     const api = createApi(transport);
 
+    await api.getCostStatus();
     await expect(api.createProject("새 프로젝트")).resolves.toBe("project-new");
     await api.createTask({ title: "프로젝트 Task", projectId: "project-new", status: "todo" });
 
@@ -19,6 +20,7 @@ describe("Tauri invoke payload 계약", () => {
       command: "create_task",
       args: { input: { title: "프로젝트 Task", projectId: "project-new", status: "todo" } },
     });
+    expect(calls[0]).toEqual({ command: "get_cost_status", args: undefined });
   });
 
   it("WorkLog 승격 유형을 noteType camelCase 인자로 보낸다", async () => {

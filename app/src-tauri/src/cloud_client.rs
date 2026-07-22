@@ -341,6 +341,57 @@ impl CloudClient {
             .cloned()
             .ok_or_else(|| "TM cloud response did not contain data".to_owned())
     }
+
+    pub(crate) async fn cost_status(&self) -> CloudResult<Value> {
+        if self.mode != DataMode::Cloud {
+            return Err("TM cost status requires cloud mode".to_owned());
+        }
+        let token = load_token_from_os_store()?;
+        if !valid_token(&token) {
+            return Err("TM cloud credential has an invalid format".to_owned());
+        }
+        let mut endpoint = self
+            .base_url
+            .clone()
+            .ok_or_else(|| "TM cloud HTTPS base URL is not configured".to_owned())?;
+        endpoint.set_path("/api/v1/costs/status");
+        let response = self
+            .http
+            .get(endpoint)
+            .bearer_auth(&token)
+            .timeout(Duration::from_secs(15))
+            .send()
+            .await
+            .map_err(|_| "TM cloud server could not be reached over HTTPS".to_owned())?;
+        let status = response.status();
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+        {
+            return Err("TM cloud response exceeded the safety limit".to_owned());
+        }
+        let request_id = response
+            .headers()
+            .get("x-request-id")
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned);
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|_| "TM cloud response could not be read".to_owned())?;
+        if bytes.len() > MAX_RESPONSE_BYTES {
+            return Err("TM cloud response exceeded the safety limit".to_owned());
+        }
+        let payload: Value = serde_json::from_slice(&bytes)
+            .map_err(|_| "TM cloud response was not valid JSON".to_owned())?;
+        if !status.is_success() {
+            return Err(response_error(status, &payload, request_id.as_deref()));
+        }
+        payload
+            .get("data")
+            .cloned()
+            .ok_or_else(|| "TM cloud response did not contain data".to_owned())
+    }
 }
 
 fn required_resource_id<'a>(args: &'a Value, field: &str) -> CloudResult<&'a str> {

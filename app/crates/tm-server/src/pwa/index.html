@@ -14,7 +14,13 @@
   <body>
     <header class="topbar">
       <a class="brand" href="/mobile/" aria-label="TM 홈"><span>TM</span><strong>Assistant</strong></a>
-      <span id="network-state" class="status-pill">연결 확인 중</span>
+      <div class="topbar-meta">
+        <div id="cost-status" class="cost-status hidden" aria-label="현재 비용 현황">
+          <span id="cost-api" class="cost-pill">API — / $20</span>
+          <span id="cost-cloud" class="cost-pill">Cloud — / $30</span>
+        </div>
+        <span id="network-state" class="status-pill">연결 확인 중</span>
+      </div>
     </header>
 
     <main>

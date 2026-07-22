@@ -23,6 +23,12 @@ button { cursor: pointer; }
 .brand { display: flex; gap: 10px; align-items: center; color: inherit; text-decoration: none; }
 .brand span { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 11px; background: linear-gradient(135deg, #9eb0ff, #687eff); color: #0d1017; font-weight: 900; }
 .brand strong { font-size: 15px; letter-spacing: .02em; }
+.topbar-meta { display: grid; justify-items: end; gap: 4px; }
+.cost-status { display: flex; gap: 5px; }
+.cost-pill { padding: 5px 7px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface-2); color: #d9deec; font-size: 9.5px; font-variant-numeric: tabular-nums; line-height: 1; white-space: nowrap; }
+.cost-pill.unavailable { color: var(--muted); }
+.cost-pill.warning { color: #ffc28d; border-color: #6a4930; }
+.cost-pill.danger { color: #ff9caa; border-color: #66313d; }
 .status-pill { padding: 6px 10px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: 12px; }
 .status-pill.online { color: #8ce1b0; border-color: #315c47; }
 .status-pill.offline { color: #ffc28d; border-color: #6a4930; }
@@ -101,4 +107,12 @@ button { border: 0; border-radius: 13px; font-weight: 800; }
   main { padding-top: 30px; }
   .panel { padding: 30px; }
   .tabs button { font-size: 13px; }
+}
+
+@media (max-width: 420px) {
+  .topbar { padding-left: 12px; padding-right: 12px; }
+  .brand { gap: 7px; }
+  .brand strong { display: none; }
+  .cost-pill { font-size: 8.5px; padding: 4px 6px; }
+  .status-pill { padding: 4px 7px; font-size: 10px; }
 }

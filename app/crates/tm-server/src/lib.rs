@@ -11,6 +11,7 @@ use std::{
 
 mod assistant_actions;
 pub mod auth;
+pub mod costs;
 mod desktop_api;
 mod device_api;
 mod import_api;
@@ -47,6 +48,7 @@ use crate::auth::{
     AUTH_TOKEN_EXPIRY_ENV, AUTH_TOKEN_HASH_ENV, AUTHENTICATED_REQUEST_LIMIT, AuthConfig,
     AuthDecision, FAILED_ATTEMPT_LIMIT, TokenAuthenticator, sha256_hex, valid_device_token,
 };
+use crate::costs::{CloudCostMeter, RailwayUsageClient, RailwayUsageConfig};
 use crate::openai::{
     OpenAiClient, OpenAiConfig, OpenAiError, OpenAiProbeResult, PROBE_MAXIMUM_COST_MICROUSD,
 };
@@ -170,6 +172,7 @@ pub struct ServerConfig {
     pub incident_mode: IncidentMode,
     pub ai_enabled: bool,
     pub task_report_enabled: bool,
+    pub railway_usage: RailwayUsageConfig,
 }
 
 impl ServerConfig {
@@ -227,6 +230,11 @@ impl ServerConfig {
                     "{TASK_REPORT_ENABLED_ENV} is only allowed in cloud-authenticated"
                 ));
             }
+        };
+        let railway_usage = if profile == ServerProfile::CloudAuthenticated {
+            RailwayUsageConfig::from_env()?
+        } else {
+            RailwayUsageConfig::disabled()
         };
 
         let home = required_path_env("TM_SERVER_HOME")?;
@@ -293,6 +301,7 @@ impl ServerConfig {
             incident_mode,
             ai_enabled,
             task_report_enabled,
+            railway_usage,
         })
     }
 }
@@ -304,6 +313,7 @@ struct AppState {
     incident_mode: IncidentMode,
     ai_enabled: bool,
     task_report_enabled: bool,
+    railway_usage: RailwayUsageClient,
     security: SecurityMonitor,
 }
 
@@ -327,12 +337,33 @@ impl AppState {
         task_report_enabled: bool,
         security: SecurityMonitor,
     ) -> Self {
+        Self::with_controls_and_costs(
+            core,
+            openai,
+            incident_mode,
+            ai_enabled,
+            task_report_enabled,
+            security,
+            RailwayUsageClient::disabled(),
+        )
+    }
+
+    fn with_controls_and_costs(
+        core: TmCore,
+        openai: OpenAiClient,
+        incident_mode: IncidentMode,
+        ai_enabled: bool,
+        task_report_enabled: bool,
+        security: SecurityMonitor,
+        railway_usage: RailwayUsageClient,
+    ) -> Self {
         Self {
             core,
             openai,
             incident_mode,
             ai_enabled,
             task_report_enabled,
+            railway_usage,
             security,
         }
     }
@@ -574,6 +605,21 @@ struct AiStatus {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct CostStatus {
+    api: ApiCostMeter,
+    cloud: CloudCostMeter,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ApiCostMeter {
+    budget_month: String,
+    used_microusd: u64,
+    hard_limit_microusd: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct OperationsStatus {
     service_version: &'static str,
     overall_status: &'static str,
@@ -678,6 +724,7 @@ pub fn build_router_with_openai(core: TmCore, openai: OpenAiClient) -> Router {
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/api/v1/ai/status", get(ai_status))
+        .route("/api/v1/costs/status", get(cost_status))
         .route("/api/v1/ai/probe", post(ai_probe))
         .route(
             "/api/v1/assistant/query",
@@ -747,6 +794,26 @@ pub fn build_cloud_authenticated_router_with_feature_controls(
     ai_enabled: bool,
     task_report_enabled: bool,
 ) -> Router {
+    build_cloud_authenticated_router_with_feature_controls_and_costs(
+        core,
+        auth,
+        openai,
+        incident_mode,
+        ai_enabled,
+        task_report_enabled,
+        RailwayUsageClient::disabled(),
+    )
+}
+
+pub fn build_cloud_authenticated_router_with_feature_controls_and_costs(
+    core: TmCore,
+    auth: AuthConfig,
+    openai: OpenAiClient,
+    incident_mode: IncidentMode,
+    ai_enabled: bool,
+    task_report_enabled: bool,
+    railway_usage: RailwayUsageClient,
+) -> Router {
     let security = SecurityMonitor::new();
     let authenticator = TokenAuthenticator::new(auth);
     let auth_state = CloudAuthState {
@@ -769,6 +836,7 @@ pub fn build_cloud_authenticated_router_with_feature_controls(
         .route("/api/v1/auth/status", get(auth_status))
         .route("/api/v1/ops/status", get(operations_status))
         .route("/api/v1/ai/status", get(ai_status))
+        .route("/api/v1/costs/status", get(cost_status))
         .route("/api/v1/ai/probe", post(ai_probe))
         .route(
             "/api/v1/assistant/query",
@@ -838,13 +906,14 @@ pub fn build_cloud_authenticated_router_with_feature_controls(
         )
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
-        .with_state(AppState::with_controls(
+        .with_state(AppState::with_controls_and_costs(
             core,
             openai,
             incident_mode,
             ai_enabled,
             task_report_enabled,
             security,
+            railway_usage,
         ))
         .layer(write_api::body_limit())
         .layer(middleware::from_fn_with_state(
@@ -1066,6 +1135,29 @@ async fn ai_status(
             task_report_daily_limit: TASK_REPORT_DAILY_LIMIT,
             task_report_maximum_cost_microusd: TASK_REPORT_MAXIMUM_COST_MICROUSD,
             budget,
+        },
+    }))
+}
+
+async fn cost_status(
+    State(state): State<AppState>,
+    Extension(request_id): Extension<RequestId>,
+) -> Result<Json<ApiEnvelope<CostStatus>>, ApiError> {
+    let config = state.openai.config();
+    let budget = state
+        .core
+        .ai_budget_status(config.budget_policy())
+        .map_err(|error| ai_budget_api_error(error, request_id.0.clone()))?;
+    let cloud = state.railway_usage.status().await;
+    Ok(Json(ApiEnvelope {
+        request_id: request_id.0,
+        data: CostStatus {
+            api: ApiCostMeter {
+                budget_month: budget.budget_month,
+                used_microusd: budget.committed_microusd,
+                hard_limit_microusd: budget.hard_limit_microusd,
+            },
+            cloud,
         },
     }))
 }
@@ -2529,6 +2621,7 @@ fn safe_route_family(path: &str) -> &'static str {
         "/api/v1/ops/status" => "/api/v1/ops/status",
         "/api/v1/ops/import" => "/api/v1/ops/import",
         "/api/v1/ai/status" => "/api/v1/ai/status",
+        "/api/v1/costs/status" => "/api/v1/costs/status",
         "/api/v1/ai/probe" => "/api/v1/ai/probe",
         "/api/v1/assistant/query" => "/api/v1/assistant/query",
         "/api/v1/assistant/task-report" => "/api/v1/assistant/task-report",
@@ -3091,6 +3184,28 @@ mod tests {
         );
         assert_eq!(body["data"]["assistantMemoryVectorServiceUsed"], false);
         assert!(body.to_string().find("apiKey").is_none());
+    }
+
+    #[tokio::test]
+    async fn cost_status_uses_the_internal_ai_ledger_and_safe_cloud_fallback() {
+        let (_temporary, core) = test_core();
+        let response = build_router(core)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/costs/status")
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("call cost status route");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["data"]["api"]["usedMicrousd"], 0);
+        assert_eq!(body["data"]["api"]["hardLimitMicrousd"], 20_000_000);
+        assert_eq!(body["data"]["cloud"]["available"], false);
+        assert_eq!(body["data"]["cloud"]["usedMicrousd"], Value::Null);
+        assert_eq!(body["data"]["cloud"]["hardLimitMicrousd"], 30_000_000);
     }
 
     #[tokio::test]

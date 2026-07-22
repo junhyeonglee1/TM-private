@@ -59,8 +59,26 @@ export interface TaskReportResult {
   };
 }
 
+export interface CostStatus {
+  api: {
+    budgetMonth: string;
+    usedMicrousd: number;
+    hardLimitMicrousd: number;
+  };
+  cloud: {
+    available: boolean;
+    usedMicrousd: number | null;
+    hardLimitMicrousd: number;
+    billingPeriodStart: string | null;
+    billingPeriodEnd: string | null;
+    refreshedAt: string | null;
+    stale: boolean;
+  };
+}
+
 export interface TmApi {
   getSnapshot(): Promise<AppSnapshot>;
+  getCostStatus(): Promise<CostStatus>;
   createProject(name: string, description?: string): Promise<string>;
   createTask(input: CreateTaskInput): Promise<void>;
   updateTask(input: UpdateTaskInput): Promise<void>;
@@ -110,6 +128,9 @@ class TauriTransport implements CommandTransport {
   private readonly mode = tauriInvoke<"local" | "cloud">("data_mode");
 
   async invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+    if (command === "get_cost_status") {
+      return tauriInvoke<T>("get_cost_status");
+    }
     if ((await this.mode) === "cloud") {
       if (["generate_task_report", "latest_task_report", "rate_task_report"].includes(command)) {
         return tauriInvoke<T>("invoke_cloud_assistant_feature", {
@@ -133,6 +154,7 @@ const run = async (
 
 export const createApi = (transport: CommandTransport): TmApi => ({
   getSnapshot: () => transport.invoke<AppSnapshot>("get_app_snapshot"),
+  getCostStatus: () => transport.invoke<CostStatus>("get_cost_status"),
   createProject: (name, description = "") =>
     transport.invoke<string>("create_project", { name, description }),
   createTask: (input) => run(transport, "create_task", { input }),

@@ -76,6 +76,12 @@ async fn invoke_cloud_assistant_feature(
         .await
 }
 
+#[tauri::command]
+async fn get_cost_status(state: tauri::State<'_, AppState>) -> Result<Value, String> {
+    let cloud = state.cloud.clone();
+    cloud.cost_status().await
+}
+
 pub fn run() {
     let application = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -130,6 +136,7 @@ pub fn run() {
             invoke_cloud_command,
             invoke_cloud_device_admin,
             invoke_cloud_assistant_feature,
+            get_cost_status,
             commands::get_app_snapshot,
             commands::create_project,
             commands::create_task,

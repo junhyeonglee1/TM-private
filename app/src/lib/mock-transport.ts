@@ -509,6 +509,23 @@ export class MemoryTransport implements CommandTransport {
     switch (command) {
       case "get_app_snapshot":
         return this.snapshot;
+      case "get_cost_status":
+        return {
+          api: {
+            budgetMonth: this.snapshot.today.slice(0, 7),
+            usedMicrousd: 11_209,
+            hardLimitMicrousd: 20_000_000,
+          },
+          cloud: {
+            available: true,
+            usedMicrousd: 86_783,
+            hardLimitMicrousd: 30_000_000,
+            billingPeriodStart: "2026-07-13T12:53:10Z",
+            billingPeriodEnd: "2026-08-13T12:53:10Z",
+            refreshedAt: now(),
+            stale: false,
+          },
+        };
       case "create_project":
         return this.createProject(textValue(args.name), textValue(args.description));
       case "create_task":

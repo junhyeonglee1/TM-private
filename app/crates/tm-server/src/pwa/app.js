@@ -2,6 +2,10 @@
 
 const pairingKey = "tm.mobile.pairing.v1";
 const state = { device: null, activeTab: "assistant", taskReport: null, taskReportTasks: new Map() };
+const costRefreshIntervalMs = 5 * 60 * 1000;
+const defaultApiHardLimitMicrousd = 20_000_000;
+const defaultCloudHardLimitMicrousd = 30_000_000;
+let costRefreshTimer = null;
 
 const byId = (id) => document.getElementById(id);
 const show = (id, visible = true) => byId(id).classList.toggle("hidden", !visible);
@@ -77,6 +81,53 @@ function updateNetwork() {
   node.classList.toggle("offline", !online);
 }
 
+function formatUsd(microusd, alwaysCents = true) {
+  const dollars = Number(microusd) / 1_000_000;
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: alwaysCents ? 2 : Number.isInteger(dollars) ? 0 : 2,
+    maximumFractionDigits: 2
+  }).format(dollars);
+}
+
+function renderCostPill(node, label, usedMicrousd, hardLimitMicrousd) {
+  const used = usedMicrousd === null || usedMicrousd === undefined ? null : Number(usedMicrousd);
+  const limit = Number(hardLimitMicrousd);
+  node.textContent = `${label} ${used === null ? "—" : formatUsd(used)} / ${formatUsd(limit, false)}`;
+  const ratio = used === null || limit <= 0 ? null : used / limit;
+  node.classList.toggle("unavailable", ratio === null);
+  node.classList.toggle("warning", ratio !== null && ratio >= .8 && ratio < 1);
+  node.classList.toggle("danger", ratio !== null && ratio >= 1);
+}
+
+async function loadCostStatus() {
+  if (!state.device) return;
+  try {
+    const costs = await api("/api/v1/costs/status");
+    renderCostPill(byId("cost-api"), "API", costs.api.usedMicrousd, costs.api.hardLimitMicrousd);
+    renderCostPill(byId("cost-cloud"), "Cloud", costs.cloud.usedMicrousd, costs.cloud.hardLimitMicrousd);
+    byId("cost-api").title = `OpenAI API ${costs.api.budgetMonth}`;
+    byId("cost-cloud").title = costs.cloud.billingPeriodStart && costs.cloud.billingPeriodEnd
+      ? `Railway ${new Date(costs.cloud.billingPeriodStart).toLocaleDateString("ko-KR")}–${new Date(costs.cloud.billingPeriodEnd).toLocaleDateString("ko-KR")}${costs.cloud.stale ? " · 마지막 확인값" : ""}`
+      : "Railway 비용을 확인할 수 없습니다";
+  } catch {
+    renderCostPill(byId("cost-api"), "API", null, defaultApiHardLimitMicrousd);
+    renderCostPill(byId("cost-cloud"), "Cloud", null, defaultCloudHardLimitMicrousd);
+  }
+}
+
+function startCostRefresh() {
+  if (costRefreshTimer !== null) window.clearInterval(costRefreshTimer);
+  void loadCostStatus();
+  costRefreshTimer = window.setInterval(() => void loadCostStatus(), costRefreshIntervalMs);
+}
+
+function stopCostRefresh() {
+  if (costRefreshTimer !== null) window.clearInterval(costRefreshTimer);
+  costRefreshTimer = null;
+}
+
 function savedPairing() {
   try {
     const value = JSON.parse(sessionStorage.getItem(pairingKey) || "null");
@@ -95,6 +146,8 @@ function renderPairing(pairing) {
 
 function showPairing(message = "") {
   state.device = null;
+  stopCostRefresh();
+  show("cost-status", false);
   show("loading-view", false);
   show("app-view", false);
   show("pairing-view", true);
@@ -107,7 +160,9 @@ function showApp(device) {
   show("loading-view", false);
   show("pairing-view", false);
   show("app-view", true);
+  show("cost-status", true);
   renderDevice(device);
+  startCostRefresh();
   void loadTaskReport();
 }
 
@@ -213,6 +268,7 @@ byId("assistant-form").addEventListener("submit", async (event) => {
       body: { message }
     });
     appendAssistant(result.answer, "tm");
+    void loadCostStatus();
     if (result.proposedActions?.length) toast("승인이 필요한 AI 제안이 생겼습니다.");
   } catch (error) {
     appendAssistant(`요청을 완료하지 못했습니다. ${error.message}\n자동으로 다시 보내지 않았습니다.`, "tm");
@@ -232,6 +288,7 @@ byId("task-report-generate").addEventListener("click", async (event) => {
     state.taskReport = report;
     await loadTaskReportTasks();
     renderTaskReport(report);
+    void loadCostStatus();
     toast("오늘의 Task AI 리포트를 만들었습니다.");
   } catch (error) {
     renderTaskReportError(`${error.message} 자동으로 다시 시도하지 않았습니다.`);

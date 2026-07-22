@@ -217,6 +217,20 @@ code { font-family: "Cascadia Code", Consolas, monospace; }
 .command-search:hover { border-color: var(--border-strong); color: var(--text-soft); }
 .command-search span { flex: 1; font-size: 12px; }
 kbd { background: var(--surface-subtle); border: 1px solid var(--border); border-radius: 5px; color: var(--text-faint); font-family: inherit; font-size: 9px; padding: 2px 5px; }
+.topbar__costs { align-items: center; display: flex; gap: 6px; white-space: nowrap; }
+.cost-pill {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-soft);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  padding: 6px 8px;
+}
+.cost-pill--unavailable { color: var(--text-faint); }
+.cost-pill--warning { background: var(--warning-soft); border-color: color-mix(in srgb, var(--warning) 24%, var(--border)); color: var(--warning); }
+.cost-pill--danger { background: var(--danger-soft); border-color: color-mix(in srgb, var(--danger) 24%, var(--border)); color: var(--danger); }
 .topbar__date { align-items: center; color: var(--text-soft); display: flex; font-size: 11.5px; gap: 10px; white-space: nowrap; }
 
 .main-content { margin: 0 auto; max-width: 1370px; min-height: calc(100vh - 62px); outline: 0; padding: 34px clamp(24px, 4vw, 58px) 64px; }
@@ -812,6 +826,9 @@ button.search-result:hover { background: var(--surface-subtle); }
   .page-stack { gap: 15px; }
   .topbar { height: 56px; padding: 0 12px; }
   .topbar__date { display: none; }
+  .topbar__title { display: none; }
+  .topbar__costs { align-items: flex-end; flex-direction: column; gap: 2px; }
+  .cost-pill { font-size: 8.5px; padding: 3px 6px; }
   .command-search { margin-left: auto; width: 34px; }
   .command-search span, .command-search kbd { display: none; }
   .page-header { align-items: flex-start; min-height: 62px; }

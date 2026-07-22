@@ -12,6 +12,15 @@ const renderApp = () => {
 };
 
 describe("TM 데스크톱 UI", () => {
+  it("상단에 API와 Cloud 비용만 월 한도와 함께 표시한다", async () => {
+    renderApp();
+
+    const status = await screen.findByLabelText("현재 비용 현황");
+    expect(within(status).getByText("API $0.01 / $20")).toBeInTheDocument();
+    expect(within(status).getByText("Cloud $0.09 / $30")).toBeInTheDocument();
+    expect(status).not.toHaveTextContent("tokens");
+  });
+
   it("오늘의 네 개 기록 영역을 snapshot에서 표시한다", async () => {
     renderApp();
 

@@ -8,7 +8,12 @@ import { SessionPage } from "./components/SessionPage";
 import { DeviceManagementPage } from "./components/DeviceManagementPage";
 import { TaskDetail } from "./components/TaskDetail";
 import { HistoryPage, InboxPage, ProjectsPage, TodayPage } from "./components/TaskPages";
-import { createDefaultApi, type TaskReportResult, type TmApi } from "./lib/api";
+import {
+  createDefaultApi,
+  type CostStatus,
+  type TaskReportResult,
+  type TmApi,
+} from "./lib/api";
 import type {
   AppSnapshot,
   CreateChangeRequestInput,
@@ -50,6 +55,27 @@ interface NavigationItem {
 }
 
 const defaultApi = createDefaultApi();
+const DEFAULT_API_HARD_LIMIT_MICROUSD = 20_000_000;
+const DEFAULT_CLOUD_HARD_LIMIT_MICROUSD = 30_000_000;
+const COST_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
+
+const formatUsd = (microusd: number, alwaysCents = true): string => {
+  const dollars = microusd / 1_000_000;
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: alwaysCents ? 2 : Number.isInteger(dollars) ? 0 : 2,
+    maximumFractionDigits: 2,
+  }).format(dollars);
+};
+
+const costClassName = (usedMicrousd: number | null, hardLimitMicrousd: number): string => {
+  if (usedMicrousd === null || hardLimitMicrousd <= 0) return "cost-pill cost-pill--unavailable";
+  const ratio = usedMicrousd / hardLimitMicrousd;
+  if (ratio >= 1) return "cost-pill cost-pill--danger";
+  if (ratio >= 0.8) return "cost-pill cost-pill--warning";
+  return "cost-pill";
+};
 
 const errorMessage = (error: unknown): string => {
   if (error instanceof Error) return error.message;
@@ -68,6 +94,7 @@ export function App({ api = defaultApi }: AppProps) {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [taskReport, setTaskReport] = useState<TaskReportResult | null>(null);
   const [taskReportLoading, setTaskReportLoading] = useState(false);
+  const [costStatus, setCostStatus] = useState<CostStatus | null>(null);
 
   const loadSnapshot = useCallback(async () => {
     try {
@@ -84,6 +111,20 @@ export function App({ api = defaultApi }: AppProps) {
   useEffect(() => {
     void loadSnapshot();
   }, [loadSnapshot]);
+
+  const loadCostStatus = useCallback(async () => {
+    try {
+      setCostStatus(await api.getCostStatus());
+    } catch {
+      // Cost status is supplementary and must never block the main workspace.
+    }
+  }, [api]);
+
+  useEffect(() => {
+    void loadCostStatus();
+    const timer = window.setInterval(() => void loadCostStatus(), COST_REFRESH_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [loadCostStatus]);
 
   useEffect(() => {
     let active = true;
@@ -172,6 +213,7 @@ export function App({ api = defaultApi }: AppProps) {
     try {
       const report = await api.generateTaskReport();
       setTaskReport(report);
+      void loadCostStatus();
       notify("오늘의 Task AI 리포트를 만들었습니다.");
     } catch (error) {
       notify(errorMessage(error), "error");
@@ -393,6 +435,30 @@ export function App({ api = defaultApi }: AppProps) {
           <button aria-label="메뉴 열기" className="icon-button topbar__menu" onClick={() => setMobileNavOpen(true)} type="button"><Icon name="menu" /></button>
           <strong className="topbar__title">{pageLabel}</strong>
           <button className="command-search" onClick={() => navigate("search")} type="button"><Icon name="search" size={16} /><span>전체 기록 검색</span><kbd>Ctrl K</kbd></button>
+          <div className="topbar__costs" aria-label="현재 비용 현황">
+            <span
+              className={costClassName(
+                costStatus?.api.usedMicrousd ?? null,
+                costStatus?.api.hardLimitMicrousd ?? DEFAULT_API_HARD_LIMIT_MICROUSD,
+              )}
+              title={costStatus ? `OpenAI API ${costStatus.api.budgetMonth}` : "OpenAI API 비용 확인 중"}
+            >
+              API {costStatus ? formatUsd(costStatus.api.usedMicrousd) : "—"} / {formatUsd(costStatus?.api.hardLimitMicrousd ?? DEFAULT_API_HARD_LIMIT_MICROUSD, false)}
+            </span>
+            <span
+              className={costClassName(
+                costStatus?.cloud.usedMicrousd ?? null,
+                costStatus?.cloud.hardLimitMicrousd ?? DEFAULT_CLOUD_HARD_LIMIT_MICROUSD,
+              )}
+              title={costStatus?.cloud.billingPeriodStart && costStatus.cloud.billingPeriodEnd
+                ? `Railway ${new Date(costStatus.cloud.billingPeriodStart).toLocaleDateString("ko-KR")}–${new Date(costStatus.cloud.billingPeriodEnd).toLocaleDateString("ko-KR")}${costStatus.cloud.stale ? " · 마지막 확인값" : ""}`
+                : "Railway 비용 확인 중"}
+            >
+              Cloud {costStatus?.cloud.usedMicrousd !== null && costStatus?.cloud.usedMicrousd !== undefined
+                ? formatUsd(costStatus.cloud.usedMicrousd)
+                : "—"} / {formatUsd(costStatus?.cloud.hardLimitMicrousd ?? DEFAULT_CLOUD_HARD_LIMIT_MICROUSD, false)}
+            </span>
+          </div>
           <div className="topbar__date"><span>{new Intl.DateTimeFormat("ko-KR", { timeZone: "Asia/Seoul", month: "long", day: "numeric", weekday: "short" }).format(new Date(`${snapshot.today}T12:00:00+09:00`))}</span><i /></div>
         </header>
 
