@@ -1,0 +1,81 @@
+name: STEP 16 security
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - agent/step10-cloud-cutover
+  pull_request:
+  schedule:
+    - cron: "17 20 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: step16-security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source-and-container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+
+      - name: Set up pnpm
+        shell: pwsh
+        run: |
+          corepack enable
+          corepack install
+          pnpm --version
+
+      - name: Set up Rust
+        shell: bash
+        run: |
+          rustup toolchain install 1.97.0 --profile minimal
+          rustup default 1.97.0
+          rustc --version
+          cargo --version
+
+      - name: Static secret and workflow policy scan
+        shell: pwsh
+        run: ./app/scripts/security-static-scan.ps1
+
+      - name: Audit Rust advisories locally
+        working-directory: app
+        shell: bash
+        run: |
+          cargo install cargo-audit --locked --version 0.22.2
+          cargo audit --deny warnings
+
+      - name: Filesystem vulnerability, secret, and misconfiguration scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: app
+          scanners: vuln,secret,misconfig
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          cache: "false"
+
+      - name: Build reviewed production image
+        shell: bash
+        run: docker build --file app/Dockerfile --tag tm-server:step16 app
+
+      - name: Scan production container image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: tm-server:step16
+          scanners: vuln,secret,misconfig
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          cache: "false"

@@ -15,8 +15,8 @@ pub const TOKEN_PREFIX: &str = "tm_pat_v1_";
 pub(crate) const DEVICE_TOKEN_PREFIX: &str = "tm_dev_v1_";
 
 const TOKEN_SECRET_LENGTH: usize = 43;
-const FAILED_ATTEMPT_LIMIT: u32 = 20;
-const AUTHENTICATED_REQUEST_LIMIT: u32 = 120;
+pub(crate) const FAILED_ATTEMPT_LIMIT: u32 = 20;
+pub(crate) const AUTHENTICATED_REQUEST_LIMIT: u32 = 120;
 const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
 
 #[derive(Clone, PartialEq, Eq)]

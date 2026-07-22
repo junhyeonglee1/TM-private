@@ -172,6 +172,7 @@ impl CloudClient {
             return Err("TM device administration requires cloud mode".to_owned());
         }
         let (method, path, confirmation, body) = match command {
+            "operations_status" => (Method::GET, "/api/v1/ops/status".to_owned(), None, None),
             "list_pairings" => (
                 Method::GET,
                 "/api/v1/admin/device-pairings".to_owned(),

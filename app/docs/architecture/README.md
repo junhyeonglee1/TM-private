@@ -28,6 +28,8 @@ STEP 14는 schema 8에 durable job·run·attempt·effect 원장을 추가한다.
 
 STEP 15는 schema 9에 10분짜리 기기 페어링, 90일 기기 세션, 개별·전체 폐기와 append-only 인증 감사를 추가한다. primary bearer token만 기기 승인·폐기를 수행하고 모바일 PWA는 `HttpOnly + Secure + SameSite=Strict` 기기 쿠키, same-origin 검증과 CSRF token으로 제한된 Task·Note·AI 비서·승인 route만 사용한다. PWA는 같은 Railway 서비스에 내장되어 별도 서버가 없으며 service worker는 app shell만 캐시하고 TM 데이터·AI 응답·mutation을 저장하거나 재전송하지 않는다. 백업 복원은 현재 기기 인증 원장을 병합해 폐기된 기기가 되살아나지 않게 한다.
 
+STEP 16은 schema 변경 없이 `normal`·`read-only`·`lockdown` 사고 모드와 독립 AI kill switch를 추가한다. 운영 status는 RPO/RTO, backup freshness/integrity, scheduler, AI 비용 원장과 process lifetime 보안 거절 수를 함께 평가한다. request target/header 제한과 browser security header를 강화하고 private CI에서 SHA-pinned Action, RustSec, Trivy filesystem/image, secret policy scan을 수행한다.
+
 - [수동 승인 개선 요청 흐름](change-request-workflow.md)
 - [데이터 기준 원본과 migration 안전 설계](data-authority-and-migration.md)
 - [데스크톱 cloud transport와 cutover 경계](desktop-cloud-transport.md)
@@ -44,6 +46,9 @@ STEP 15는 schema 9에 10분짜리 기기 페어링, 90일 기기 세션, 개별
 - [STEP 13 기억·검색 운영 절차](../operations/step13-memory-context.md)
 - [STEP 14 durable scheduler 운영 절차](../operations/step14-durable-scheduler.md)
 - [STEP 15 PWA·기기 인증 운영 절차](../operations/step15-mobile-device-auth.md)
+- [STEP 16 위협 모델](../security/step16-threat-model.md)
+- [STEP 16 사고 대응·복구 runbook](../operations/step16-incident-response.md)
+- [STEP 16 보안 배포 checklist](../operations/step16-deployment-checklist.md)
 - [STEP 5 단일 사용자 인증](../operations/single-user-auth-setup.md)
 
 기본 홈은 `C:\Users\tkfk0\Desktop\codex\TM`이다. 테스트는 프로세스별 임시 `TM_HOME`을 사용한다. 모든 저장 시각은 UTC RFC 3339로 기록하고, 사용자 날짜는 `Asia/Seoul`로 계산한다.
