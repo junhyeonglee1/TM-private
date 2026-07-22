@@ -13,7 +13,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: step16-security-${{ github.ref }}
+  group: step16-security-${{ github.event.pull_request.head.sha || github.sha }}
   cancel-in-progress: true
 
 jobs:
@@ -48,12 +48,15 @@ jobs:
         shell: pwsh
         run: ./app/scripts/security-static-scan.ps1
 
-      - name: Audit Rust advisories locally
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2.84.0
+        with:
+          tool: cargo-audit@0.22.2
+
+      - name: Audit Rust vulnerabilities locally
         working-directory: app
         shell: bash
-        run: |
-          cargo install cargo-audit --locked --version 0.22.2
-          cargo audit --deny warnings
+        run: cargo audit
 
       - name: Filesystem vulnerability, secret, and misconfiguration scan
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0

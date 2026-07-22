@@ -56,5 +56,6 @@ flowchart LR
 - 위 통제가 unit/integration/production verification에서 재현된다.
 - 모든 GitHub Action은 40자리 commit SHA로 고정된다.
 - secret·dependency·filesystem·container scan이 high/critical finding에서 CI를 실패시킨다.
+- RustSec vulnerability는 실패시키며, 실행 취약점이 아닌 upstream `unmaintained` 경고는 CI 로그에 남겨 별도로 검토한다. 현재 GTK3 경고는 Linux Tauri transitive dependency이고 production server runtime 및 Windows artifact 실행 경로에는 포함되지 않는다.
 - production rollback과 Bucket restore drill이 활성 DB를 변경하지 않고 통과한다.
 - key/token 회전과 domain 차단 순서가 운영 runbook으로 고정된다.

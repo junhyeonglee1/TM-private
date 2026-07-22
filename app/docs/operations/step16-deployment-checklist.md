@@ -7,7 +7,8 @@
 - [ ] frontend lint·typecheck·test 통과
 - [ ] Rust fmt·workspace test·Clippy 통과
 - [ ] STEP 16 static secret/workflow policy scan 통과
-- [ ] RustSec와 Trivy filesystem high/critical finding 0
+- [ ] RustSec vulnerability 0; upstream unmaintained warning 검토 완료
+- [ ] Trivy filesystem high/critical finding 0
 - [ ] production image build와 Trivy image finding 0
 - [ ] Action reference가 모두 40자리 commit SHA
 - [ ] DB·backup·token·API key·SSH key가 source/artifact에 없음
