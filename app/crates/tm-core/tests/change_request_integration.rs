@@ -405,7 +405,9 @@ fn restoring_v1_backup_migrates_and_preserves_non_rewindable_ledger() -> Result<
     let backup_path = std::path::Path::new(&backup.path);
     let v1 = Connection::open(backup_path)?;
     v1.execute_batch(
-        "DROP TABLE device_auth_events;
+        "DROP TABLE task_report_feedback;
+         DROP TABLE task_report_runs;
+         DROP TABLE device_auth_events;
          DROP TABLE registered_devices;
          DROP TABLE device_pairings;
          DROP TABLE scheduler_effects;
