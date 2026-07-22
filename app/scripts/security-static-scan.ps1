@@ -103,6 +103,22 @@ if ($entrypoint -notmatch 'exec\s+gosu\s+tm:tm\s+/usr/local/bin/tm-server' -or
     $violations.Add('The Railway entrypoint does not drop server and backup processes to the tm user.')
 }
 
+$databaseSource = [System.IO.File]::ReadAllText((Join-Path $appRoot 'crates\tm-core\src\database.rs'), [System.Text.Encoding]::UTF8)
+$schemaMatch = [System.Text.RegularExpressions.Regex]::Match(
+    $databaseSource,
+    'const\s+SCHEMA_VERSION:\s*i64\s*=\s*(\d+);'
+)
+$backupOnce = [System.IO.File]::ReadAllText((Join-Path $appRoot 'scripts\railway-backup-once.sh'), [System.Text.Encoding]::UTF8)
+if (-not $schemaMatch.Success) {
+    $violations.Add('The current database schema version could not be determined.')
+}
+else {
+    $expectedBackupGuard = 'if [ "$schema_version" -lt 1 ] || [ "$schema_version" -gt ' + $schemaMatch.Groups[1].Value + ' ]; then'
+    if (-not $backupOnce.Contains($expectedBackupGuard)) {
+        $violations.Add('The remote backup schema guard does not match the current database schema version.')
+    }
+}
+
 $trivyIgnorePath = Join-Path $appRoot '.trivyignore.yaml'
 if (-not (Test-Path -LiteralPath $trivyIgnorePath -PathType Leaf)) {
     $violations.Add('The reviewed Trivy exception file is missing.')
