@@ -719,7 +719,7 @@ Codex TODO:
 
 ## STEP 17 — 첫 실제 AI 비서 기능
 
-상태: 구현 완료 · production 점진 배포 대기
+상태: 완료
 
 첫 기능 후보:
 
@@ -738,10 +738,10 @@ Codex TODO:
 
 - [x] 기존 OpenAI client·인증·비용 원장과 side-effect 없는 digest fact 조회를 이용해 최소 기능 구현
 - [x] 전용 read-only prompt·Structured Outputs·후보 ID 재검증·하루/요청별 비용 상한·feature kill switch 정의
-- [ ] staging 검증 후 production 점진 활성화
-- [ ] 실제 품질·비용·실패·사용 편의성 측정
-- [ ] rollback과 기능 kill switch 검증
-- [ ] 측정 결과에 따라 다음 기능 추가 여부 보고
+- [x] CI와 기능 비활성 production 배포를 통과한 뒤 production 점진 활성화
+- [x] 실제 품질·비용·실패·사용 편의성 1차 측정
+- [x] 기능 kill switch 차단·복구 검증
+- [x] 측정 결과에 따라 다음 기능 추가 여부 보고
 
 완료 게이트:
 
@@ -753,6 +753,19 @@ Codex TODO:
 - production cloud에서는 `TM_TASK_REPORT_ENABLED` 기본값이 false다. schema 10을 먼저 배포·검증한 뒤 별도 배포로 켠다.
 - Windows와 PWA는 동일한 결과·token·추정 비용·latency를 표시하고 보고서당 한 번 `도움 됨/도움 안 됨`을 기록한다.
 - 자동 일정 알림, 정기 지출, 운동, 주식은 이번 기능에 포함하지 않고 별도 selector·prompt·endpoint로 확장한다.
+
+검증 결과:
+
+- 최종 GitHub Actions Windows build `29920549337`과 STEP 16 security `29920553236`이 frontend, 전체 Rust test·Clippy, Windows 실행 파일, RustSec, Trivy filesystem/image high·critical 0건과 secret/workflow policy를 통과했다.
+- 기능 비활성 schema 10 배포에서 POST가 OpenAI 호출 전에 `503`으로 차단되는 kill switch를 확인했다. 배포 중 remote backup guard의 schema 9 상한을 발견해 schema 10으로 고치고 현재 DB 버전과 자동 대조하는 정적 검사를 추가했다.
+- 최종 source 배포 `d119bfcf-0c41-4ce9-a29f-05bfce502481`에서 schema 10 암호화 remote backup `succeeded`·integrity `ok`를 확인한 뒤 활성화 배포 `210ad081-7722-4cfe-85c6-85ca1cb900cc`을 완료했다.
+- production 실행 `019f89ef-e6d1-7982-b0e9-cc0a103904dc`은 실제 후보 1건 중 같은 Task ID 1건만 제안했다. 허위 ID·불필요한 경고·Task/Note mutation은 0건이었다.
+- 실제 1회는 input 357, output 128, 총 485 token, 추정 USD 0.002813, latency 3.394초였다. 2026-07 월 내부 비용 ledger는 누적 USD 0.011209, USD 20 hard stop 미도달이다.
+- production 모바일 PWA는 HTTP 200과 Task report UI를 반환했고 활성 배포 error-level 로그는 0건이다. Windows artifact를 SHA-256 검증 후 `dist/release`에 적용하고 이전 실행 파일을 별도 보존했다.
+
+다음 기능 판단:
+
+- 안전성·비용·응답 형식은 첫 운영 게이트를 통과했다. 다만 품질 표본은 1건이고 사용자 평가는 아직 없으므로 일정·정기 지출·운동·주식 기능 추가는 최소 1~2주 `도움 됨/도움 안 됨` 기록을 모은 뒤 우선순위를 정한다.
 
 ## 단계 진행 규칙
 

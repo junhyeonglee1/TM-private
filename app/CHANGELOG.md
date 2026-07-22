@@ -44,6 +44,9 @@
 
 ### Changed
 
+- schema 10 배포와 암호화 remote backup 지원 상한을 일치시키고, DB 현재 schema와 backup guard가 어긋나면 CI 정적 검사가 실패하도록 강화했다.
+- STEP 17 production verifier가 `/readyz`의 실제 계약과 ops schema·backup 상태를 분리 검증하고 Credential Locker 객체를 오류 없이 정리하도록 수정했다.
+
 - Railway Volume 서비스가 replica 구성으로 해석되지 않도록 Config as Code의 `multiRegionConfig`를 `null`로 명시했다.
 - SQLite schema 4에서 Task·Note·Checklist에 optimistic concurrency용 정수 `version`을 추가하고 read DTO에도 노출했다.
 - 현재 mutation ledger와 일치하지 않는 backup 복원을 거부해 감사·idempotency 이력의 rewind를 차단했다.

@@ -40,3 +40,22 @@ global AI 사고라면 STEP 16 절차로 `TM_AI_ENABLED=false`를 적용한다. 
 - 사용자가 `다시 분석`을 누르는 빈도
 
 초기 실제 1회 검증은 기능 안전성 검증이며 품질 결론을 내리기 위한 표본은 아니다. 최소 1~2주 사용 기록을 모은 뒤 prompt 또는 후보 선정 순서를 조정한다.
+
+## 2026-07-22 production 검증 결과
+
+- 최종 source commit: `1f17a26`
+- GitHub Actions: Windows build `29920549337`, security `29920553236` 성공
+- 기능 비활성 source 배포: `d119bfcf-0c41-4ce9-a29f-05bfce502481`
+- 기능 활성 배포: `210ad081-7722-4cfe-85c6-85ca1cb900cc`
+- database와 암호화 remote backup: schema 10, `succeeded`, integrity `ok`
+- kill switch: 비활성 상태의 확인된 POST가 OpenAI 호출 전에 HTTP 503
+- 실제 실행 ID: `019f89ef-e6d1-7982-b0e9-cc0a103904dc`
+- 결과: 후보 1건, 우선순위 1건, 허위 Task ID 0건, Task·Note mutation 0건
+- 사용량: input 357, output 128, 총 485 token
+- 추정 비용: 2,813 microUSD, 약 USD 0.002813
+- latency: 3,394ms
+- 월 비용 ledger: 2026-07 누적 11,209 microUSD, 남은 hard-stop 예산 19,988,791 microUSD
+- Windows·모바일: 검증된 Windows artifact 적용, production PWA HTTP 200과 Task report UI 확인
+- 사용자 평가: 아직 없음. 사용자가 실제로 유용성을 판단한 뒤 보고서당 한 번만 기록한다.
+
+점진 배포 중 기존 `railway-backup-once.sh`의 지원 상한이 schema 9로 남아 새 backup이 거부되는 문제를 발견했다. 상한을 schema 10으로 갱신했고, 앞으로 `tm-core`의 현재 schema와 backup guard가 다르면 보안 정적 검사가 CI를 실패시키도록 보완했다.
