@@ -49,34 +49,36 @@ pub struct TaskReportCompletion {
     pub failure_code: Option<String>,
 }
 
-pub(crate) fn begin(
-    database: &Database,
-    id: &str,
-    date: NaiveDate,
-    actor: &str,
-    candidate_count: usize,
-    prompt_version: &str,
-    model: &str,
-    daily_limit: u32,
-) -> Result<TaskReportRun> {
-    validate_text("task report ID", id, 128)?;
-    validate_text("task report actor", actor, 256)?;
-    validate_text("task report prompt version", prompt_version, 64)?;
-    validate_text("task report model", model, 128)?;
-    if candidate_count == 0 || candidate_count > 20 || daily_limit == 0 {
+#[derive(Debug, Clone, Copy)]
+pub struct TaskReportStart<'a> {
+    pub id: &'a str,
+    pub date: NaiveDate,
+    pub actor: &'a str,
+    pub candidate_count: usize,
+    pub prompt_version: &'a str,
+    pub model: &'a str,
+    pub daily_limit: u32,
+}
+
+pub(crate) fn begin(database: &Database, input: &TaskReportStart<'_>) -> Result<TaskReportRun> {
+    validate_text("task report ID", input.id, 128)?;
+    validate_text("task report actor", input.actor, 256)?;
+    validate_text("task report prompt version", input.prompt_version, 64)?;
+    validate_text("task report model", input.model, 128)?;
+    if input.candidate_count == 0 || input.candidate_count > 20 || input.daily_limit == 0 {
         return Err(invalid("task report limits are invalid"));
     }
     database.transaction(TransactionBehavior::Immediate, |transaction| {
         let attempts: u32 = transaction.query_row(
             "SELECT count(*) FROM task_report_runs
              WHERE report_date = ?1 AND status <> 'no_tasks'",
-            [date],
+            [input.date],
             |row| row.get(0),
         )?;
-        if attempts >= daily_limit {
+        if attempts >= input.daily_limit {
             return Err(Error::AiDailyLimitExceeded {
                 operation: "task_report".to_owned(),
-                limit: daily_limit,
+                limit: input.daily_limit,
             });
         }
         transaction.execute(
@@ -85,16 +87,16 @@ pub(crate) fn begin(
                 model, estimated_cost_microusd, created_at
              ) VALUES (?1, ?2, ?3, 'started', ?4, ?5, ?6, 0, ?7)",
             params![
-                id,
-                date,
-                actor,
-                candidate_count as u32,
-                prompt_version,
-                model,
+                input.id,
+                input.date,
+                input.actor,
+                input.candidate_count as u32,
+                input.prompt_version,
+                input.model,
                 now_utc()
             ],
         )?;
-        query_run(transaction, id)
+        query_run(transaction, input.id)
     })
 }
 

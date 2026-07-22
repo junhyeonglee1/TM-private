@@ -16,7 +16,7 @@ use crate::{
     MigrationDryRun, MigrationManifest, Note, NoteAggregate, NotePatch, NoteType, Project, Result,
     SearchHit, SessionCompletion, SessionStatus, StartSessionInput, Tag, Task, TaskAggregate,
     TaskDayEntry, TaskDayStatus, TaskEvent, TaskPatch, TaskReportCompletion, TaskReportRun,
-    TaskStatus, TmHome, TrashEntityType, TrashItem, UpdateChangeRequestInput,
+    TaskReportStart, TaskStatus, TmHome, TrashEntityType, TrashItem, UpdateChangeRequestInput,
     UpdateTaskAggregateInput, WorkLog, WorkSession, ai_budget, backup, change_request,
     database::{Database, SCHEMA_VERSION, new_id, now_utc, today_seoul},
     digest,
@@ -1096,26 +1096,8 @@ impl TmCore {
         digest::preview(&self.database, kind, date)
     }
 
-    pub fn begin_task_report(
-        &self,
-        id: &str,
-        date: NaiveDate,
-        actor: &str,
-        candidate_count: usize,
-        prompt_version: &str,
-        model: &str,
-        daily_limit: u32,
-    ) -> Result<TaskReportRun> {
-        task_report::begin(
-            &self.database,
-            id,
-            date,
-            actor,
-            candidate_count,
-            prompt_version,
-            model,
-            daily_limit,
-        )
+    pub fn begin_task_report(&self, input: &TaskReportStart<'_>) -> Result<TaskReportRun> {
+        task_report::begin(&self.database, input)
     }
 
     pub fn record_empty_task_report(

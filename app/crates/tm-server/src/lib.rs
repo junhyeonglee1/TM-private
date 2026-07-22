@@ -39,7 +39,7 @@ use chrono::{DateTime, FixedOffset, Utc};
 use serde::{Deserialize, Serialize};
 use tm_core::{
     ASSISTANT_ACTION_APPROVAL_TTL_SECONDS, AiBudgetStatus, AiTokenUsage, Error as CoreError,
-    HealthReport, SchedulerStatus, TaskReportCompletion, TmCore,
+    HealthReport, SchedulerStatus, TaskReportCompletion, TaskReportStart, TmCore,
 };
 use uuid::Uuid;
 
@@ -1408,15 +1408,15 @@ async fn generate_task_report(
 
     state
         .core
-        .begin_task_report(
-            &run_id,
-            report_date,
-            &actor,
-            candidates.len(),
-            TASK_REPORT_PROMPT_VERSION,
-            &model,
-            TASK_REPORT_DAILY_LIMIT,
-        )
+        .begin_task_report(&TaskReportStart {
+            id: &run_id,
+            date: report_date,
+            actor: &actor,
+            candidate_count: candidates.len(),
+            prompt_version: TASK_REPORT_PROMPT_VERSION,
+            model: &model,
+            daily_limit: TASK_REPORT_DAILY_LIMIT,
+        })
         .map_err(|error| task_report_core_error(error, request_id.0.clone()))?;
     let started = Instant::now();
     let reservation = match state.core.reserve_ai_budget(

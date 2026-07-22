@@ -2,7 +2,8 @@ use chrono::NaiveDate;
 use serde_json::json;
 use tempfile::TempDir;
 use tm_core::{
-    CreateTaskInput, DigestKind, Error, Result, TaskReportCompletion, TaskStatus, TmCore, TmHome,
+    CreateTaskInput, DigestKind, Error, Result, TaskReportCompletion, TaskReportStart, TaskStatus,
+    TmCore, TmHome,
 };
 
 fn fixture() -> Result<(TempDir, TmCore)> {
@@ -41,25 +42,25 @@ fn daily_attempt_limit_and_append_only_feedback_are_enforced() -> Result<()> {
     let (_temporary, core) = fixture()?;
     let date = NaiveDate::from_ymd_opt(2026, 7, 22).expect("valid date");
     for index in 1..=4 {
-        core.begin_task_report(
-            &format!("report-{index}"),
+        core.begin_task_report(&TaskReportStart {
+            id: &format!("report-{index}"),
             date,
-            "primary-admin",
-            1,
-            "step17-task-report-v1",
-            "gpt-5.6-terra",
-            4,
-        )?;
+            actor: "primary-admin",
+            candidate_count: 1,
+            prompt_version: "step17-task-report-v1",
+            model: "gpt-5.6-terra",
+            daily_limit: 4,
+        })?;
     }
-    let fifth = core.begin_task_report(
-        "report-5",
+    let fifth = core.begin_task_report(&TaskReportStart {
+        id: "report-5",
         date,
-        "primary-admin",
-        1,
-        "step17-task-report-v1",
-        "gpt-5.6-terra",
-        4,
-    );
+        actor: "primary-admin",
+        candidate_count: 1,
+        prompt_version: "step17-task-report-v1",
+        model: "gpt-5.6-terra",
+        daily_limit: 4,
+    });
     assert!(matches!(
         fifth,
         Err(Error::AiDailyLimitExceeded { limit: 4, .. })

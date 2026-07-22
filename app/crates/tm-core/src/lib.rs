@@ -32,4 +32,4 @@ pub use migration::{MigrationDryRun, MigrationManifest, MigrationTableManifest};
 pub use model::*;
 pub use mutation::*;
 pub use scheduler::*;
-pub use task_report::{TaskReportCompletion, TaskReportRun};
+pub use task_report::{TaskReportCompletion, TaskReportRun, TaskReportStart};
