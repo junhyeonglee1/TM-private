@@ -5074,7 +5074,8 @@ mod tests {
         let shell_body = String::from_utf8(
             to_bytes(shell.into_body(), 1024 * 1024)
                 .await
-                .expect("read PWA shell"),
+                .expect("read PWA shell")
+                .to_vec(),
         )
         .expect("PWA shell is UTF-8");
         assert!(shell_body.contains(r#"id="tab-stocks""#));
@@ -5095,7 +5096,8 @@ mod tests {
         let stock_script = String::from_utf8(
             to_bytes(stock_script.into_body(), 2 * 1024 * 1024)
                 .await
-                .expect("read PWA script"),
+                .expect("read PWA script")
+                .to_vec(),
         )
         .expect("PWA script is UTF-8");
         assert!(stock_script.contains("embed-widget-advanced-chart.js"));
