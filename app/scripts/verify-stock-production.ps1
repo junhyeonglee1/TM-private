@@ -188,7 +188,7 @@ try {
     }
     $stockCatalog = Invoke-TmRequest -Client $client -Method ([System.Net.Http.HttpMethod]::Get) -Uri "$base/mobile/stock-catalog.json"
     Require-Status $stockCatalog 200 "$stage-catalog"
-    if ($stockCatalog.Body -notmatch '"ticker":"005930","name":"삼성전자"' -or
+    if ($stockCatalog.Body -notmatch '"ticker":"005930","name":"\uC0BC\uC131\uC804\uC790"' -or
         $stockCatalog.Body -notmatch '"ticker":"AAPL","name":"Apple Inc\."') {
         throw 'The production stock name-search catalog is incomplete.'
     }
@@ -286,7 +286,7 @@ try {
         symbols = @('NASDAQ:AAPL', 'KRX:005930')
         desktopSync = $true
         mobileSync = $true
-        sandboxWithoutSameOrigin = $true
+        opaqueDataOriginSandbox = $true
         pwaCspVerified = $true
         aiCostBeforeMicrousd = $costBefore
         aiCostAfterMicrousd = $costAfter
