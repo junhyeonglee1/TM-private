@@ -181,6 +181,8 @@ try {
         $pwaScript.Body -notmatch 'data:text/html;charset=utf-8' -or
         $pwaScript.Body -notmatch 'default-src ''none''' -or
         $pwaScript.Body -notmatch 'embed-widget-advanced-chart\.js' -or
+        $pwaScript.Body -notmatch 'id="tradingview-embed-script"' -or
+        $pwaScript.Body -match 'createElement\("script"\)' -or
         $pwaScript.Body -notmatch 'support_host' -or
         $pwaScript.Body -match '__TAURI' -or
         $pwaScript.Body -notmatch '/mobile/stock-catalog\.json') {

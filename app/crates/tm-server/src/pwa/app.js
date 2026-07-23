@@ -341,7 +341,66 @@ function stockWidgetUrl(symbol, watchlist) {
     withdateranges: true
   }).replaceAll("<", "\\u003c");
   const externalUrl = stockTradingViewUrl(safeSymbol);
-  const widgetDocument = `<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-tm-stock-widget-v1' https://s3.tradingview.com; style-src 'unsafe-inline'; frame-src https://s.tradingview.com https://www.tradingview-widget.com https://www.tradingview.com; base-uri 'none'; form-action 'none'"><style>:root{color-scheme:dark;font-family:system-ui,sans-serif}*{box-sizing:border-box}html,body,.widget-shell,.tradingview-widget-container{width:100%;height:100%;margin:0}body{min-height:420px;overflow:hidden;background:#10141d;color:#d9e0f2}.widget-shell{position:relative;display:grid;grid-template-rows:minmax(0,1fr) 26px}.tradingview-widget-container{min-height:0}.tradingview-widget-container__widget{width:100%;height:100%;min-height:394px}.widget-status{position:absolute;inset:0 0 26px;z-index:2;align-content:center;display:grid;justify-items:center;gap:8px;padding:24px;background:#10141d;color:#929cb3;text-align:center}.widget-status strong{color:#d9e0f2}.widget-status p{margin:0;font-size:12px;line-height:1.5}.widget-status a{color:#aebcff}.widget-status.hidden{display:none}.tradingview-widget-copyright{height:26px;padding:5px 9px;background:#10141d;color:#929cb3;font-size:11px}.tradingview-widget-copyright a{color:#aebcff;text-decoration:none}</style></head><body><main class="widget-shell"><div class="tradingview-widget-container"><div class="tradingview-widget-container__widget"></div></div><div id="widget-status" class="widget-status" role="status"><strong>시장 차트를 불러오는 중입니다.</strong><p>TradingView 연결 상태에 따라 몇 초 정도 걸릴 수 있습니다.</p></div><div class="tradingview-widget-copyright"><a href="${externalUrl}" rel="noopener nofollow noreferrer" target="_blank">시장 차트</a> by TradingView</div></main><script nonce="tm-stock-widget-v1">(()=>{const c=document.querySelector(".tradingview-widget-container"),s=document.getElementById("widget-status"),f=()=>{s.innerHTML='<strong>차트를 표시하지 못했습니다.</strong><p>인터넷 연결 또는 TradingView 위젯 제한을 확인하세요. <a href="${externalUrl}" rel="noopener nofollow noreferrer" target="_blank">TradingView에서 확인</a></p>';s.classList.remove("hidden")},o=new MutationObserver(()=>{const i=c.querySelector("iframe");if(!i)return;i.addEventListener("load",()=>s.classList.add("hidden"),{once:true});setTimeout(()=>s.classList.add("hidden"),1500);o.disconnect()});o.observe(c,{childList:true,subtree:true});const e=document.createElement("script");e.async=true;e.src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js";e.textContent=${JSON.stringify(configuration)};e.addEventListener("error",f,{once:true});c.append(e);setTimeout(()=>{if(!c.querySelector("iframe"))f()},12000)})();</script></body></html>`;
+  const widgetDocument = `<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="referrer" content="no-referrer">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-tm-stock-widget-v1' https://s3.tradingview.com; style-src 'unsafe-inline'; frame-src https://s.tradingview.com https://www.tradingview-widget.com https://www.tradingview.com; base-uri 'none'; form-action 'none'">
+  <style>
+    :root{color-scheme:dark;font-family:system-ui,sans-serif}
+    *{box-sizing:border-box}html,body,.widget-shell,.tradingview-widget-container{width:100%;height:100%;margin:0}
+    body{min-height:420px;overflow:hidden;background:#10141d;color:#d9e0f2}
+    .widget-shell{position:relative;display:grid;grid-template-rows:minmax(0,1fr) 26px}
+    .tradingview-widget-container{min-height:0}.tradingview-widget-container__widget{width:100%;height:100%;min-height:394px}
+    .widget-status{position:absolute;inset:0 0 26px;z-index:2;align-content:center;display:grid;justify-items:center;gap:8px;padding:24px;background:#10141d;color:#929cb3;text-align:center}
+    .widget-status strong{color:#d9e0f2}.widget-status p{margin:0;font-size:12px;line-height:1.5}.widget-status a{color:#aebcff}.widget-status.hidden{display:none}
+    .tradingview-widget-copyright{height:26px;padding:5px 9px;background:#10141d;color:#929cb3;font-size:11px}
+    .tradingview-widget-copyright a{color:#aebcff;text-decoration:none}
+  </style>
+</head>
+<body>
+  <main class="widget-shell">
+    <div class="tradingview-widget-container">
+      <div class="tradingview-widget-container__widget"></div>
+      <script
+        id="tradingview-embed-script"
+        type="text/javascript"
+        src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js"
+        async
+      >${configuration}</script>
+    </div>
+    <div id="widget-status" class="widget-status" role="status"><strong>시장 차트를 불러오는 중입니다.</strong><p>TradingView 연결 상태에 따라 몇 초 정도 걸릴 수 있습니다.</p></div>
+    <div class="tradingview-widget-copyright"><a href="${externalUrl}" rel="noopener nofollow noreferrer" target="_blank">시장 차트</a> by TradingView</div>
+  </main>
+  <script nonce="tm-stock-widget-v1">
+    (() => {
+      const container = document.querySelector(".tradingview-widget-container");
+      const status = document.getElementById("widget-status");
+      const fail = () => {
+        status.innerHTML = '<strong>차트를 표시하지 못했습니다.</strong><p>인터넷 연결 또는 TradingView 위젯 제한을 확인하세요. <a href="${externalUrl}" rel="noopener nofollow noreferrer" target="_blank">TradingView에서 확인</a></p>';
+        status.classList.remove("hidden");
+      };
+      let observer;
+      const revealWhenReady = () => {
+        const frame = container.querySelector("iframe");
+        if (!frame) return false;
+        frame.addEventListener("load", () => status.classList.add("hidden"), { once: true });
+        setTimeout(() => status.classList.add("hidden"), 1500);
+        observer?.disconnect();
+        return true;
+      };
+      observer = new MutationObserver(revealWhenReady);
+      if (!revealWhenReady()) observer.observe(container, { childList: true, subtree: true });
+      window.addEventListener("error", (event) => {
+        if (event.target?.id === "tradingview-embed-script") fail();
+      }, true);
+      setTimeout(() => { if (!container.querySelector("iframe")) fail(); }, 12000);
+    })();
+  </script>
+</body>
+</html>`;
   return `data:text/html;charset=utf-8,${encodeURIComponent(widgetDocument)}`;
 }
 

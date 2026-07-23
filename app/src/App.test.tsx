@@ -369,10 +369,12 @@ describe("TM 데스크톱 UI", () => {
     expect(source).toMatch(/^data:text\/html;charset=utf-8,/);
     const widgetDocument = decodeURIComponent(source.slice(source.indexOf(",") + 1));
     expect(widgetDocument).toContain("https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js");
-    expect(widgetDocument).toContain("\\\"symbol\\\":\\\"NASDAQ:AAPL\\\"");
-    expect(widgetDocument).toContain("\\\"support_host\\\":\\\"https://www.tradingview.com\\\"");
-    expect(widgetDocument).toContain("\\\"timezone\\\":\\\"Asia/Seoul\\\"");
-    expect(widgetDocument).toContain("\\\"save_image\\\":false");
+    expect(widgetDocument).toContain('id="tradingview-embed-script"');
+    expect(widgetDocument).toContain('"symbol":"NASDAQ:AAPL"');
+    expect(widgetDocument).toContain('"support_host":"https://www.tradingview.com"');
+    expect(widgetDocument).toContain('"timezone":"Asia/Seoul"');
+    expect(widgetDocument).toContain('"save_image":false');
+    expect(widgetDocument).not.toContain('document.createElement("script")');
     expect(widgetDocument).toContain("default-src 'none'");
     expect(widgetDocument).not.toContain("__TAURI");
 

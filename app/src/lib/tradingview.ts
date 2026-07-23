@@ -55,7 +55,15 @@ export const stockWidgetUrl = (
 </head>
 <body>
   <main class="widget-shell">
-    <div class="tradingview-widget-container"><div id="tradingview-widget" class="tradingview-widget-container__widget"></div></div>
+    <div class="tradingview-widget-container">
+      <div id="tradingview-widget" class="tradingview-widget-container__widget"></div>
+      <script
+        id="tradingview-embed-script"
+        type="text/javascript"
+        src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js"
+        async
+      >${configuration}</script>
+    </div>
     <div id="widget-status" class="widget-status" role="status"><strong>시장 차트를 불러오는 중입니다.</strong><p>TradingView 연결 상태에 따라 몇 초 정도 걸릴 수 있습니다.</p></div>
     <div class="tradingview-widget-copyright"><a href="${externalUrl}" rel="noopener nofollow noreferrer" target="_blank">시장 차트</a> by TradingView</div>
   </main>
@@ -67,20 +75,20 @@ export const stockWidgetUrl = (
         status.innerHTML = '<strong>차트를 표시하지 못했습니다.</strong><p>인터넷 연결 또는 TradingView 위젯 제한을 확인하세요. <a href="${externalUrl}" rel="noopener nofollow noreferrer" target="_blank">TradingView에서 확인</a></p>';
         status.classList.remove("hidden");
       };
-      const observer = new MutationObserver(() => {
+      let observer;
+      const revealWhenReady = () => {
         const frame = container.querySelector("iframe");
-        if (!frame) return;
+        if (!frame) return false;
         frame.addEventListener("load", () => status.classList.add("hidden"), { once: true });
         setTimeout(() => status.classList.add("hidden"), 1500);
-        observer.disconnect();
-      });
-      observer.observe(container, { childList: true, subtree: true });
-      const script = document.createElement("script");
-      script.async = true;
-      script.src = "https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js";
-      script.textContent = ${JSON.stringify(configuration)};
-      script.addEventListener("error", fail, { once: true });
-      container.append(script);
+        observer?.disconnect();
+        return true;
+      };
+      observer = new MutationObserver(revealWhenReady);
+      if (!revealWhenReady()) observer.observe(container, { childList: true, subtree: true });
+      window.addEventListener("error", (event) => {
+        if (event.target?.id === "tradingview-embed-script") fail();
+      }, true);
       setTimeout(() => { if (!container.querySelector("iframe")) fail(); }, 12000);
     })();
   </script>
