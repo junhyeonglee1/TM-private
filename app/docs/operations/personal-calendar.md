@@ -32,3 +32,13 @@ Windows에서는 왼쪽 메뉴의 `캘린더`를 열고 날짜 또는 `일정 �
 - production DB와 암호화 원격 백업이 모두 schema 11이며, 백업 상태 `succeeded`와 integrity `ok`를 확인했다.
 - 임시 `매월 말일` 납부일을 production에 생성해 2026-07-31과 2026-08-31 occurrence를 확인하고 즉시 삭제했다. 삭제 후 남은 테스트 일정은 없다.
 - Windows 산출물은 `SHA256SUMS.txt`와 대조한 뒤 루트 실행 파일과 `dist/release`에 적용했다. 기존 실행 파일은 `dist/release/pre-calendar-20260723T001227Z`에 보존했다.
+
+## AI 캘린더 Production 검증 기록
+
+- 2026-07-23 GitHub Actions Windows build `29972151883`와 STEP 16 security `29972153727`이 커밋 `b88b3b2`를 통과했다.
+- Railway production deployment `dc429c95-a077-40e2-a5e2-d0d0e6504301`을 배포하고 서비스 상태 `healthy`, DB schema 11, 원격 백업 `succeeded`/`ok`, dead letter 0을 확인했다.
+- 일반 비서 prompt `calendar-assistant-v1`이 실제 production에서 `list_calendar_occurrences`만 사용해 당일 임시 납부일을 읽고 변경 제안을 만들지 않는 것을 확인했다.
+- 오늘 리포트 prompt `calendar-task-report-v1`이 같은 납부일을 `scheduleHighlights`에 구조화해 반환하는 것을 확인했다. 두 AI 응답 모두 임시 일정의 비공개 메모를 포함하지 않았다.
+- 최종 acceptance의 일반 비서 예상 비용은 4,258 microUSD, 오늘 리포트는 7,405 microUSD였다. 검증 직후 당월 TM API 원장은 49,266 microUSD였다.
+- 임시 검증 일정은 `finally` cleanup으로 삭제했으며, production 재조회 결과 남은 `TM AI calendar verification` 일정은 0건이다.
+- 새 Windows 실행 파일 SHA-256은 `3EFD475BCF507CDF33DB4B1BA8002CE13BC175E188441E53C557A66A24739220`이다. 검증 시 기존 TM 프로세스가 실행 중이어서 강제 종료하지 않고 `dist/release/tm-ai-calendar.exe`에 안전하게 대기시켰다.
