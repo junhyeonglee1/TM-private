@@ -84,14 +84,14 @@ function Invoke-DesktopCommand {
         [string]$Base,
         [string]$Token,
         [string]$Command,
-        [object]$Args,
+        [object]$CommandArgs,
         [switch]$Confirm
     )
     $headers = @{}
     if ($Confirm) {
         $headers['x-tm-confirm-desktop-command'] = $Command
     }
-    $body = @{ args = $Args } | ConvertTo-Json -Depth 12 -Compress
+    $body = @{ args = $CommandArgs } | ConvertTo-Json -Depth 12 -Compress
     $response = Invoke-TmRequest `
         -Client $Client `
         -Method ([System.Net.Http.HttpMethod]::Post) `
@@ -154,11 +154,26 @@ try {
     $stage = 'pwa-security'
     $pwa = Invoke-TmRequest -Client $client -Method ([System.Net.Http.HttpMethod]::Get) -Uri "$base/mobile/"
     Require-Status $pwa 200 $stage
-    if ($pwa.Body -notmatch 'id="tab-stocks"' -or
-        $pwa.Body -notmatch 'TradingView 외부 차트에서 확인' -or
-        $pwa.ContentSecurityPolicy -notmatch 'https://s3\.tradingview\.com' -or
-        $pwa.ContentSecurityPolicy -notmatch 'frame-src.+https://s\.tradingview\.com') {
-        throw 'The production PWA stock shell or TradingView CSP is missing.'
+    $hasStockTab = [regex]::IsMatch([string]$pwa.Body, 'id="tab-stocks"')
+    $hasExternalFallback = [regex]::IsMatch(
+        [string]$pwa.Body,
+        'id="stock-fallback-link"'
+    )
+    $hasTradingViewScript = [regex]::IsMatch(
+        [string]$pwa.ContentSecurityPolicy,
+        'https://s3\.tradingview\.com'
+    )
+    $hasTradingViewFrame = [regex]::IsMatch(
+        [string]$pwa.ContentSecurityPolicy,
+        'frame-src.+https://s\.tradingview\.com'
+    )
+    if (-not ($hasStockTab -and $hasExternalFallback -and
+        $hasTradingViewScript -and $hasTradingViewFrame)) {
+        throw (
+            'The production PWA stock shell or TradingView CSP is missing. ' +
+            "tab=$hasStockTab fallback=$hasExternalFallback " +
+            "script=$hasTradingViewScript frame=$hasTradingViewFrame"
+        )
     }
     $pwaScript = Invoke-TmRequest -Client $client -Method ([System.Net.Http.HttpMethod]::Get) -Uri "$base/mobile/app.js"
     Require-Status $pwaScript 200 "$stage-script"
@@ -174,10 +189,10 @@ try {
     $costBefore = [int64](($costBeforeResponse.Body | ConvertFrom-Json).data.api.usedMicrousd)
 
     $stage = 'desktop-stock-sync'
-    $watchlist = @(Invoke-DesktopCommand -Client $client -Base $base -Token $token -Command 'get_stock_watchlist' -Args @{})
+    $watchlist = @(Invoke-DesktopCommand -Client $client -Base $base -Token $token -Command 'get_stock_watchlist' -CommandArgs @{})
     $fixtures = @(
         @{ market = 'NASDAQ'; ticker = 'AAPL'; displayName = 'Apple'; symbol = 'NASDAQ:AAPL' },
-        @{ market = 'KRX'; ticker = '005930'; displayName = '삼성전자'; symbol = 'KRX:005930' }
+        @{ market = 'KRX'; ticker = '005930'; displayName = 'Samsung Electronics'; symbol = 'KRX:005930' }
     )
     foreach ($fixture in $fixtures) {
         if (-not @($watchlist | Where-Object { [string]$_.symbol -eq [string]$fixture.symbol }).Count) {
@@ -186,7 +201,7 @@ try {
                 -Base $base `
                 -Token $token `
                 -Command 'upsert_stock_watchlist_item' `
-                -Args @{ input = @{ market = $fixture.market; ticker = $fixture.ticker; displayName = $fixture.displayName } } `
+                -CommandArgs @{ input = @{ market = $fixture.market; ticker = $fixture.ticker; displayName = $fixture.displayName } } `
                 -Confirm
             if ([string]$saved.symbol -ne [string]$fixture.symbol) {
                 throw "Unexpected normalized stock symbol: $($saved.symbol)"
@@ -288,7 +303,7 @@ finally {
                     -Base $base `
                     -Token $token `
                     -Command 'delete_stock_watchlist_item' `
-                    -Args @{ symbol = $symbol } `
+                    -CommandArgs @{ symbol = $symbol } `
                     -Confirm | Out-Null
             }
             catch {
