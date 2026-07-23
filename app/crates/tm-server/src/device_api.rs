@@ -131,6 +131,9 @@ pub(super) fn device_route_allowed(method: &Method, path: &str) -> bool {
             | "/api/v1/desktop/commands/create_calendar_event"
             | "/api/v1/desktop/commands/update_calendar_event"
             | "/api/v1/desktop/commands/delete_calendar_event"
+            | "/api/v1/desktop/commands/get_stock_watchlist"
+            | "/api/v1/desktop/commands/upsert_stock_watchlist_item"
+            | "/api/v1/desktop/commands/delete_stock_watchlist_item"
     ) {
         return method == Method::POST;
     }
@@ -600,7 +603,7 @@ mod tests {
     }
 
     #[test]
-    fn registered_devices_can_only_use_calendar_desktop_commands() {
+    fn registered_devices_can_only_use_approved_calendar_and_stock_commands() {
         assert!(device_route_allowed(
             &Method::POST,
             "/api/v1/desktop/commands/get_calendar_month"
@@ -608,6 +611,22 @@ mod tests {
         assert!(device_route_allowed(
             &Method::POST,
             "/api/v1/desktop/commands/create_calendar_event"
+        ));
+        assert!(device_route_allowed(
+            &Method::POST,
+            "/api/v1/desktop/commands/get_stock_watchlist"
+        ));
+        assert!(device_route_allowed(
+            &Method::POST,
+            "/api/v1/desktop/commands/upsert_stock_watchlist_item"
+        ));
+        assert!(device_route_allowed(
+            &Method::POST,
+            "/api/v1/desktop/commands/delete_stock_watchlist_item"
+        ));
+        assert!(!device_route_allowed(
+            &Method::GET,
+            "/api/v1/desktop/commands/get_stock_watchlist"
         ));
         assert!(!device_route_allowed(
             &Method::POST,

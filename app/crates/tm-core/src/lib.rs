@@ -18,6 +18,7 @@ mod migration;
 mod model;
 mod mutation;
 mod scheduler;
+mod stock_watchlist;
 mod task_report;
 
 pub use assistant_action::*;
@@ -34,4 +35,5 @@ pub use migration::{MigrationDryRun, MigrationManifest, MigrationTableManifest};
 pub use model::*;
 pub use mutation::*;
 pub use scheduler::*;
+pub use stock_watchlist::*;
 pub use task_report::{TaskReportCompletion, TaskReportRun, TaskReportStart};

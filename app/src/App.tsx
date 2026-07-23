@@ -6,6 +6,7 @@ import { CalendarPage } from "./components/CalendarPage";
 import { Icon, type IconName } from "./components/Icon";
 import { NotesPage, SearchPage, WorkLogsPage } from "./components/KnowledgePages";
 import { SessionPage } from "./components/SessionPage";
+import { StockPage } from "./components/StockPage";
 import { DeviceManagementPage } from "./components/DeviceManagementPage";
 import { TaskDetail } from "./components/TaskDetail";
 import { HistoryPage, InboxPage, ProjectsPage, TodayPage } from "./components/TaskPages";
@@ -39,6 +40,7 @@ type PageId =
   | "sessions"
   | "worklogs"
   | "notes"
+  | "stocks"
   | "search"
   | "change-requests"
   | "trash"
@@ -354,6 +356,7 @@ export function App({ api = defaultApi }: AppProps) {
     {
       title: "도구",
       items: [
+        { id: "stocks", label: "주식", icon: "chart" },
         { id: "search", label: "통합 검색", icon: "search" },
         { id: "change-requests", label: "개선 요청함", icon: "spark", count: pendingApprovalCount || undefined },
         { id: "trash", label: "휴지통", icon: "trash", count: snapshot.trash.length || undefined },
@@ -381,6 +384,8 @@ export function App({ api = defaultApi }: AppProps) {
         return <WorkLogsPage logs={snapshot.workLogs} onCreate={createWorkLog} onOpenTask={(task) => setSelectedTaskId(task.id)} onPromote={promoteWorkLog} onTrash={(workLogId) => moveRecordToTrash(workLogId, "work_log", "WorkLog")} projects={snapshot.projects} tasks={snapshot.tasks} />;
       case "notes":
         return <NotesPage notes={snapshot.notes} onCreate={createNote} onOpenTask={(task) => setSelectedTaskId(task.id)} onTrash={(noteId) => moveRecordToTrash(noteId, "note", "Note")} sessions={snapshot.recentSessions} tasks={snapshot.tasks} />;
+      case "stocks":
+        return <StockPage onDelete={api.deleteStockWatchlistItem} onLoad={api.getStockWatchlist} onNotify={notify} onUpsert={api.upsertStockWatchlistItem} />;
       case "search":
         return <SearchPage onOpenTask={(taskId) => setSelectedTaskId(taskId)} onSearch={(query) => api.search(query)} />;
       case "change-requests":

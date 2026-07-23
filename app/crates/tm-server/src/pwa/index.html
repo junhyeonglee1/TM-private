@@ -52,6 +52,7 @@
         <nav class="tabs" aria-label="모바일 메뉴">
           <button data-tab="assistant" aria-current="page">비서</button>
           <button data-tab="calendar">캘린더</button>
+          <button data-tab="stocks">주식</button>
           <button data-tab="tasks">할 일</button>
           <button data-tab="notes">노트</button>
           <button data-tab="approvals">승인</button>
@@ -127,6 +128,34 @@
           <section class="calendar-recurring" aria-labelledby="calendar-recurring-title">
             <h2 id="calendar-recurring-title">반복 일정</h2>
             <div id="calendar-recurring-list" class="card-list"></div>
+          </section>
+        </section>
+
+        <section id="tab-stocks" class="tab-panel panel hidden">
+          <div class="section-heading stock-heading">
+            <div><p class="eyebrow">조회 전용 · 거래소별 지연 가능</p><h1>주식 차트</h1></div>
+            <a id="stock-external-link" class="secondary stock-external-link" href="https://www.tradingview.com/symbols/NASDAQ-AAPL/" rel="noopener noreferrer" target="_blank">TradingView에서 열기</a>
+          </div>
+          <p class="muted">한국·미국 시세를 조회합니다. 주문, 계좌 연결, AI 분석은 없습니다.</p>
+          <section class="stock-chart-card" aria-labelledby="stock-chart-symbol">
+            <div class="stock-chart-heading"><div><p class="eyebrow">외부 데이터 · OpenAI 비용 없음</p><h2 id="stock-chart-symbol">NASDAQ:AAPL</h2></div><span id="stock-network" class="status-pill">온라인</span></div>
+            <div id="stock-chart-container" class="stock-chart-container"></div>
+            <p class="stock-disclaimer">시세는 지연되거나 일부 종목이 위젯에서 제한될 수 있습니다. 투자 추천이나 주문 기능을 제공하지 않습니다.</p>
+            <p class="stock-fallback">차트가 비어 있거나 KRX 종목 표시가 제한되면 우회 수집하지 않습니다. <a id="stock-fallback-link" href="https://www.tradingview.com/symbols/NASDAQ-AAPL/" rel="noopener noreferrer" target="_blank">TradingView 외부 차트에서 확인</a></p>
+          </section>
+          <section class="stock-watchlist-panel" aria-labelledby="stock-watchlist-title">
+            <div class="stock-watchlist-heading"><h2 id="stock-watchlist-title">관심 종목</h2><span id="stock-watchlist-count">0/50</span></div>
+            <div id="stock-watchlist" class="stock-watchlist-list"><p class="empty">아직 저장한 종목이 없습니다.</p></div>
+            <form id="stock-form" class="stock-form">
+              <h2>관심 종목 추가</h2>
+              <label for="stock-market">시장</label>
+              <select id="stock-market"><option value="KRX">한국 KRX</option><option value="NASDAQ">미국 NASDAQ</option><option value="NYSE">미국 NYSE</option><option value="AMEX">미국 AMEX</option></select>
+              <label for="stock-ticker">종목 코드</label>
+              <input id="stock-ticker" maxlength="10" autocomplete="off" placeholder="예: 005930" required>
+              <label for="stock-display-name">표시 이름</label>
+              <input id="stock-display-name" maxlength="80" autocomplete="off" placeholder="예: 삼성전자" required>
+              <button id="stock-save" class="primary" type="submit">관심 종목 저장</button>
+            </form>
           </section>
         </section>
 

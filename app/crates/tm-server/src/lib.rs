@@ -2510,7 +2510,7 @@ async fn security_headers(request: Request<Body>, next: Next) -> Response {
         headers.insert(
             CONTENT_SECURITY_POLICY_HEADER,
             HeaderValue::from_static(
-                "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+                "default-src 'self'; script-src 'self' https://s3.tradingview.com; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; frame-src 'self' https://s.tradingview.com https://www.tradingview-widget.com https://www.tradingview.com; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
             ),
         );
     } else {
@@ -2725,8 +2725,8 @@ mod tests {
         ASSISTANT_ACTION_APPROVAL_TTL_SECONDS, AiBudgetPolicy, CalendarEventKind,
         CalendarRecurrence, CreateCalendarEventInput, CreateMemoryInput, CreateNoteInput,
         CreateProjectInput, CreateTaskInput, CreateWorkLogInput, DEFAULT_TM_HOME, MemoryKind,
-        MemoryRetention, MemorySensitivity, NoteType, SessionStatus, StartSessionInput, TaskStatus,
-        TmCore, TmHome,
+        MemoryRetention, MemorySensitivity, NoteType, SessionStatus, StartSessionInput,
+        StockMarket, TaskStatus, TmCore, TmHome, UpsertStockWatchlistItemInput,
     };
     use tower::ServiceExt;
 
@@ -3141,7 +3141,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
         assert_eq!(body["data"]["status"], "ready");
-        assert_eq!(body["data"]["schemaVersion"], 11);
+        assert_eq!(body["data"]["schemaVersion"], 12);
         assert_eq!(body["data"]["journalMode"], "wal");
     }
 
@@ -3592,6 +3592,12 @@ mod tests {
                 ends_on: None,
             })
             .expect("create calendar fixture");
+        core.upsert_stock_watchlist_item(UpsertStockWatchlistItemInput {
+            market: StockMarket::Nasdaq,
+            ticker: "SECRET9".to_owned(),
+            display_name: "AI must not receive this watchlist item".to_owned(),
+        })
+        .expect("create private stock watchlist fixture");
         let router =
             build_cloud_authenticated_router_with_openai(core.clone(), test_auth_config(), client);
 
@@ -3643,6 +3649,8 @@ mod tests {
             assert!(!input.contains("worklog"));
             assert!(input.contains("오늘 보험료 납부"));
             assert!(!input.contains("AI에 전달되면 안 되는 비공개 메모"));
+            assert!(!input.contains("SECRET9"));
+            assert!(!input.contains("AI must not receive this watchlist item"));
         }
 
         let feedback = router
@@ -4154,7 +4162,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
         assert_eq!(body["data"]["database"]["ok"], true);
-        assert_eq!(body["data"]["database"]["schemaVersion"], 11);
+        assert_eq!(body["data"]["database"]["schemaVersion"], 12);
         assert_eq!(body["data"]["scheduler"]["status"], "healthy");
         assert_eq!(body["data"]["scheduler"]["openaiCallsEnabled"], false);
         assert_eq!(body["data"]["scheduler"]["effectCount"], 0);
@@ -4858,6 +4866,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stock_watchlist_desktop_commands_are_allowlisted_and_confirm_writes() {
+        let (temporary, core) = test_core();
+        let router = build_cloud_authenticated_router(core.clone(), test_auth_config());
+        let upsert_body = json!({
+            "args": {
+                "input": {
+                    "market": "NASDAQ",
+                    "ticker": "aapl",
+                    "displayName": "Apple"
+                }
+            }
+        })
+        .to_string();
+
+        let unconfirmed = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/desktop/commands/upsert_stock_watchlist_item")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .body(Body::from(upsert_body.clone()))
+                    .expect("build unconfirmed stock upsert"),
+            )
+            .await
+            .expect("call unconfirmed stock upsert");
+        assert_eq!(unconfirmed.status(), StatusCode::PRECONDITION_REQUIRED);
+
+        let confirmed = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/desktop/commands/upsert_stock_watchlist_item")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header(
+                        "x-tm-confirm-desktop-command",
+                        "upsert_stock_watchlist_item",
+                    )
+                    .body(Body::from(upsert_body))
+                    .expect("build confirmed stock upsert"),
+            )
+            .await
+            .expect("call confirmed stock upsert");
+        assert_eq!(confirmed.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(confirmed).await["data"]["symbol"],
+            "NASDAQ:AAPL"
+        );
+
+        let listed = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/desktop/commands/get_stock_watchlist")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"args":{}}"#))
+                    .expect("build stock list request"),
+            )
+            .await
+            .expect("call stock list");
+        assert_eq!(listed.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(listed).await["data"].as_array().map(Vec::len),
+            Some(1)
+        );
+
+        let deleted = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/desktop/commands/delete_stock_watchlist_item")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header(
+                        "x-tm-confirm-desktop-command",
+                        "delete_stock_watchlist_item",
+                    )
+                    .body(Body::from(r#"{"args":{"symbol":"NASDAQ:AAPL"}}"#))
+                    .expect("build stock delete request"),
+            )
+            .await
+            .expect("call stock delete");
+        assert_eq!(deleted.status(), StatusCode::OK);
+        assert!(
+            core.stock_watchlist()
+                .expect("list deleted stocks")
+                .is_empty()
+        );
+        drop(temporary);
+    }
+
+    #[tokio::test]
     async fn database_import_exists_only_in_maintenance_and_requires_manifest_confirmation() {
         let (source_temporary, source) = test_core();
         source
@@ -4962,10 +5067,42 @@ mod tests {
                 .get("content-security-policy")
                 .and_then(|value| value.to_str().ok()),
             Some(
-                "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+                "default-src 'self'; script-src 'self' https://s3.tradingview.com; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; frame-src 'self' https://s.tradingview.com https://www.tradingview-widget.com https://www.tradingview.com; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
             )
         );
         assert!(shell.headers().get("access-control-allow-origin").is_none());
+        let shell_body = String::from_utf8(
+            to_bytes(shell.into_body(), 1024 * 1024)
+                .await
+                .expect("read PWA shell"),
+        )
+        .expect("PWA shell is UTF-8");
+        assert!(shell_body.contains(r#"id="tab-stocks""#));
+        assert!(shell_body.contains("TradingView 외부 차트에서 확인"));
+        assert!(!shell_body.contains("s3.tradingview.com"));
+
+        let stock_script = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/mobile/app.js")
+                    .body(Body::empty())
+                    .expect("build PWA script request"),
+            )
+            .await
+            .expect("load PWA script");
+        assert_eq!(stock_script.status(), StatusCode::OK);
+        let stock_script = String::from_utf8(
+            to_bytes(stock_script.into_body(), 2 * 1024 * 1024)
+                .await
+                .expect("read PWA script"),
+        )
+        .expect("PWA script is UTF-8");
+        assert!(stock_script.contains("embed-widget-advanced-chart.js"));
+        assert!(stock_script.contains("allow-scripts allow-popups allow-popups-to-escape-sandbox"));
+        assert!(!stock_script.contains("allow-same-origin"));
+        assert!(stock_script.contains("차트를 보려면 인터넷 연결이 필요합니다."));
+        assert!(stock_script.contains("save_image: false"));
 
         let cross_origin = router
             .clone()
@@ -5125,7 +5262,7 @@ mod tests {
                     .header("host", "tm.example.test")
                     .header("origin", "https://tm.example.test")
                     .header("cookie", &cookie_header)
-                    .header("x-tm-csrf", csrf)
+                    .header("x-tm-csrf", &csrf)
                     .header("content-type", "application/json")
                     .body(Body::from("{}"))
                     .expect("build confirmed CSRF request"),
@@ -5133,6 +5270,97 @@ mod tests {
             .await
             .expect("call confirmed CSRF route");
         assert_ne!(csrf_passed.status(), StatusCode::FORBIDDEN);
+
+        let stock_without_confirmation = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/desktop/commands/upsert_stock_watchlist_item")
+                    .header("host", "tm.example.test")
+                    .header("origin", "https://tm.example.test")
+                    .header("cookie", &cookie_header)
+                    .header("x-tm-csrf", &csrf)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"args":{"input":{"market":"KRX","ticker":"005930","displayName":"Samsung"}}}"#,
+                    ))
+                    .expect("build unconfirmed device stock request"),
+            )
+            .await
+            .expect("call unconfirmed device stock request");
+        assert_eq!(
+            stock_without_confirmation.status(),
+            StatusCode::PRECONDITION_REQUIRED
+        );
+
+        let stock_created = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/desktop/commands/upsert_stock_watchlist_item")
+                    .header("host", "tm.example.test")
+                    .header("origin", "https://tm.example.test")
+                    .header("cookie", &cookie_header)
+                    .header("x-tm-csrf", &csrf)
+                    .header(
+                        "x-tm-confirm-desktop-command",
+                        "upsert_stock_watchlist_item",
+                    )
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"args":{"input":{"market":"KRX","ticker":"005930","displayName":"Samsung"}}}"#,
+                    ))
+                    .expect("build confirmed device stock request"),
+            )
+            .await
+            .expect("call confirmed device stock request");
+        assert_eq!(stock_created.status(), StatusCode::OK);
+
+        let stock_listed = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/desktop/commands/get_stock_watchlist")
+                    .header("host", "tm.example.test")
+                    .header("origin", "https://tm.example.test")
+                    .header("cookie", &cookie_header)
+                    .header("x-tm-csrf", &csrf)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"args":{}}"#))
+                    .expect("build device stock list request"),
+            )
+            .await
+            .expect("call device stock list request");
+        assert_eq!(stock_listed.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(stock_listed).await["data"][0]["symbol"],
+            "KRX:005930"
+        );
+
+        let stock_deleted = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/desktop/commands/delete_stock_watchlist_item")
+                    .header("host", "tm.example.test")
+                    .header("origin", "https://tm.example.test")
+                    .header("cookie", &cookie_header)
+                    .header("x-tm-csrf", &csrf)
+                    .header(
+                        "x-tm-confirm-desktop-command",
+                        "delete_stock_watchlist_item",
+                    )
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"args":{"symbol":"KRX:005930"}}"#))
+                    .expect("build device stock delete request"),
+            )
+            .await
+            .expect("call device stock delete request");
+        assert_eq!(stock_deleted.status(), StatusCode::OK);
 
         let revoked = router
             .clone()

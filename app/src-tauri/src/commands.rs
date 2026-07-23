@@ -13,10 +13,11 @@ use tm_core::{
     CreateCalendarEventInput, CreateChangeRequestInput as CoreCreateChangeRequestInput,
     CreateNoteAggregateInput, CreateNoteInput, CreateProjectInput, CreateTaskAggregateInput,
     CreateTaskInput, CreateWorkLogInput, EndSessionInput, EntityLink, EntityType, LinkTargetType,
-    Note, NoteLinksInput, NoteType, SearchHit, SessionStatus, StartSessionInput, Task,
-    TaskDayEntry, TaskDayStatus, TaskPatch, TaskStatus, TmCore, TrashEntityType,
-    UpdateCalendarEventInput, UpdateChangeRequestInput as CoreUpdateChangeRequestInput,
-    UpdateTaskAggregateInput, WorkSession,
+    Note, NoteLinksInput, NoteType, SearchHit, SessionStatus, StartSessionInput,
+    StockWatchlistItem, Task, TaskDayEntry, TaskDayStatus, TaskPatch, TaskStatus, TmCore,
+    TrashEntityType, UpdateCalendarEventInput,
+    UpdateChangeRequestInput as CoreUpdateChangeRequestInput, UpdateTaskAggregateInput,
+    UpsertStockWatchlistItemInput, WorkSession,
 };
 
 use crate::AppState;
@@ -269,6 +270,35 @@ pub(crate) fn delete_calendar_event(
     state
         .core
         .delete_calendar_event(&event_id, expected_version)
+        .map_err(command_error)
+}
+
+#[tauri::command]
+pub(crate) fn get_stock_watchlist(
+    state: State<'_, AppState>,
+) -> CommandResult<Vec<StockWatchlistItem>> {
+    state.core.stock_watchlist().map_err(command_error)
+}
+
+#[tauri::command]
+pub(crate) fn upsert_stock_watchlist_item(
+    input: UpsertStockWatchlistItemInput,
+    state: State<'_, AppState>,
+) -> CommandResult<StockWatchlistItem> {
+    state
+        .core
+        .upsert_stock_watchlist_item(input)
+        .map_err(command_error)
+}
+
+#[tauri::command]
+pub(crate) fn delete_stock_watchlist_item(
+    symbol: String,
+    state: State<'_, AppState>,
+) -> CommandResult<()> {
+    state
+        .core
+        .delete_stock_watchlist_item(&symbol)
         .map_err(command_error)
 }
 

@@ -15,9 +15,11 @@ import type {
   NoteType,
   SearchResult,
   StartSessionInput,
+  StockWatchlistItem,
   UpdateTaskInput,
   UpdateChangeRequestInput,
   UpdateCalendarEventInput,
+  UpsertStockWatchlistItemInput,
 } from "../types";
 import { createMemoryTransport } from "./mock-transport";
 
@@ -99,6 +101,9 @@ export interface TmApi {
   createCalendarEvent(input: CreateCalendarEventInput): Promise<CalendarEvent>;
   updateCalendarEvent(eventId: string, input: UpdateCalendarEventInput): Promise<CalendarEvent>;
   deleteCalendarEvent(eventId: string, expectedVersion: number): Promise<void>;
+  getStockWatchlist(): Promise<StockWatchlistItem[]>;
+  upsertStockWatchlistItem(input: UpsertStockWatchlistItemInput): Promise<StockWatchlistItem>;
+  deleteStockWatchlistItem(symbol: string): Promise<void>;
   createProject(name: string, description?: string): Promise<string>;
   createTask(input: CreateTaskInput): Promise<void>;
   updateTask(input: UpdateTaskInput): Promise<void>;
@@ -179,6 +184,11 @@ export const createApi = (transport: CommandTransport): TmApi => ({
   createCalendarEvent: (input) => transport.invoke<CalendarEvent>("create_calendar_event", { input }),
   updateCalendarEvent: (eventId, input) => transport.invoke<CalendarEvent>("update_calendar_event", { eventId, input }),
   deleteCalendarEvent: (eventId, expectedVersion) => run(transport, "delete_calendar_event", { eventId, expectedVersion }),
+  getStockWatchlist: () => transport.invoke<StockWatchlistItem[]>("get_stock_watchlist"),
+  upsertStockWatchlistItem: (input) =>
+    transport.invoke<StockWatchlistItem>("upsert_stock_watchlist_item", { input }),
+  deleteStockWatchlistItem: (symbol) =>
+    run(transport, "delete_stock_watchlist_item", { symbol }),
   createProject: (name, description = "") =>
     transport.invoke<string>("create_project", { name, description }),
   createTask: (input) => run(transport, "create_task", { input }),

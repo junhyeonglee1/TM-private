@@ -16,7 +16,7 @@ use crate::{
     EntityType, Error, LinkTargetType, Note, NoteLinksInput, NoteType, Result, SearchHit,
     SessionStatus, StartSessionInput, Task, TaskDayEntry, TaskDayStatus, TaskPatch, TaskStatus,
     TmCore, TrashEntityType, UpdateCalendarEventInput, UpdateChangeRequestInput,
-    UpdateTaskAggregateInput, WorkSession,
+    UpdateTaskAggregateInput, UpsertStockWatchlistItemInput, WorkSession,
 };
 
 const DESKTOP_ACTOR: &str = "desktop-user";
@@ -30,6 +30,9 @@ pub enum DesktopCommand {
     CreateCalendarEvent,
     UpdateCalendarEvent,
     DeleteCalendarEvent,
+    GetStockWatchlist,
+    UpsertStockWatchlistItem,
+    DeleteStockWatchlistItem,
     CreateProject,
     CreateTask,
     UpdateTask,
@@ -58,7 +61,7 @@ impl DesktopCommand {
     pub const fn is_read_only(self) -> bool {
         matches!(
             self,
-            Self::GetAppSnapshot | Self::GetCalendarMonth | Self::Search
+            Self::GetAppSnapshot | Self::GetCalendarMonth | Self::GetStockWatchlist | Self::Search
         )
     }
 
@@ -69,6 +72,9 @@ impl DesktopCommand {
             Self::CreateCalendarEvent => "create_calendar_event",
             Self::UpdateCalendarEvent => "update_calendar_event",
             Self::DeleteCalendarEvent => "delete_calendar_event",
+            Self::GetStockWatchlist => "get_stock_watchlist",
+            Self::UpsertStockWatchlistItem => "upsert_stock_watchlist_item",
+            Self::DeleteStockWatchlistItem => "delete_stock_watchlist_item",
             Self::CreateProject => "create_project",
             Self::CreateTask => "create_task",
             Self::UpdateTask => "update_task",
@@ -321,6 +327,23 @@ pub fn execute_desktop_command(
             }
             let args: Args = parse_args(args)?;
             core.delete_calendar_event(&args.event_id, args.expected_version)?;
+            Ok(Value::Null)
+        }
+        DesktopCommand::GetStockWatchlist => {
+            serde_json::to_value(core.stock_watchlist()?).map_err(Into::into)
+        }
+        DesktopCommand::UpsertStockWatchlistItem => {
+            let args: InputArg<UpsertStockWatchlistItemInput> = parse_args(args)?;
+            serde_json::to_value(core.upsert_stock_watchlist_item(args.input)?).map_err(Into::into)
+        }
+        DesktopCommand::DeleteStockWatchlistItem => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase", deny_unknown_fields)]
+            struct Args {
+                symbol: String,
+            }
+            let args: Args = parse_args(args)?;
+            core.delete_stock_watchlist_item(&args.symbol)?;
             Ok(Value::Null)
         }
         DesktopCommand::CreateProject => {
@@ -1162,6 +1185,9 @@ mod tests {
             DesktopCommand::CreateCalendarEvent,
             DesktopCommand::UpdateCalendarEvent,
             DesktopCommand::DeleteCalendarEvent,
+            DesktopCommand::GetStockWatchlist,
+            DesktopCommand::UpsertStockWatchlistItem,
+            DesktopCommand::DeleteStockWatchlistItem,
             DesktopCommand::CreateProject,
             DesktopCommand::CreateTask,
             DesktopCommand::UpdateTask,

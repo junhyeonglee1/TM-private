@@ -18,12 +18,14 @@ import type {
   Project,
   SearchResult,
   StartSessionInput,
+  StockWatchlistItem,
   Task,
   TaskDayEntry,
   TrashItem,
   UpdateTaskInput,
   UpdateCalendarEventInput,
   UpdateChangeRequestInput,
+  UpsertStockWatchlistItemInput,
   WorkLog,
   WorkSession,
 } from "../types";
@@ -540,6 +542,7 @@ export class MemoryTransport implements CommandTransport {
   private snapshot = buildSample();
   private taskReport: TaskReportResult | null = null;
   private calendarEvents = sampleCalendarEvents(this.snapshot.today);
+  private stockWatchlist: StockWatchlistItem[] = [];
 
   async invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
     const result = this.handle(command, args);
@@ -578,6 +581,12 @@ export class MemoryTransport implements CommandTransport {
         );
       case "delete_calendar_event":
         return this.deleteCalendarEvent(textValue(args.eventId), Number(args.expectedVersion));
+      case "get_stock_watchlist":
+        return this.stockWatchlist;
+      case "upsert_stock_watchlist_item":
+        return this.upsertStockWatchlistItem(args.input as UpsertStockWatchlistItemInput);
+      case "delete_stock_watchlist_item":
+        return this.deleteStockWatchlistItem(textValue(args.symbol));
       case "create_project":
         return this.createProject(textValue(args.name), textValue(args.description));
       case "create_task":
@@ -816,6 +825,46 @@ export class MemoryTransport implements CommandTransport {
     if (input.recurrence === "none" && input.endsOn !== null) {
       throw new Error("한 번 일정에는 반복 종료일을 지정할 수 없습니다.");
     }
+  }
+
+  private upsertStockWatchlistItem(
+    input: UpsertStockWatchlistItemInput,
+  ): StockWatchlistItem {
+    const ticker = input.ticker.trim().toUpperCase();
+    const displayName = input.displayName.trim();
+    const validTicker = input.market === "KRX"
+      ? /^\d{6}$/.test(ticker)
+      : /^[A-Z0-9.-]{1,10}$/.test(ticker);
+    if (!validTicker) throw new Error("종목 코드 형식이 올바르지 않습니다.");
+    if (!displayName || Array.from(displayName).length > 80) {
+      throw new Error("표시 이름 형식이 올바르지 않습니다.");
+    }
+    const symbol = `${input.market}:${ticker}`;
+    const existing = this.stockWatchlist.find((item) => item.symbol === symbol);
+    if (!existing && this.stockWatchlist.length >= 50) {
+      throw new Error("관심 종목은 최대 50개까지 저장할 수 있습니다.");
+    }
+    if (existing) {
+      existing.displayName = displayName;
+      existing.updatedAt = now();
+      return existing;
+    }
+    const timestamp = now();
+    const item: StockWatchlistItem = {
+      symbol,
+      market: input.market,
+      ticker,
+      displayName,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    this.stockWatchlist.push(item);
+    return item;
+  }
+
+  private deleteStockWatchlistItem(symbol: string): null {
+    this.stockWatchlist = this.stockWatchlist.filter((item) => item.symbol !== symbol);
+    return null;
   }
 
   private createProject(name: string, description: string): string {

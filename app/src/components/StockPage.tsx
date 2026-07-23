@@ -1,0 +1,269 @@
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type FormEvent,
+} from "react";
+
+import { Icon } from "./Icon";
+import { buildTradingViewDocument, tradingViewUrl } from "../lib/tradingview";
+import type {
+  StockMarket,
+  StockWatchlistItem,
+  UpsertStockWatchlistItemInput,
+} from "../types";
+
+const DEFAULT_SYMBOL = "NASDAQ:AAPL";
+const WATCHLIST_LIMIT = 50;
+const MARKETS: Array<{ value: StockMarket; label: string }> = [
+  { value: "KRX", label: "한국 KRX" },
+  { value: "NASDAQ", label: "미국 NASDAQ" },
+  { value: "NYSE", label: "미국 NYSE" },
+  { value: "AMEX", label: "미국 AMEX" },
+];
+
+interface StockPageProps {
+  onDelete: (symbol: string) => Promise<void>;
+  onLoad: () => Promise<StockWatchlistItem[]>;
+  onNotify: (message: string, type?: "success" | "error") => void;
+  onUpsert: (input: UpsertStockWatchlistItemInput) => Promise<StockWatchlistItem>;
+}
+
+const clientValidation = (
+  market: StockMarket,
+  tickerValue: string,
+  displayNameValue: string,
+): string | null => {
+  const ticker = tickerValue.trim().toUpperCase();
+  const displayName = displayNameValue.trim();
+  if (!displayName || Array.from(displayName).length > 80) {
+    return "표시 이름은 1자 이상 80자 이하로 입력하세요.";
+  }
+  if (market === "KRX") {
+    return /^\d{6}$/.test(ticker) ? null : "KRX 종목 코드는 6자리 숫자입니다.";
+  }
+  return /^[A-Z0-9.-]{1,10}$/.test(ticker)
+    ? null
+    : "미국 티커는 영문·숫자·점·하이픈 1~10자로 입력하세요.";
+};
+
+export function StockPage({
+  onDelete,
+  onLoad,
+  onNotify,
+  onUpsert,
+}: StockPageProps) {
+  const [items, setItems] = useState<StockWatchlistItem[]>([]);
+  const [selectedSymbol, setSelectedSymbol] = useState(DEFAULT_SYMBOL);
+  const [market, setMarket] = useState<StockMarket>("KRX");
+  const [ticker, setTicker] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [online, setOnline] = useState(() => navigator.onLine);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const next = await onLoad();
+      setItems(next);
+      setSelectedSymbol((current) =>
+        current === DEFAULT_SYMBOL || next.some((item) => item.symbol === current)
+          ? current
+          : (next[0]?.symbol ?? DEFAULT_SYMBOL));
+    } catch {
+      onNotify("관심 종목을 불러오지 못했습니다.", "error");
+    } finally {
+      setLoading(false);
+    }
+  }, [onLoad, onNotify]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  useEffect(() => {
+    const update = () => setOnline(navigator.onLine);
+    window.addEventListener("online", update);
+    window.addEventListener("offline", update);
+    return () => {
+      window.removeEventListener("online", update);
+      window.removeEventListener("offline", update);
+    };
+  }, []);
+
+  const watchlistSymbols = useMemo(
+    () => items.map((item) => item.symbol),
+    [items],
+  );
+  const chartDocument = useMemo(
+    () => buildTradingViewDocument(selectedSymbol, watchlistSymbols),
+    [selectedSymbol, watchlistSymbols],
+  );
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const validation = clientValidation(market, ticker, displayName);
+    if (validation) {
+      onNotify(validation, "error");
+      return;
+    }
+    if (
+      items.length >= WATCHLIST_LIMIT
+      && !items.some((item) => item.symbol === `${market}:${ticker.trim().toUpperCase()}`)
+    ) {
+      onNotify(`관심 종목은 최대 ${WATCHLIST_LIMIT}개까지 저장할 수 있습니다.`, "error");
+      return;
+    }
+    setSaving(true);
+    try {
+      const saved = await onUpsert({
+        market,
+        ticker: ticker.trim().toUpperCase(),
+        displayName: displayName.trim(),
+      });
+      setItems((current) => {
+        const next = current.filter((item) => item.symbol !== saved.symbol);
+        next.push(saved);
+        return next.sort((left, right) =>
+          left.createdAt.localeCompare(right.createdAt) || left.symbol.localeCompare(right.symbol));
+      });
+      setSelectedSymbol(saved.symbol);
+      setTicker("");
+      setDisplayName("");
+      onNotify(`${saved.displayName} 관심 종목을 저장했습니다.`);
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "관심 종목을 저장하지 못했습니다.", "error");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const remove = async (item: StockWatchlistItem) => {
+    try {
+      await onDelete(item.symbol);
+      const replacement = items.find((candidate) => candidate.symbol !== item.symbol)?.symbol
+        ?? DEFAULT_SYMBOL;
+      setItems((current) => current.filter((candidate) => candidate.symbol !== item.symbol));
+      if (selectedSymbol === item.symbol) setSelectedSymbol(replacement);
+      onNotify(`${item.displayName} 관심 종목을 제거했습니다.`);
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : "관심 종목을 제거하지 못했습니다.", "error");
+    }
+  };
+
+  return (
+    <section className="stock-page">
+      <header className="page-header stock-page__header">
+        <div>
+          <span className="eyebrow">조회 전용 · 거래소별 지연 가능</span>
+          <h1>주식 차트</h1>
+          <p>TradingView가 제공하는 한국·미국 시세를 봅니다. 주문과 계좌 연결은 없습니다.</p>
+        </div>
+        <a
+          className="secondary-button"
+          href={tradingViewUrl(selectedSymbol)}
+          rel="noopener noreferrer"
+          target="_blank"
+        >
+          TradingView에서 열기 <Icon name="arrow" size={15} />
+        </a>
+      </header>
+
+      <div className="stock-layout">
+        <aside className="stock-watchlist" aria-label="관심 종목">
+          <div className="stock-watchlist__heading">
+            <div><span>관심 종목</span><strong>{items.length}/{WATCHLIST_LIMIT}</strong></div>
+            <button className="icon-button icon-button--small" aria-label="관심 종목 새로고침" onClick={() => void load()} type="button">
+              <Icon name="restore" size={15} />
+            </button>
+          </div>
+          {loading ? (
+            <p className="empty-state">불러오는 중…</p>
+          ) : items.length === 0 ? (
+            <p className="empty-state">아직 저장한 종목이 없습니다.</p>
+          ) : (
+            <ul className="stock-watchlist__items">
+              {items.map((item) => (
+                <li key={item.symbol} className={selectedSymbol === item.symbol ? "selected" : ""}>
+                  <button onClick={() => setSelectedSymbol(item.symbol)} type="button">
+                    <strong>{item.displayName}</strong>
+                    <span>{item.symbol}</span>
+                  </button>
+                  <button aria-label={`${item.displayName} 관심 종목 삭제`} className="stock-watchlist__delete" onClick={() => void remove(item)} type="button">
+                    <Icon name="close" size={13} />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <form className="stock-form" onSubmit={(event) => void submit(event)}>
+            <h2>관심 종목 추가</h2>
+            <label htmlFor="stock-market">시장</label>
+            <select id="stock-market" onChange={(event) => setMarket(event.target.value as StockMarket)} value={market}>
+              {MARKETS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+            </select>
+            <label htmlFor="stock-ticker">종목 코드</label>
+            <input
+              autoComplete="off"
+              id="stock-ticker"
+              maxLength={10}
+              onChange={(event) => setTicker(event.target.value)}
+              placeholder={market === "KRX" ? "예: 005930" : "예: AAPL"}
+              required
+              value={ticker}
+            />
+            <label htmlFor="stock-display-name">표시 이름</label>
+            <input
+              autoComplete="off"
+              id="stock-display-name"
+              maxLength={80}
+              onChange={(event) => setDisplayName(event.target.value)}
+              placeholder={market === "KRX" ? "예: 삼성전자" : "예: Apple"}
+              required
+              value={displayName}
+            />
+            <button className="primary-button" disabled={saving} type="submit">
+              <Icon name="plus" size={15} /> {saving ? "저장 중…" : "관심 종목 저장"}
+            </button>
+          </form>
+        </aside>
+
+        <section className="stock-chart-card" aria-labelledby="stock-chart-title">
+          <div className="stock-chart-card__heading">
+            <div><span className="eyebrow">외부 데이터 · OpenAI 비용 없음</span><h2 id="stock-chart-title">{selectedSymbol}</h2></div>
+            <span className={`stock-network ${online ? "online" : "offline"}`}>{online ? "온라인" : "오프라인"}</span>
+          </div>
+          {!online ? (
+            <div className="stock-chart-placeholder" role="status">
+              <Icon name="chart" size={28} />
+              <strong>차트를 보려면 인터넷 연결이 필요합니다.</strong>
+              <p>관심 종목 목록은 연결 후 다시 동기화됩니다.</p>
+            </div>
+          ) : (
+            <iframe
+              className="stock-chart-frame"
+              data-testid="tradingview-frame"
+              key={`${selectedSymbol}:${watchlistSymbols.join(",")}`}
+              referrerPolicy="no-referrer"
+              sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"
+              srcDoc={chartDocument}
+              title={`${selectedSymbol} TradingView 조회 전용 차트`}
+            />
+          )}
+          <p className="stock-disclaimer">
+            시세는 거래소 정책에 따라 지연되거나 일부 종목이 위젯에서 제한될 수 있습니다. 투자 추천이나 주문 기능을 제공하지 않습니다.
+          </p>
+          <p className="stock-fallback">
+            차트가 비어 있거나 KRX 종목 표시가 제한되면 우회 수집하지 않습니다.{" "}
+            <a href={tradingViewUrl(selectedSymbol)} rel="noopener noreferrer" target="_blank">
+              TradingView 외부 차트에서 확인
+            </a>
+          </p>
+        </section>
+      </div>
+    </section>
+  );
+}

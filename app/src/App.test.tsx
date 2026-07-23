@@ -352,6 +352,60 @@ describe("TM 데스크톱 UI", () => {
     expect(screen.getAllByText("읽기 전용")).toHaveLength(2);
   });
 
+  it("조회 전용 주식 차트를 안전한 iframe으로 열고 관심 종목을 동기화한다", async () => {
+    Object.defineProperty(window.navigator, "onLine", { configurable: true, value: true });
+    const user = userEvent.setup();
+    const { api } = renderApp();
+    await screen.findByRole("heading", { name: "오늘", level: 1 });
+
+    await user.click(screen.getAllByRole("button", { name: "주식" })[0]);
+    expect(await screen.findByRole("heading", { name: "주식 차트", level: 1 })).toBeInTheDocument();
+
+    const frame = screen.getByTestId("tradingview-frame");
+    const sandbox = frame.getAttribute("sandbox") ?? "";
+    const source = frame.getAttribute("srcdoc") ?? "";
+    expect(sandbox).toBe("allow-scripts allow-popups allow-popups-to-escape-sandbox");
+    expect(sandbox).not.toContain("allow-same-origin");
+    expect(frame).toHaveAttribute("referrerpolicy", "no-referrer");
+    expect(source).toContain("https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js");
+    expect(source).toContain("\"symbol\":\"NASDAQ:AAPL\"");
+    expect(source).toContain("\"locale\":\"kr\"");
+    expect(source).toContain("\"timezone\":\"Asia/Seoul\"");
+    expect(source).toContain("\"withdateranges\":true");
+    expect(source).toContain("\"hide_volume\":false");
+    expect(source).toContain("\"save_image\":false");
+    expect(source).not.toContain("__TAURI");
+
+    await user.type(screen.getByLabelText("종목 코드"), "005930");
+    await user.type(screen.getByLabelText("표시 이름"), "삼성전자");
+    await user.click(screen.getByRole("button", { name: /관심 종목 저장/ }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent("삼성전자 관심 종목을 저장했습니다.");
+    expect(screen.getByRole("heading", { name: "KRX:005930", level: 2 })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "TradingView 외부 차트에서 확인" }))
+      .toHaveAttribute("href", "https://www.tradingview.com/symbols/KRX-005930/");
+    expect((await api.getStockWatchlist())[0]).toMatchObject({
+      symbol: "KRX:005930",
+      market: "KRX",
+      ticker: "005930",
+      displayName: "삼성전자",
+    });
+
+    await user.click(screen.getByRole("button", { name: "삼성전자 관심 종목 삭제" }));
+    await waitFor(async () => expect(await api.getStockWatchlist()).toHaveLength(0));
+    expect(screen.getByRole("heading", { name: "NASDAQ:AAPL", level: 2 })).toBeInTheDocument();
+
+    try {
+      Object.defineProperty(window.navigator, "onLine", { configurable: true, value: false });
+      window.dispatchEvent(new Event("offline"));
+      expect(await screen.findByText("차트를 보려면 인터넷 연결이 필요합니다.")).toBeInTheDocument();
+      expect(screen.queryByTestId("tradingview-frame")).not.toBeInTheDocument();
+    } finally {
+      Object.defineProperty(window.navigator, "onLine", { configurable: true, value: true });
+      window.dispatchEvent(new Event("online"));
+    }
+  });
+
   it("페이지 이동 시 본문 포커스가 화면을 강제로 스크롤하지 않는다", async () => {
     const focus = vi.spyOn(HTMLElement.prototype, "focus");
     const user = userEvent.setup();

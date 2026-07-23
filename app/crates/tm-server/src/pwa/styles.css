@@ -56,7 +56,7 @@ button { border: 0; border-radius: 13px; font-weight: 800; }
 .code-card strong { display: block; margin: 12px 0 8px; color: #fff; font-size: 42px; letter-spacing: .17em; font-variant-numeric: tabular-nums; }
 .message { min-height: 24px; color: #ffb2bc; }
 
-.tabs { position: sticky; top: 65px; z-index: 4; display: grid; grid-template-columns: repeat(6, 1fr); gap: 5px; margin: 0 0 12px; padding: 6px; border: 1px solid rgba(255,255,255,.08); border-radius: 16px; background: rgba(20,24,33,.94); backdrop-filter: blur(16px); }
+.tabs { position: sticky; top: 65px; z-index: 4; display: grid; grid-template-columns: repeat(7, 1fr); gap: 5px; margin: 0 0 12px; padding: 6px; border: 1px solid rgba(255,255,255,.08); border-radius: 16px; background: rgba(20,24,33,.94); backdrop-filter: blur(16px); }
 .tabs button { padding: 10px 4px; background: transparent; color: var(--muted); font-size: 12px; }
 .tabs button[aria-current="page"] { background: var(--surface-2); color: #fff; }
 .tab-panel { min-height: 440px; }
@@ -135,6 +135,29 @@ button { border: 0; border-radius: 13px; font-weight: 800; }
 .calendar-rule { width: 100%; padding: 13px; border: 1px solid var(--line); border-radius: 13px; background: #121720; color: #fff; text-align: left; }
 .calendar-rule strong, .calendar-rule small { display: block; }
 .calendar-rule small { margin-top: 4px; color: var(--muted); }
+.stock-heading { align-items: center; }
+.stock-heading h1 { margin-bottom: 8px; }
+.stock-external-link { align-items: center; display: inline-flex; min-height: 40px; color: #fff; text-decoration: none; white-space: nowrap; }
+.stock-chart-card, .stock-watchlist-panel { margin-top: 16px; border: 1px solid var(--line); border-radius: 16px; background: #121720; overflow: hidden; }
+.stock-chart-heading, .stock-watchlist-heading { align-items: center; display: flex; justify-content: space-between; gap: 10px; padding: 13px 14px; border-bottom: 1px solid var(--line); }
+.stock-chart-heading h2, .stock-watchlist-heading h2 { margin: 2px 0 0; font-size: 16px; }
+.stock-chart-container { min-height: 460px; background: #10141d; }
+.stock-chart-frame { width: 100%; min-height: 460px; border: 0; background: #10141d; }
+.stock-chart-placeholder { align-content: center; display: grid; justify-items: center; gap: 7px; min-height: 460px; padding: 28px; color: var(--muted); text-align: center; }
+.stock-chart-placeholder p { margin: 0; font-size: 12px; }
+.stock-disclaimer { margin: 0; padding: 11px 13px; border-top: 1px solid var(--line); color: var(--muted); font-size: 10px; line-height: 1.5; }
+.stock-fallback { margin: 0; padding: 0 13px 12px; color: var(--muted); font-size: 10px; line-height: 1.5; }
+.stock-fallback a { color: var(--accent); }
+.stock-watchlist-list { display: grid; gap: 6px; padding: 8px; }
+.stock-watchlist-item { align-items: center; display: grid; grid-template-columns: minmax(0,1fr) 36px; border-radius: 11px; }
+.stock-watchlist-item.selected { background: #252e4d; }
+.stock-watchlist-item > button:first-child { display: grid; gap: 3px; width: 100%; padding: 10px; background: transparent; color: #fff; text-align: left; }
+.stock-watchlist-item small { color: var(--muted); }
+.stock-remove { width: 30px; height: 30px; padding: 0; border-radius: 8px; background: transparent; color: var(--muted); font-size: 20px; }
+.stock-form { display: grid; gap: 8px; padding: 15px; border-top: 1px solid var(--line); }
+.stock-form h2 { margin: 0 0 4px; font-size: 16px; }
+.stock-form label { margin-top: 5px; }
+.stock-form .primary { margin-top: 8px; }
 .card-list { display: grid; gap: 10px; }
 .item-card { padding: 15px; border: 1px solid var(--line); border-radius: 15px; background: #121720; }
 .item-card h2 { margin: 0 0 8px; font-size: 17px; }
@@ -162,6 +185,6 @@ button { border: 0; border-radius: 13px; font-weight: 800; }
   .brand strong { display: none; }
   .cost-pill { font-size: 8.5px; padding: 4px 6px; }
   .status-pill { padding: 4px 7px; font-size: 10px; }
-  .tabs { grid-template-columns: repeat(3, 1fr); position: static; }
+  .tabs { grid-template-columns: repeat(4, 1fr); position: static; }
   .calendar-day { min-height: 54px; }
 }

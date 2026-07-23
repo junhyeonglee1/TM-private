@@ -983,6 +983,60 @@ button.search-result:hover { background: var(--surface-subtle); }
 
 .device-management { display: grid; gap: 20px; }
 .device-management .page-header { align-items: flex-start; }
+
+.stock-page { display: grid; gap: 24px; }
+.stock-page__header { align-items: center; }
+.stock-page__header .secondary-button { align-items: center; display: inline-flex; gap: 7px; text-decoration: none; white-space: nowrap; }
+.stock-layout { display: grid; grid-template-columns: minmax(230px, 280px) minmax(0, 1fr); gap: 18px; min-height: 650px; }
+.stock-watchlist, .stock-chart-card { border: 1px solid var(--border); border-radius: 18px; background: var(--surface); box-shadow: var(--shadow-sm); }
+.stock-watchlist { align-self: start; overflow: hidden; }
+.stock-watchlist__heading { align-items: center; display: flex; justify-content: space-between; padding: 15px 16px; border-bottom: 1px solid var(--border); }
+.stock-watchlist__heading > div { align-items: center; display: flex; gap: 8px; }
+.stock-watchlist__heading span { font-size: 13px; font-weight: 800; }
+.stock-watchlist__heading strong { color: var(--text-soft); font-size: 11px; }
+.stock-watchlist__items { display: grid; max-height: 260px; margin: 0; padding: 7px; overflow: auto; list-style: none; }
+.stock-watchlist__items li { align-items: center; display: grid; grid-template-columns: minmax(0, 1fr) 30px; border-radius: 11px; }
+.stock-watchlist__items li.selected { background: var(--accent-soft); }
+.stock-watchlist__items li > button:first-child { display: grid; gap: 3px; width: 100%; padding: 9px 10px; border: 0; background: transparent; color: var(--text); text-align: left; }
+.stock-watchlist__items li > button:first-child strong { overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.stock-watchlist__items li > button:first-child span { color: var(--text-soft); font-size: 10px; }
+.stock-watchlist__delete { display: grid; width: 26px; height: 26px; place-items: center; border: 0; border-radius: 7px; background: transparent; color: var(--text-soft); }
+.stock-watchlist__delete:hover { background: var(--danger-soft); color: var(--danger); }
+.stock-watchlist .empty-state { padding: 20px 14px; }
+.stock-form { display: grid; gap: 8px; padding: 16px; border-top: 1px solid var(--border); }
+.stock-form h2 { margin: 0 0 4px; font-size: 14px; }
+.stock-form label { color: var(--text-soft); font-size: 11px; font-weight: 700; }
+.stock-form input, .stock-form select { width: 100%; min-height: 38px; padding: 8px 10px; border: 1px solid var(--border-strong); border-radius: 9px; background: var(--surface-raised); color: var(--text); }
+.stock-form .primary-button { justify-content: center; min-height: 40px; margin-top: 5px; padding: 0 10px; }
+.stock-chart-card { display: grid; grid-template-rows: auto minmax(500px, 1fr) auto auto; min-width: 0; overflow: hidden; }
+.stock-chart-card__heading { align-items: center; display: flex; justify-content: space-between; padding: 14px 17px; border-bottom: 1px solid var(--border); }
+.stock-chart-card__heading h2 { margin: 3px 0 0; font-size: 18px; }
+.stock-chart-frame { width: 100%; min-height: 500px; border: 0; background: #10141d; }
+.stock-network { padding: 5px 8px; border-radius: 999px; font-size: 10px; font-weight: 800; }
+.stock-network.online { background: var(--success-soft); color: var(--success); }
+.stock-network.offline { background: var(--danger-soft); color: var(--danger); }
+.stock-chart-placeholder { align-content: center; display: grid; justify-items: center; gap: 8px; min-height: 500px; padding: 30px; color: var(--text-soft); text-align: center; }
+.stock-chart-placeholder strong { color: var(--text); }
+.stock-chart-placeholder p { margin: 0; font-size: 12px; }
+.stock-disclaimer { margin: 0; padding: 11px 16px; border-top: 1px solid var(--border); color: var(--text-soft); font-size: 10px; line-height: 1.5; }
+.stock-fallback { margin: 0; padding: 0 16px 13px; color: var(--text-soft); font-size: 10px; line-height: 1.5; }
+.stock-fallback a { color: var(--accent); }
+
+@media (max-width: 900px) {
+  .stock-layout { grid-template-columns: 1fr; }
+  .stock-watchlist { display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 280px); }
+  .stock-watchlist__heading { grid-column: 1 / -1; }
+  .stock-watchlist__items { max-height: 240px; }
+  .stock-form { border-top: 0; border-left: 1px solid var(--border); }
+}
+
+@media (max-width: 600px) {
+  .stock-page__header { align-items: flex-start; display: grid; }
+  .stock-watchlist { display: block; }
+  .stock-form { border-top: 1px solid var(--border); border-left: 0; }
+  .stock-chart-card { grid-template-rows: auto 470px auto auto; }
+  .stock-chart-frame, .stock-chart-placeholder { min-height: 470px; }
+}
 .operations-panel { display: grid; gap: 14px; padding: 18px; border: 1px solid color-mix(in srgb, var(--success) 32%, var(--border)); border-radius: 16px; background: color-mix(in srgb, var(--success-soft) 56%, var(--surface)); box-shadow: var(--shadow-sm); }
 .operations-panel--warning { border-color: color-mix(in srgb, var(--warning) 42%, var(--border)); background: color-mix(in srgb, var(--warning-soft) 60%, var(--surface)); }
 .operations-panel--critical { border-color: color-mix(in srgb, var(--danger) 48%, var(--border)); background: color-mix(in srgb, var(--danger-soft) 62%, var(--surface)); }

@@ -28,6 +28,7 @@ export type IconName =
   | "download"
   | "shield"
   | "clock"
+  | "chart"
   | "more";
 
 interface IconProps extends SVGProps<SVGSVGElement> {
@@ -92,6 +93,8 @@ export function Icon({ name, size = 18, ...props }: IconProps) {
         return <><path d="M12 2 4 5v6c0 5 3.4 9 8 11 4.6-2 8-6 8-11V5l-8-3Z"/><path d="m8 12 2.5 2.5L16 9"/></>;
       case "clock":
         return <><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></>;
+      case "chart":
+        return <><path d="M4 20V10m5 10V4m5 16v-7m5 7V7"/><path d="m3 8 5-4 6 7 6-6"/></>;
       case "more":
         return <><circle cx="5" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1" fill="currentColor" stroke="none"/></>;
     }

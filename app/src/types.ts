@@ -74,6 +74,23 @@ export interface UpdateCalendarEventInput extends CreateCalendarEventInput {
   expectedVersion: number;
 }
 
+export type StockMarket = "KRX" | "NASDAQ" | "NYSE" | "AMEX";
+
+export interface StockWatchlistItem {
+  symbol: string;
+  market: StockMarket;
+  ticker: string;
+  displayName: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface UpsertStockWatchlistItemInput {
+  market: StockMarket;
+  ticker: string;
+  displayName: string;
+}
+
 export interface Project {
   id: string;
   name: string;

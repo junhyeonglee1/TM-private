@@ -9,7 +9,9 @@ const state = {
   calendar: null,
   calendarMonth: null,
   selectedCalendarDate: null,
-  editingCalendarEvent: null
+  editingCalendarEvent: null,
+  stockWatchlist: [],
+  selectedStockSymbol: "NASDAQ:AAPL"
 };
 const costRefreshIntervalMs = 5 * 60 * 1000;
 const defaultApiHardLimitMicrousd = 20_000_000;
@@ -78,6 +80,15 @@ async function calendarCommand(command, args = {}, mutating = false) {
   });
 }
 
+async function stockCommand(command, args = {}, mutating = false) {
+  const headers = mutating ? { "x-tm-confirm-desktop-command": command } : {};
+  return api(`/api/v1/desktop/commands/${command}`, {
+    method: "POST",
+    headers,
+    body: { args }
+  });
+}
+
 function todaySeoul() {
   return new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Seoul", year: "numeric", month: "2-digit", day: "2-digit"
@@ -116,6 +127,7 @@ function updateNetwork() {
   node.textContent = online ? "온라인" : "오프라인 · 화면만 사용 가능";
   node.classList.toggle("online", online);
   node.classList.toggle("offline", !online);
+  if (state.activeTab === "stocks") renderStockChart();
 }
 
 function formatUsd(microusd, alwaysCents = true) {
@@ -284,11 +296,171 @@ function selectTab(tab) {
   document.querySelectorAll(".tab-panel").forEach((panel) => panel.classList.add("hidden"));
   byId(`tab-${tab}`).classList.remove("hidden");
   if (tab === "calendar") void loadCalendar();
+  if (tab === "stocks") void loadStockWatchlist();
   if (tab === "tasks") void loadTasks();
   if (tab === "notes") void loadNotes();
   if (tab === "approvals") void loadApprovals();
   if (tab === "device" && state.device) renderDevice(state.device);
 }
+
+function stockTradingViewUrl(symbol) {
+  return `https://www.tradingview.com/symbols/${symbol.replace(":", "-")}/`;
+}
+
+function stockChartDocument(symbol, watchlist) {
+  const configuration = JSON.stringify({
+    allow_symbol_change: true,
+    autosize: true,
+    calendar: false,
+    details: false,
+    hide_legend: false,
+    hide_side_toolbar: true,
+    hide_top_toolbar: false,
+    hide_volume: false,
+    hotlist: false,
+    interval: "D",
+    locale: "kr",
+    save_image: false,
+    style: "1",
+    symbol,
+    theme: "dark",
+    timezone: "Asia/Seoul",
+    watchlist,
+    withdateranges: true
+  }).replaceAll("<", "\\u003c");
+  return `<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src https://s3.tradingview.com; style-src 'unsafe-inline'; frame-src https://s.tradingview.com https://www.tradingview-widget.com https://www.tradingview.com; base-uri 'none'; form-action 'none'"><style>html,body,.tradingview-widget-container,.tradingview-widget-container__widget{width:100%;height:100%;margin:0;background:#10141d;overflow:hidden}.tradingview-widget-container__widget{height:calc(100% - 24px)}.tradingview-widget-copyright{height:24px;padding:4px 8px;box-sizing:border-box;font:11px system-ui;color:#929cb3}.tradingview-widget-copyright a{color:#aebcff;text-decoration:none}</style></head><body><div class="tradingview-widget-container"><div class="tradingview-widget-container__widget"></div><div class="tradingview-widget-copyright"><a href="${stockTradingViewUrl(symbol)}" rel="noopener nofollow noreferrer" target="_blank">시장 차트</a> by TradingView</div><script src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>${configuration}</script></div></body></html>`;
+}
+
+function renderStockChart() {
+  const container = byId("stock-chart-container");
+  if (!container) return;
+  clear(container);
+  const online = navigator.onLine;
+  const network = byId("stock-network");
+  network.textContent = online ? "온라인" : "오프라인";
+  network.classList.toggle("online", online);
+  network.classList.toggle("offline", !online);
+  byId("stock-chart-symbol").textContent = state.selectedStockSymbol;
+  byId("stock-external-link").href = stockTradingViewUrl(state.selectedStockSymbol);
+  byId("stock-fallback-link").href = stockTradingViewUrl(state.selectedStockSymbol);
+  if (!online) {
+    const placeholder = text("div", "", "stock-chart-placeholder");
+    placeholder.append(text("strong", "차트를 보려면 인터넷 연결이 필요합니다."));
+    placeholder.append(text("p", "관심 종목은 연결 후 다시 동기화됩니다."));
+    container.append(placeholder);
+    return;
+  }
+  const frame = document.createElement("iframe");
+  frame.className = "stock-chart-frame";
+  frame.title = `${state.selectedStockSymbol} TradingView 조회 전용 차트`;
+  frame.referrerPolicy = "no-referrer";
+  frame.setAttribute("sandbox", "allow-scripts allow-popups allow-popups-to-escape-sandbox");
+  frame.srcdoc = stockChartDocument(
+    state.selectedStockSymbol,
+    state.stockWatchlist.map((item) => item.symbol)
+  );
+  container.append(frame);
+}
+
+function renderStockWatchlist() {
+  const list = byId("stock-watchlist");
+  clear(list);
+  byId("stock-watchlist-count").textContent = `${state.stockWatchlist.length}/50`;
+  if (!state.stockWatchlist.length) {
+    list.append(text("p", "아직 저장한 종목이 없습니다.", "empty"));
+  } else {
+    state.stockWatchlist.forEach((item) => {
+      const row = document.createElement("div");
+      row.className = `stock-watchlist-item${state.selectedStockSymbol === item.symbol ? " selected" : ""}`;
+      const select = document.createElement("button");
+      select.type = "button";
+      select.append(text("strong", item.displayName));
+      select.append(text("small", item.symbol));
+      select.addEventListener("click", () => {
+        state.selectedStockSymbol = item.symbol;
+        renderStockWatchlist();
+        renderStockChart();
+      });
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "stock-remove";
+      remove.setAttribute("aria-label", `${item.displayName} 관심 종목 삭제`);
+      remove.textContent = "×";
+      remove.addEventListener("click", async () => {
+        try {
+          await stockCommand("delete_stock_watchlist_item", { symbol: item.symbol }, true);
+          state.stockWatchlist = state.stockWatchlist.filter((candidate) => candidate.symbol !== item.symbol);
+          if (state.selectedStockSymbol === item.symbol) {
+            state.selectedStockSymbol = state.stockWatchlist[0]?.symbol || "NASDAQ:AAPL";
+          }
+          renderStockWatchlist();
+          renderStockChart();
+          toast(`${item.displayName} 관심 종목을 제거했습니다.`);
+        } catch (error) {
+          toast(error.message);
+        }
+      });
+      row.append(select, remove);
+      list.append(row);
+    });
+  }
+}
+
+async function loadStockWatchlist() {
+  try {
+    state.stockWatchlist = await stockCommand("get_stock_watchlist");
+    if (
+      state.selectedStockSymbol !== "NASDAQ:AAPL"
+      && !state.stockWatchlist.some((item) => item.symbol === state.selectedStockSymbol)
+    ) {
+      state.selectedStockSymbol = state.stockWatchlist[0]?.symbol || "NASDAQ:AAPL";
+    }
+    renderStockWatchlist();
+    renderStockChart();
+  } catch (error) {
+    toast(`관심 종목을 불러오지 못했습니다. ${error.message}`);
+  }
+}
+
+byId("stock-market").addEventListener("change", (event) => {
+  const krx = event.currentTarget.value === "KRX";
+  byId("stock-ticker").placeholder = krx ? "예: 005930" : "예: AAPL";
+  byId("stock-display-name").placeholder = krx ? "예: 삼성전자" : "예: Apple";
+});
+
+byId("stock-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const market = byId("stock-market").value;
+  const ticker = byId("stock-ticker").value.trim().toUpperCase();
+  const displayName = byId("stock-display-name").value.trim();
+  const validTicker = market === "KRX" ? /^\d{6}$/.test(ticker) : /^[A-Z0-9.-]{1,10}$/.test(ticker);
+  if (!validTicker) return toast(market === "KRX" ? "KRX 종목 코드는 6자리 숫자입니다." : "미국 티커 형식을 확인하세요.");
+  if (!displayName || Array.from(displayName).length > 80) return toast("표시 이름은 1자 이상 80자 이하로 입력하세요.");
+  const symbol = `${market}:${ticker}`;
+  if (state.stockWatchlist.length >= 50 && !state.stockWatchlist.some((item) => item.symbol === symbol)) {
+    return toast("관심 종목은 최대 50개까지 저장할 수 있습니다.");
+  }
+  const button = byId("stock-save");
+  setBusy(button, true, "관심 종목 저장");
+  try {
+    const saved = await stockCommand("upsert_stock_watchlist_item", {
+      input: { market, ticker, displayName }
+    }, true);
+    state.stockWatchlist = state.stockWatchlist.filter((item) => item.symbol !== saved.symbol);
+    state.stockWatchlist.push(saved);
+    state.stockWatchlist.sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.symbol.localeCompare(right.symbol));
+    state.selectedStockSymbol = saved.symbol;
+    byId("stock-ticker").value = "";
+    byId("stock-display-name").value = "";
+    renderStockWatchlist();
+    renderStockChart();
+    toast(`${saved.displayName} 관심 종목을 저장했습니다.`);
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    setBusy(button, false, "관심 종목 저장");
+  }
+});
 
 byId("assistant-form").addEventListener("submit", async (event) => {
   event.preventDefault();
