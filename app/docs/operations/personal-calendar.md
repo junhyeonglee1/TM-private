@@ -22,3 +22,11 @@ Windows에서는 왼쪽 메뉴의 `캘린더`를 열고 날짜 또는 `일정 �
 - Railway remote backup guard도 schema 11까지 허용해야 한다.
 - schema 11 migration 이후 schema 10 binary로 되돌리지 않는다. 문제가 생기면 schema 11 binary를 유지한 채 roll-forward 수정한다.
 - 현재 버전은 캘린더 표시와 저장만 제공한다. 푸시 알림, 외부 Google/Outlook 동기화, 자동 결제는 수행하지 않는다.
+
+## Production 배포 기록
+
+- 2026-07-23 GitHub Actions Windows build `29935655829`와 STEP 16 security `29935657084`가 커밋 `98f651b`를 통과했다.
+- Railway production deployment `8ad54258-663a-46b0-8996-71b793aa08fc`를 배포했다.
+- production DB와 암호화 원격 백업이 모두 schema 11이며, 백업 상태 `succeeded`와 integrity `ok`를 확인했다.
+- 임시 `매월 말일` 납부일을 production에 생성해 2026-07-31과 2026-08-31 occurrence를 확인하고 즉시 삭제했다. 삭제 후 남은 테스트 일정은 없다.
+- Windows 산출물은 `SHA256SUMS.txt`와 대조한 뒤 루트 실행 파일과 `dist/release`에 적용했다. 기존 실행 파일은 `dist/release/pre-calendar-20260723T001227Z`에 보존했다.
