@@ -1,4 +1,4 @@
-const CACHE_NAME = "tm-mobile-shell-v6";
+const CACHE_NAME = "tm-mobile-shell-v7";
 const SHELL = [
   "/mobile/",
   "/mobile/app.js",
@@ -6,7 +6,8 @@ const SHELL = [
   "/mobile/manifest.webmanifest",
   "/mobile/icon.svg",
   "/mobile/icon-256.png",
-  "/mobile/icon-512.png"
+  "/mobile/icon-512.png",
+  "/mobile/stock-catalog.json"
 ];
 
 self.addEventListener("install", (event) => {

@@ -7,7 +7,9 @@ import {
 } from "react";
 
 import { Icon } from "./Icon";
-import { buildTradingViewDocument, tradingViewUrl } from "../lib/tradingview";
+import { StockSearchCombobox } from "./StockSearchCombobox";
+import { stockWidgetUrl, tradingViewUrl } from "../lib/tradingview";
+import type { StockCatalogItem } from "../lib/stock-catalog";
 import type {
   StockMarket,
   StockWatchlistItem,
@@ -30,24 +32,6 @@ interface StockPageProps {
   onUpsert: (input: UpsertStockWatchlistItemInput) => Promise<StockWatchlistItem>;
 }
 
-const clientValidation = (
-  market: StockMarket,
-  tickerValue: string,
-  displayNameValue: string,
-): string | null => {
-  const ticker = tickerValue.trim().toUpperCase();
-  const displayName = displayNameValue.trim();
-  if (!displayName || Array.from(displayName).length > 80) {
-    return "표시 이름은 1자 이상 80자 이하로 입력하세요.";
-  }
-  if (market === "KRX") {
-    return /^\d{6}$/.test(ticker) ? null : "KRX 종목 코드는 6자리 숫자입니다.";
-  }
-  return /^[A-Z0-9.-]{1,10}$/.test(ticker)
-    ? null
-    : "미국 티커는 영문·숫자·점·하이픈 1~10자로 입력하세요.";
-};
-
 export function StockPage({
   onDelete,
   onLoad,
@@ -57,8 +41,8 @@ export function StockPage({
   const [items, setItems] = useState<StockWatchlistItem[]>([]);
   const [selectedSymbol, setSelectedSymbol] = useState(DEFAULT_SYMBOL);
   const [market, setMarket] = useState<StockMarket>("KRX");
-  const [ticker, setTicker] = useState("");
-  const [displayName, setDisplayName] = useState("");
+  const [candidate, setCandidate] = useState<StockCatalogItem | null>(null);
+  const [searchResetKey, setSearchResetKey] = useState(0);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [online, setOnline] = useState(() => navigator.onLine);
@@ -97,21 +81,20 @@ export function StockPage({
     () => items.map((item) => item.symbol),
     [items],
   );
-  const chartDocument = useMemo(
-    () => buildTradingViewDocument(selectedSymbol, watchlistSymbols),
+  const chartUrl = useMemo(
+    () => stockWidgetUrl(selectedSymbol, watchlistSymbols),
     [selectedSymbol, watchlistSymbols],
   );
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const validation = clientValidation(market, ticker, displayName);
-    if (validation) {
-      onNotify(validation, "error");
+    if (!candidate || candidate.market !== market) {
+      onNotify("검색 결과에서 저장할 종목을 먼저 선택하세요.", "error");
       return;
     }
     if (
       items.length >= WATCHLIST_LIMIT
-      && !items.some((item) => item.symbol === `${market}:${ticker.trim().toUpperCase()}`)
+      && !items.some((item) => item.symbol === `${candidate.market}:${candidate.ticker}`)
     ) {
       onNotify(`관심 종목은 최대 ${WATCHLIST_LIMIT}개까지 저장할 수 있습니다.`, "error");
       return;
@@ -119,9 +102,9 @@ export function StockPage({
     setSaving(true);
     try {
       const saved = await onUpsert({
-        market,
-        ticker: ticker.trim().toUpperCase(),
-        displayName: displayName.trim(),
+        market: candidate.market,
+        ticker: candidate.ticker,
+        displayName: candidate.name,
       });
       setItems((current) => {
         const next = current.filter((item) => item.symbol !== saved.symbol);
@@ -130,8 +113,8 @@ export function StockPage({
           left.createdAt.localeCompare(right.createdAt) || left.symbol.localeCompare(right.symbol));
       });
       setSelectedSymbol(saved.symbol);
-      setTicker("");
-      setDisplayName("");
+      setCandidate(null);
+      setSearchResetKey((current) => current + 1);
       onNotify(`${saved.displayName} 관심 종목을 저장했습니다.`);
     } catch (error) {
       onNotify(error instanceof Error ? error.message : "관심 종목을 저장하지 못했습니다.", "error");
@@ -202,30 +185,24 @@ export function StockPage({
           <form className="stock-form" onSubmit={(event) => void submit(event)}>
             <h2>관심 종목 추가</h2>
             <label htmlFor="stock-market">시장</label>
-            <select id="stock-market" onChange={(event) => setMarket(event.target.value as StockMarket)} value={market}>
+            <select
+              id="stock-market"
+              onChange={(event) => {
+                setMarket(event.target.value as StockMarket);
+                setCandidate(null);
+                setSearchResetKey((current) => current + 1);
+              }}
+              value={market}
+            >
               {MARKETS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
             </select>
-            <label htmlFor="stock-ticker">종목 코드</label>
-            <input
-              autoComplete="off"
-              id="stock-ticker"
-              maxLength={10}
-              onChange={(event) => setTicker(event.target.value)}
-              placeholder={market === "KRX" ? "예: 005930" : "예: AAPL"}
-              required
-              value={ticker}
+            <StockSearchCombobox
+              key={`${market}:${searchResetKey}`}
+              market={market}
+              onChange={setCandidate}
+              selected={candidate}
             />
-            <label htmlFor="stock-display-name">표시 이름</label>
-            <input
-              autoComplete="off"
-              id="stock-display-name"
-              maxLength={80}
-              onChange={(event) => setDisplayName(event.target.value)}
-              placeholder={market === "KRX" ? "예: 삼성전자" : "예: Apple"}
-              required
-              value={displayName}
-            />
-            <button className="primary-button" disabled={saving} type="submit">
+            <button className="primary-button" disabled={saving || !candidate} type="submit">
               <Icon name="plus" size={15} /> {saving ? "저장 중…" : "관심 종목 저장"}
             </button>
           </form>
@@ -248,8 +225,8 @@ export function StockPage({
               data-testid="tradingview-frame"
               key={`${selectedSymbol}:${watchlistSymbols.join(",")}`}
               referrerPolicy="no-referrer"
-              sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"
-              srcDoc={chartDocument}
+              sandbox="allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox"
+              src={chartUrl}
               title={`${selectedSymbol} TradingView 조회 전용 차트`}
             />
           )}

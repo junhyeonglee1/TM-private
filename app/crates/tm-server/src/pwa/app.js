@@ -11,6 +11,9 @@ const state = {
   selectedCalendarDate: null,
   editingCalendarEvent: null,
   stockWatchlist: [],
+  stockCatalog: null,
+  selectedStockCandidate: null,
+  stockSearchActiveIndex: 0,
   selectedStockSymbol: "NASDAQ:AAPL"
 };
 const costRefreshIntervalMs = 5 * 60 * 1000;
@@ -296,7 +299,10 @@ function selectTab(tab) {
   document.querySelectorAll(".tab-panel").forEach((panel) => panel.classList.add("hidden"));
   byId(`tab-${tab}`).classList.remove("hidden");
   if (tab === "calendar") void loadCalendar();
-  if (tab === "stocks") void loadStockWatchlist();
+  if (tab === "stocks") {
+    void loadStockCatalog();
+    void loadStockWatchlist();
+  }
   if (tab === "tasks") void loadTasks();
   if (tab === "notes") void loadNotes();
   if (tab === "approvals") void loadApprovals();
@@ -307,12 +313,16 @@ function stockTradingViewUrl(symbol) {
   return `https://www.tradingview.com/symbols/${symbol.replace(":", "-")}/`;
 }
 
-function stockChartDocument(symbol, watchlist) {
+function stockWidgetUrl(symbol, watchlist) {
+  const pattern = /^(?:KRX:\d{6}|(?:NASDAQ|NYSE|AMEX):[A-Z0-9.-]{1,10})$/;
+  const safeSymbol = pattern.test(symbol) ? symbol : "NASDAQ:AAPL";
+  const safeWatchlist = watchlist.filter((item) => pattern.test(item)).slice(0, 50);
   const configuration = JSON.stringify({
     allow_symbol_change: true,
     autosize: true,
     calendar: false,
     details: false,
+    height: "100%",
     hide_legend: false,
     hide_side_toolbar: true,
     hide_top_toolbar: false,
@@ -322,13 +332,17 @@ function stockChartDocument(symbol, watchlist) {
     locale: "kr",
     save_image: false,
     style: "1",
-    symbol,
+    support_host: "https://www.tradingview.com",
+    symbol: safeSymbol,
     theme: "dark",
     timezone: "Asia/Seoul",
-    watchlist,
+    watchlist: safeWatchlist,
+    width: "100%",
     withdateranges: true
   }).replaceAll("<", "\\u003c");
-  return `<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src https://s3.tradingview.com; style-src 'unsafe-inline'; frame-src https://s.tradingview.com https://www.tradingview-widget.com https://www.tradingview.com; base-uri 'none'; form-action 'none'"><style>html,body,.tradingview-widget-container,.tradingview-widget-container__widget{width:100%;height:100%;margin:0;background:#10141d;overflow:hidden}.tradingview-widget-container__widget{height:calc(100% - 24px)}.tradingview-widget-copyright{height:24px;padding:4px 8px;box-sizing:border-box;font:11px system-ui;color:#929cb3}.tradingview-widget-copyright a{color:#aebcff;text-decoration:none}</style></head><body><div class="tradingview-widget-container"><div class="tradingview-widget-container__widget"></div><div class="tradingview-widget-copyright"><a href="${stockTradingViewUrl(symbol)}" rel="noopener nofollow noreferrer" target="_blank">시장 차트</a> by TradingView</div><script src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>${configuration}</script></div></body></html>`;
+  const externalUrl = stockTradingViewUrl(safeSymbol);
+  const widgetDocument = `<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="referrer" content="no-referrer"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-tm-stock-widget-v1' https://s3.tradingview.com; style-src 'unsafe-inline'; frame-src https://s.tradingview.com https://www.tradingview-widget.com https://www.tradingview.com; base-uri 'none'; form-action 'none'"><style>:root{color-scheme:dark;font-family:system-ui,sans-serif}*{box-sizing:border-box}html,body,.widget-shell,.tradingview-widget-container{width:100%;height:100%;margin:0}body{min-height:420px;overflow:hidden;background:#10141d;color:#d9e0f2}.widget-shell{position:relative;display:grid;grid-template-rows:minmax(0,1fr) 26px}.tradingview-widget-container{min-height:0}.tradingview-widget-container__widget{width:100%;height:100%;min-height:394px}.widget-status{position:absolute;inset:0 0 26px;z-index:2;align-content:center;display:grid;justify-items:center;gap:8px;padding:24px;background:#10141d;color:#929cb3;text-align:center}.widget-status strong{color:#d9e0f2}.widget-status p{margin:0;font-size:12px;line-height:1.5}.widget-status a{color:#aebcff}.widget-status.hidden{display:none}.tradingview-widget-copyright{height:26px;padding:5px 9px;background:#10141d;color:#929cb3;font-size:11px}.tradingview-widget-copyright a{color:#aebcff;text-decoration:none}</style></head><body><main class="widget-shell"><div class="tradingview-widget-container"><div class="tradingview-widget-container__widget"></div></div><div id="widget-status" class="widget-status" role="status"><strong>시장 차트를 불러오는 중입니다.</strong><p>TradingView 연결 상태에 따라 몇 초 정도 걸릴 수 있습니다.</p></div><div class="tradingview-widget-copyright"><a href="${externalUrl}" rel="noopener nofollow noreferrer" target="_blank">시장 차트</a> by TradingView</div></main><script nonce="tm-stock-widget-v1">(()=>{const c=document.querySelector(".tradingview-widget-container"),s=document.getElementById("widget-status"),f=()=>{s.innerHTML='<strong>차트를 표시하지 못했습니다.</strong><p>인터넷 연결 또는 TradingView 위젯 제한을 확인하세요. <a href="${externalUrl}" rel="noopener nofollow noreferrer" target="_blank">TradingView에서 확인</a></p>';s.classList.remove("hidden")},o=new MutationObserver(()=>{const i=c.querySelector("iframe");if(!i)return;i.addEventListener("load",()=>s.classList.add("hidden"),{once:true});setTimeout(()=>s.classList.add("hidden"),1500);o.disconnect()});o.observe(c,{childList:true,subtree:true});const e=document.createElement("script");e.async=true;e.src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js";e.textContent=${JSON.stringify(configuration)};e.addEventListener("error",f,{once:true});c.append(e);setTimeout(()=>{if(!c.querySelector("iframe"))f()},12000)})();</script></body></html>`;
+  return `data:text/html;charset=utf-8,${encodeURIComponent(widgetDocument)}`;
 }
 
 function renderStockChart() {
@@ -354,12 +368,124 @@ function renderStockChart() {
   frame.className = "stock-chart-frame";
   frame.title = `${state.selectedStockSymbol} TradingView 조회 전용 차트`;
   frame.referrerPolicy = "no-referrer";
-  frame.setAttribute("sandbox", "allow-scripts allow-popups allow-popups-to-escape-sandbox");
-  frame.srcdoc = stockChartDocument(
+  frame.setAttribute("sandbox", "allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox");
+  frame.src = stockWidgetUrl(
     state.selectedStockSymbol,
     state.stockWatchlist.map((item) => item.symbol)
   );
   container.append(frame);
+}
+
+function normalizeStockSearch(value) {
+  return value.normalize("NFKC").trim().toLocaleLowerCase("ko-KR");
+}
+
+function stockSearchResults() {
+  const query = normalizeStockSearch(byId("stock-company-search").value);
+  if (!query || !state.stockCatalog) return [];
+  const market = byId("stock-market").value;
+  const score = (item) => {
+    const name = normalizeStockSearch(item.name);
+    const ticker = normalizeStockSearch(item.ticker);
+    if (name === query || ticker === query) return 0;
+    if (name.startsWith(query)) return 1;
+    if (ticker.startsWith(query)) return 2;
+    if (name.split(/[\s,.(\)/-]+/u).some((word) => word.startsWith(query))) return 3;
+    return 4;
+  };
+  return state.stockCatalog.items
+    .filter((item) => {
+      if (item.market !== market) return false;
+      const name = normalizeStockSearch(item.name);
+      const ticker = normalizeStockSearch(item.ticker);
+      return name.includes(query) || ticker.includes(query);
+    })
+    .sort((left, right) =>
+      score(left) - score(right)
+      || left.name.localeCompare(right.name, "ko")
+      || left.ticker.localeCompare(right.ticker))
+    .slice(0, 8);
+}
+
+function selectStockCandidate(item) {
+  state.selectedStockCandidate = item;
+  state.stockSearchActiveIndex = 0;
+  byId("stock-company-search").value = item.name;
+  byId("stock-company-search").setAttribute("aria-expanded", "false");
+  show("stock-search-results", false);
+  const selection = byId("stock-selection");
+  clear(selection);
+  selection.append(text("strong", item.name), text("span", `${item.market}:${item.ticker}`));
+  show("stock-selection", true);
+  byId("stock-save").disabled = false;
+}
+
+function clearStockCandidate() {
+  state.selectedStockCandidate = null;
+  show("stock-selection", false);
+  byId("stock-save").disabled = true;
+}
+
+function renderStockSearch() {
+  const input = byId("stock-company-search");
+  const list = byId("stock-search-results");
+  const results = stockSearchResults();
+  clear(list);
+  if (!input.value.trim()) {
+    input.setAttribute("aria-expanded", "false");
+    show("stock-search-results", false);
+    return;
+  }
+  if (!results.length) {
+    list.append(text("p", "일치하는 상장 종목이 없습니다."));
+  } else {
+    if (state.stockSearchActiveIndex >= results.length) state.stockSearchActiveIndex = 0;
+    results.forEach((item, index) => {
+      const option = document.createElement("button");
+      option.type = "button";
+      option.id = `stock-search-option-${index}`;
+      option.setAttribute("role", "option");
+      option.setAttribute("aria-selected", String(index === state.stockSearchActiveIndex));
+      if (index === state.stockSearchActiveIndex) option.className = "active";
+      option.append(text("strong", item.name), text("span", `${item.market}:${item.ticker}`));
+      option.addEventListener("pointerdown", (event) => event.preventDefault());
+      option.addEventListener("click", () => selectStockCandidate(item));
+      list.append(option);
+    });
+    input.setAttribute("aria-activedescendant", `stock-search-option-${state.stockSearchActiveIndex}`);
+  }
+  input.setAttribute("aria-expanded", "true");
+  show("stock-search-results", true);
+}
+
+async function loadStockCatalog() {
+  if (state.stockCatalog) {
+    renderStockCatalogSummary();
+    return;
+  }
+  try {
+    const response = await fetch("/mobile/stock-catalog.json", {
+      cache: "force-cache",
+      credentials: "same-origin"
+    });
+    if (!response.ok) throw new Error(`목록 요청 실패 (${response.status})`);
+    const catalog = await response.json();
+    if (!catalog || !Array.isArray(catalog.items) || !catalog.counts) {
+      throw new Error("상장 종목 목록 형식이 올바르지 않습니다.");
+    }
+    state.stockCatalog = catalog;
+    renderStockCatalogSummary();
+    renderStockSearch();
+  } catch (error) {
+    byId("stock-catalog-summary").textContent = `상장 종목 목록을 불러오지 못했습니다. ${error.message}`;
+  }
+}
+
+function renderStockCatalogSummary() {
+  if (!state.stockCatalog) return;
+  const market = byId("stock-market").value;
+  const count = Number(state.stockCatalog.counts[market] || 0).toLocaleString("ko-KR");
+  byId("stock-catalog-summary").textContent = `${market} 상장 종목 ${count}개에서 검색`;
 }
 
 function renderStockWatchlist() {
@@ -424,19 +550,57 @@ async function loadStockWatchlist() {
 
 byId("stock-market").addEventListener("change", (event) => {
   const krx = event.currentTarget.value === "KRX";
-  byId("stock-ticker").placeholder = krx ? "예: 005930" : "예: AAPL";
-  byId("stock-display-name").placeholder = krx ? "예: 삼성전자" : "예: Apple";
+  const input = byId("stock-company-search");
+  input.placeholder = krx ? "예: 삼성전자" : "예: Apple 또는 AAPL";
+  input.value = "";
+  clearStockCandidate();
+  renderStockCatalogSummary();
+  renderStockSearch();
+});
+
+byId("stock-company-search").addEventListener("input", () => {
+  clearStockCandidate();
+  state.stockSearchActiveIndex = 0;
+  renderStockSearch();
+});
+
+byId("stock-company-search").addEventListener("focus", renderStockSearch);
+byId("stock-company-search").addEventListener("blur", () => {
+  window.setTimeout(() => {
+    byId("stock-company-search").setAttribute("aria-expanded", "false");
+    show("stock-search-results", false);
+  }, 0);
+});
+
+byId("stock-company-search").addEventListener("keydown", (event) => {
+  const results = stockSearchResults();
+  if (event.key === "Escape") {
+    byId("stock-company-search").setAttribute("aria-expanded", "false");
+    show("stock-search-results", false);
+    return;
+  }
+  if (!results.length) return;
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    state.stockSearchActiveIndex = (state.stockSearchActiveIndex + 1) % results.length;
+    renderStockSearch();
+  } else if (event.key === "ArrowUp") {
+    event.preventDefault();
+    state.stockSearchActiveIndex = (state.stockSearchActiveIndex - 1 + results.length) % results.length;
+    renderStockSearch();
+  } else if (event.key === "Enter" && byId("stock-company-search").getAttribute("aria-expanded") === "true") {
+    event.preventDefault();
+    selectStockCandidate(results[state.stockSearchActiveIndex] || results[0]);
+  }
 });
 
 byId("stock-form").addEventListener("submit", async (event) => {
   event.preventDefault();
-  const market = byId("stock-market").value;
-  const ticker = byId("stock-ticker").value.trim().toUpperCase();
-  const displayName = byId("stock-display-name").value.trim();
-  const validTicker = market === "KRX" ? /^\d{6}$/.test(ticker) : /^[A-Z0-9.-]{1,10}$/.test(ticker);
-  if (!validTicker) return toast(market === "KRX" ? "KRX 종목 코드는 6자리 숫자입니다." : "미국 티커 형식을 확인하세요.");
-  if (!displayName || Array.from(displayName).length > 80) return toast("표시 이름은 1자 이상 80자 이하로 입력하세요.");
-  const symbol = `${market}:${ticker}`;
+  const candidate = state.selectedStockCandidate;
+  if (!candidate || candidate.market !== byId("stock-market").value) {
+    return toast("검색 결과에서 저장할 종목을 먼저 선택하세요.");
+  }
+  const symbol = `${candidate.market}:${candidate.ticker}`;
   if (state.stockWatchlist.length >= 50 && !state.stockWatchlist.some((item) => item.symbol === symbol)) {
     return toast("관심 종목은 최대 50개까지 저장할 수 있습니다.");
   }
@@ -444,14 +608,19 @@ byId("stock-form").addEventListener("submit", async (event) => {
   setBusy(button, true, "관심 종목 저장");
   try {
     const saved = await stockCommand("upsert_stock_watchlist_item", {
-      input: { market, ticker, displayName }
+      input: {
+        market: candidate.market,
+        ticker: candidate.ticker,
+        displayName: candidate.name
+      }
     }, true);
     state.stockWatchlist = state.stockWatchlist.filter((item) => item.symbol !== saved.symbol);
     state.stockWatchlist.push(saved);
     state.stockWatchlist.sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.symbol.localeCompare(right.symbol));
     state.selectedStockSymbol = saved.symbol;
-    byId("stock-ticker").value = "";
-    byId("stock-display-name").value = "";
+    byId("stock-company-search").value = "";
+    clearStockCandidate();
+    renderStockSearch();
     renderStockWatchlist();
     renderStockChart();
     toast(`${saved.displayName} 관심 종목을 저장했습니다.`);
@@ -459,6 +628,7 @@ byId("stock-form").addEventListener("submit", async (event) => {
     toast(error.message);
   } finally {
     setBusy(button, false, "관심 종목 저장");
+    button.disabled = !state.selectedStockCandidate;
   }
 });
 

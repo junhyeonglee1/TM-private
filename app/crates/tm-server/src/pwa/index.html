@@ -150,11 +150,14 @@
               <h2>관심 종목 추가</h2>
               <label for="stock-market">시장</label>
               <select id="stock-market"><option value="KRX">한국 KRX</option><option value="NASDAQ">미국 NASDAQ</option><option value="NYSE">미국 NYSE</option><option value="AMEX">미국 AMEX</option></select>
-              <label for="stock-ticker">종목 코드</label>
-              <input id="stock-ticker" maxlength="10" autocomplete="off" placeholder="예: 005930" required>
-              <label for="stock-display-name">표시 이름</label>
-              <input id="stock-display-name" maxlength="80" autocomplete="off" placeholder="예: 삼성전자" required>
-              <button id="stock-save" class="primary" type="submit">관심 종목 저장</button>
+              <label for="stock-company-search">회사명 또는 종목코드</label>
+              <div class="stock-search">
+                <input id="stock-company-search" role="combobox" aria-autocomplete="list" aria-controls="stock-search-results" aria-expanded="false" maxlength="80" autocomplete="off" placeholder="예: 삼성전자" required>
+                <div id="stock-search-results" class="stock-search-results hidden" role="listbox" aria-label="종목 검색 결과"></div>
+              </div>
+              <small id="stock-catalog-summary" class="stock-catalog-summary">상장 종목 목록을 준비하는 중입니다.</small>
+              <div id="stock-selection" class="stock-selection hidden"></div>
+              <button id="stock-save" class="primary" type="submit" disabled>관심 종목 저장</button>
             </form>
           </section>
         </section>

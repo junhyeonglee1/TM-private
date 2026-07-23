@@ -7,12 +7,13 @@ TM의 Windows 앱과 모바일 PWA는 같은 Railway SQLite 원본에 관심 종
 - 시장: `KRX`, `NASDAQ`, `NYSE`, `AMEX`
 - KRX 티커: 6자리 숫자
 - 미국 티커: 영문 대문자, 숫자, `.`, `-`로 구성된 1~10자
+- 검색 목록: KRX 유가증권·코스닥과 Nasdaq Trader의 NASDAQ·NYSE·NYSE American 비ETF 종목
 - 관심 종목: 최대 50개
 - 기본 차트: `NASDAQ:AAPL`
 - 차트 설정: 한국어, 서울 시간, 일봉 캔들, 거래량, 기간 선택
 - 제외: 계좌 연결, 보유 자산, 매수·매도, 자동매매, 가격 알림, 투자 추천, AI 주가 분석
 
-Windows에서는 왼쪽 `도구`의 `주식`을 연다. 모바일에서는 `/mobile/`에 연결된 승인 기기로 접속해 `주식` 탭을 연다. 관심 종목의 시장·코드·표시 이름을 저장하면 두 화면이 같은 cloud 목록을 사용한다. 위젯 자체 검색은 저장하지 않고 다른 종목을 임시로 조회하는 용도다.
+Windows에서는 왼쪽 `도구`의 `주식`을 연다. 모바일에서는 `/mobile/`에 연결된 승인 기기로 접속해 `주식` 탭을 연다. 시장을 고르고 회사명이나 종목코드를 검색한 뒤 후보를 선택하면 된다. 두 화면은 같은 cloud 관심 종목 목록을 사용한다. 위젯 자체 검색은 저장하지 않고 다른 종목을 임시로 조회하는 용도다.
 
 ## 외부 차트와 장애 처리
 
@@ -22,9 +23,9 @@ TradingView는 거래소 정책에 따라 지연 시세를 표시하며 KRX 일�
 
 ## 보안 경계
 
-- TradingView 스크립트는 TM 본문이 아닌 `srcdoc` iframe에서만 실행한다.
-- iframe sandbox에는 `allow-scripts`, `allow-popups`, `allow-popups-to-escape-sandbox`만 있고 `allow-same-origin`은 없다.
-- iframe은 `no-referrer`를 사용하고 자체 CSP에서 TradingView의 검토된 script/frame host만 허용한다.
+- TradingView 스크립트는 TM 본문이 아닌 `data:` 격리 문서 iframe에서만 실행한다. `data:` 문서는 TM과 동일 출처가 될 수 없는 고유한 opaque origin이다.
+- TradingView가 자기 문서의 쿠키를 읽어 차트를 초기화할 수 있도록 sandbox에 `allow-same-origin`을 사용한다. 이 권한은 opaque `data:` 문서 안에서만 적용되므로 TM origin, 쿠키, 저장소, Tauri IPC에는 접근할 수 없다.
+- iframe은 `no-referrer`를 사용하고 격리 문서 자체 CSP에서 TradingView의 검토된 script/frame host만 허용한다.
 - TradingView 코드에는 TM bearer token, 기기 쿠키, CSRF 값, Tauri IPC 객체를 전달하지 않는다.
 - 모바일 관심 종목 변경은 승인 기기 범위, same-origin, CSRF, 정확한 command confirmation을 모두 통과해야 한다.
 - 관심 종목과 차트 데이터는 AI 도구·프롬프트의 입력 후보에 포함하지 않는다.

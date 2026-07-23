@@ -363,21 +363,21 @@ describe("TM 데스크톱 UI", () => {
 
     const frame = screen.getByTestId("tradingview-frame");
     const sandbox = frame.getAttribute("sandbox") ?? "";
-    const source = frame.getAttribute("srcdoc") ?? "";
-    expect(sandbox).toBe("allow-scripts allow-popups allow-popups-to-escape-sandbox");
-    expect(sandbox).not.toContain("allow-same-origin");
+    const source = frame.getAttribute("src") ?? "";
+    expect(sandbox).toBe("allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox");
     expect(frame).toHaveAttribute("referrerpolicy", "no-referrer");
-    expect(source).toContain("https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js");
-    expect(source).toContain("\"symbol\":\"NASDAQ:AAPL\"");
-    expect(source).toContain("\"locale\":\"kr\"");
-    expect(source).toContain("\"timezone\":\"Asia/Seoul\"");
-    expect(source).toContain("\"withdateranges\":true");
-    expect(source).toContain("\"hide_volume\":false");
-    expect(source).toContain("\"save_image\":false");
-    expect(source).not.toContain("__TAURI");
+    expect(source).toMatch(/^data:text\/html;charset=utf-8,/);
+    const widgetDocument = decodeURIComponent(source.slice(source.indexOf(",") + 1));
+    expect(widgetDocument).toContain("https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js");
+    expect(widgetDocument).toContain("\\\"symbol\\\":\\\"NASDAQ:AAPL\\\"");
+    expect(widgetDocument).toContain("\\\"support_host\\\":\\\"https://www.tradingview.com\\\"");
+    expect(widgetDocument).toContain("\\\"timezone\\\":\\\"Asia/Seoul\\\"");
+    expect(widgetDocument).toContain("\\\"save_image\\\":false");
+    expect(widgetDocument).toContain("default-src 'none'");
+    expect(widgetDocument).not.toContain("__TAURI");
 
-    await user.type(screen.getByLabelText("종목 코드"), "005930");
-    await user.type(screen.getByLabelText("표시 이름"), "삼성전자");
+    await user.type(screen.getByRole("combobox", { name: "회사명 또는 종목코드" }), "삼성전자");
+    await user.click(await screen.findByRole("option", { name: /삼성전자.*KRX:005930/ }));
     await user.click(screen.getByRole("button", { name: /관심 종목 저장/ }));
 
     expect(await screen.findByRole("status")).toHaveTextContent("삼성전자 관심 종목을 저장했습니다.");

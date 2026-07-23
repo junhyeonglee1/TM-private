@@ -158,6 +158,18 @@ button { border: 0; border-radius: 13px; font-weight: 800; }
 .stock-form h2 { margin: 0 0 4px; font-size: 16px; }
 .stock-form label { margin-top: 5px; }
 .stock-form .primary { margin-top: 8px; }
+.stock-search { position: relative; }
+.stock-search > input { width: 100%; }
+.stock-search-results { position: absolute; z-index: 20; top: calc(100% + 5px); right: 0; left: 0; max-height: 290px; padding: 5px; overflow: auto; border: 1px solid var(--line); border-radius: 11px; background: #171d28; box-shadow: 0 16px 36px rgb(0 0 0 / 42%); }
+.stock-search-results button { display: grid; gap: 3px; width: 100%; padding: 10px; border-radius: 8px; background: transparent; color: #fff; text-align: left; }
+.stock-search-results button.active, .stock-search-results button:active { background: #252e4d; }
+.stock-search-results button strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stock-search-results button span { color: var(--muted); font-size: 11px; }
+.stock-search-results p { margin: 0; padding: 13px 9px; color: var(--muted); font-size: 12px; text-align: center; }
+.stock-catalog-summary { color: var(--muted); font-size: 11px; }
+.stock-selection { align-items: center; display: flex; justify-content: space-between; gap: 8px; padding: 9px 10px; border: 1px solid #5265aa; border-radius: 9px; background: #252e4d; font-size: 12px; }
+.stock-selection strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stock-selection span { flex: 0 0 auto; color: var(--muted); font-size: 10px; }
 .card-list { display: grid; gap: 10px; }
 .item-card { padding: 15px; border: 1px solid var(--line); border-radius: 15px; background: #121720; }
 .item-card h2 { margin: 0 0 8px; font-size: 17px; }

@@ -17,6 +17,7 @@ const STYLES: &str = include_str!("pwa/styles.css");
 const MANIFEST: &str = include_str!("pwa/manifest.webmanifest");
 const ICON: &str = include_str!("pwa/icon.svg");
 const SERVICE_WORKER: &str = include_str!("pwa/sw.js");
+const STOCK_CATALOG: &str = include_str!("../../../assets/stock-catalog.json");
 const ICON_256: &[u8] = include_bytes!("../../../src-tauri/icons/128x128@2x.png");
 const ICON_512: &[u8] = include_bytes!("../../../src-tauri/icons/icon.png");
 
@@ -30,6 +31,7 @@ pub(super) fn routes() -> Router<AppState> {
         .route("/mobile/icon.svg", get(icon))
         .route("/mobile/icon-256.png", get(icon_256))
         .route("/mobile/icon-512.png", get(icon_512))
+        .route("/mobile/stock-catalog.json", get(stock_catalog))
         .route("/mobile/sw.js", get(service_worker))
 }
 
@@ -71,6 +73,10 @@ async fn icon_512() -> Response {
 
 async fn service_worker() -> Response {
     content(SERVICE_WORKER, "text/javascript; charset=utf-8")
+}
+
+async fn stock_catalog() -> Response {
+    content(STOCK_CATALOG, "application/json; charset=utf-8")
 }
 
 fn content(body: &'static str, content_type: &'static str) -> Response {

@@ -16,6 +16,7 @@ RUN apt-get update \
 RUN rustup component add rustfmt clippy
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
+COPY assets ./assets
 COPY docs ./docs
 COPY src-tauri ./src-tauri
 RUN cargo fmt --all -- --check \

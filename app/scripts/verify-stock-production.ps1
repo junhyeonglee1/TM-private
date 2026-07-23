@@ -58,11 +58,16 @@ function Invoke-TmRequest {
         if ($response.Headers.Contains('Content-Security-Policy')) {
             $csp = [string]::Join(';', $response.Headers.GetValues('Content-Security-Policy'))
         }
+        $xFrameOptions = ''
+        if ($response.Headers.Contains('X-Frame-Options')) {
+            $xFrameOptions = [string]::Join(';', $response.Headers.GetValues('X-Frame-Options'))
+        }
         [pscustomobject]@{
             StatusCode = [int]$response.StatusCode
             Body = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
             SetCookies = $setCookies
             ContentSecurityPolicy = $csp
+            XFrameOptions = $xFrameOptions
         }
     }
     finally {
@@ -159,28 +164,33 @@ try {
         [string]$pwa.Body,
         'id="stock-fallback-link"'
     )
-    $hasTradingViewScript = [regex]::IsMatch(
-        [string]$pwa.ContentSecurityPolicy,
-        'https://s3\.tradingview\.com'
-    )
     $hasTradingViewFrame = [regex]::IsMatch(
         [string]$pwa.ContentSecurityPolicy,
-        'frame-src.+https://s\.tradingview\.com'
+        'frame-src.+data:.+https://s\.tradingview\.com'
     )
-    if (-not ($hasStockTab -and $hasExternalFallback -and
-        $hasTradingViewScript -and $hasTradingViewFrame)) {
+    if (-not ($hasStockTab -and $hasExternalFallback -and $hasTradingViewFrame)) {
         throw (
             'The production PWA stock shell or TradingView CSP is missing. ' +
             "tab=$hasStockTab fallback=$hasExternalFallback " +
-            "script=$hasTradingViewScript frame=$hasTradingViewFrame"
+            "frame=$hasTradingViewFrame"
         )
     }
     $pwaScript = Invoke-TmRequest -Client $client -Method ([System.Net.Http.HttpMethod]::Get) -Uri "$base/mobile/app.js"
     Require-Status $pwaScript 200 "$stage-script"
-    if ($pwaScript.Body -notmatch 'allow-scripts allow-popups allow-popups-to-escape-sandbox' -or
-        $pwaScript.Body -match 'allow-same-origin' -or
-        $pwaScript.Body -notmatch 'embed-widget-advanced-chart\.js') {
+    if ($pwaScript.Body -notmatch 'allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox' -or
+        $pwaScript.Body -notmatch 'data:text/html;charset=utf-8' -or
+        $pwaScript.Body -notmatch 'default-src ''none''' -or
+        $pwaScript.Body -notmatch 'embed-widget-advanced-chart\.js' -or
+        $pwaScript.Body -notmatch 'support_host' -or
+        $pwaScript.Body -match '__TAURI' -or
+        $pwaScript.Body -notmatch '/mobile/stock-catalog\.json') {
         throw 'The production PWA TradingView sandbox contract is invalid.'
+    }
+    $stockCatalog = Invoke-TmRequest -Client $client -Method ([System.Net.Http.HttpMethod]::Get) -Uri "$base/mobile/stock-catalog.json"
+    Require-Status $stockCatalog 200 "$stage-catalog"
+    if ($stockCatalog.Body -notmatch '"ticker":"005930","name":"삼성전자"' -or
+        $stockCatalog.Body -notmatch '"ticker":"AAPL","name":"Apple Inc\."') {
+        throw 'The production stock name-search catalog is incomplete.'
     }
 
     $stage = 'ai-cost-before'
