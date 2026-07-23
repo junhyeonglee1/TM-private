@@ -1,4 +1,4 @@
-# STEP 11 read-only AI 오케스트레이터
+# Read-only AI 오케스트레이터
 
 STEP 11은 Railway의 `cloud-authenticated` 서버에서 OpenAI Responses API를 호출하되, AI가 TM 데이터를 직접 읽거나 변경하지 못하도록 서버가 모든 도구 실행을 중개한다. API key는 서버 프로세스 환경변수에서만 읽고 SQLite·응답·로그에 기록하지 않는다.
 
@@ -10,7 +10,7 @@ STEP 11은 Railway의 `cloud-authenticated` 서버에서 OpenAI Responses API를
 | 인증 | TM bearer token 필수 |
 | 과금 확인 | `X-TM-Confirm-AI-Call: assistant` 필수 |
 | model | 기본 `gpt-5.6-terra` |
-| prompt version | `step11-v1` |
+| prompt version | `calendar-assistant-v1` |
 | API | Responses API |
 | reasoning | `medium`, `current_turn` |
 | 응답 저장 | `store: false` |
@@ -25,17 +25,19 @@ STEP 11은 Railway의 `cloud-authenticated` 서버에서 OpenAI Responses API를
 
 ## 데이터 경계
 
-모델이 사용할 수 있는 서버 도구는 다음 7개뿐이다.
+모델이 사용할 수 있는 read 도구는 다음 9개뿐이다.
 
 - `list_projects`
 - `list_tasks`
+- `list_calendar_occurrences`
 - `list_checklist`
 - `list_notes`
 - `list_sessions`
 - `list_worklogs`
 - `search_tm`
+- `search_memory`
 
-각 도구는 삭제되지 않은 레코드만 최대 20개 반환한다. 긴 문자열은 필드별 UTF-8 512 bytes에서 잘라내고, 도구 출력 전체가 64 KiB를 넘으면 실패시킨다. 결과는 `tm_read_only`, `untrusted: true`로 표시한다.
+각 도구는 삭제되지 않은 레코드만 최대 20개 반환한다. 캘린더 도구는 한 번에 최대 31일만 조회하며 description을 제외한 occurrence ID·event ID·제목·종류·날짜·시간·반복 정보만 반환한다. 긴 문자열은 필드별 UTF-8 512 bytes에서 잘라내고, 도구 출력 전체가 64 KiB를 넘으면 실패시킨다. 결과는 read-only source와 `untrusted: true`로 표시한다.
 
 허용 필드는 ID, project/session 연결 ID, 제목·설명·본문·목표·결과·차단 요인·다음 행동, 상태·우선순위·완료 여부와 관련 날짜다. 다음 항목은 도구 자체에 존재하지 않는다.
 

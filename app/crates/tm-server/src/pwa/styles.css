@@ -80,6 +80,16 @@ button { border: 0; border-radius: 13px; font-weight: 800; }
 .task-report-priorities h3 { margin: 0; font-size: 15px; }
 .task-report-priorities strong { font-size: 12px; line-height: 1.5; }
 .task-report-priorities small { color: #ffc28d; }
+.brief-schedule { display: grid; gap: 8px; }
+.brief-schedule > h3 { margin: 0; font-size: 14px; }
+.brief-schedule ul { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.brief-schedule li { display: flex; gap: 9px; padding: 11px; border: 1px solid var(--line); border-radius: 13px; background: #121720; }
+.brief-schedule li > div { display: grid; gap: 3px; min-width: 0; }
+.brief-schedule strong { font-size: 14px; }
+.brief-schedule small, .brief-schedule p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.brief-schedule em { color: #ffc28d; font-size: 11px; font-style: normal; }
+.brief-schedule-kind { flex: 0 0 auto; height: fit-content; padding: 4px 7px; border-radius: 999px; background: #293a69; color: #dce5ff; font-size: 10px; font-weight: 800; }
+.brief-schedule-kind.payment { background: #4a3023; color: #ffc28d; }
 .task-report-alerts { margin: 0; padding: 11px 13px 11px 28px; border-radius: 12px; background: #31261f; color: #ffc28d; font-size: 12px; }
 .task-report-meta { margin: 0; color: var(--muted); font-size: 11px; }
 .task-report-feedback { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }

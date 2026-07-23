@@ -33,6 +33,17 @@ export interface TaskReportPriority {
   alert: string;
 }
 
+export interface TaskReportScheduleHighlight {
+  occurrenceKey: string;
+  eventId: string;
+  title: string;
+  kind: "personal" | "payment";
+  date: string;
+  eventTime: string | null;
+  reason: string;
+  alert: string;
+}
+
 export interface TaskReportResult {
   runId: string;
   reportDate: string;
@@ -41,6 +52,7 @@ export interface TaskReportResult {
     headline: string;
     summary: string;
     priorities: TaskReportPriority[];
+    scheduleHighlights: TaskReportScheduleHighlight[];
     alerts: string[];
   };
   candidateCount: number;

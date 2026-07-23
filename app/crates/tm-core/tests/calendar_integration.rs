@@ -144,3 +144,31 @@ fn rejects_invalid_recurrence_combinations() -> Result<()> {
     ));
     Ok(())
 }
+
+#[test]
+fn selects_a_bounded_cross_month_occurrence_window() -> Result<()> {
+    let (_temporary, core) = fixture()?;
+    core.create_calendar_event(input(
+        "월말 납부",
+        NaiveDate::from_ymd_opt(2026, 7, 1).expect("date"),
+        CalendarRecurrence::MonthlyLastDay,
+        None,
+    ))?;
+    core.create_calendar_event(input(
+        "매월 초일",
+        NaiveDate::from_ymd_opt(2026, 7, 1).expect("date"),
+        CalendarRecurrence::MonthlyFirstDay,
+        None,
+    ))?;
+
+    let occurrences = core.calendar_occurrences_between(
+        NaiveDate::from_ymd_opt(2026, 7, 30).expect("date"),
+        NaiveDate::from_ymd_opt(2026, 8, 2).expect("date"),
+    )?;
+    assert_eq!(occurrences.len(), 2);
+    assert_eq!(occurrences[0].title, "월말 납부");
+    assert_eq!(occurrences[0].date.day(), 31);
+    assert_eq!(occurrences[1].title, "매월 초일");
+    assert_eq!(occurrences[1].date.day(), 1);
+    Ok(())
+}

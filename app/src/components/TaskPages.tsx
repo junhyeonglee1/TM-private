@@ -89,8 +89,8 @@ export function TodayPage({
         <div className="panel__header task-report__header">
           <div>
             <span className="section-kicker section-kicker--accent"><Icon name="spark" size={14} /> AI 비서 · 읽기 전용</span>
-            <h2 id="task-report-heading">오늘의 Task 우선순위</h2>
-            <p>제목·상태·우선순위·마감일만 선별해 최대 3개의 다음 행동을 제안합니다.</p>
+            <h2 id="task-report-heading">오늘의 우선순위·일정</h2>
+            <p>Task와 앞으로 7일의 일정·납부일만 선별해 오늘의 행동과 알림을 제안합니다.</p>
           </div>
           <button
             className="primary-button"
@@ -135,6 +135,26 @@ export function TodayPage({
                   );
                 })}
               </ol>
+            )}
+            {report.report.scheduleHighlights.length > 0 && (
+              <section className="brief-schedule" aria-label="가까운 일정과 납부일">
+                <h3>가까운 일정</h3>
+                <ul>
+                  {report.report.scheduleHighlights.map((schedule) => (
+                    <li key={schedule.occurrenceKey}>
+                      <span className={`brief-schedule__kind brief-schedule__kind--${schedule.kind}`}>
+                        {schedule.kind === "payment" ? "납부" : "일정"}
+                      </span>
+                      <div>
+                        <strong>{schedule.title}</strong>
+                        <small>{schedule.date}{schedule.eventTime ? ` · ${schedule.eventTime.slice(0, 5)}` : ""}</small>
+                        <p>{schedule.reason}</p>
+                        {schedule.alert && <em>{schedule.alert}</em>}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </section>
             )}
             {report.report.alerts.length > 0 && (
               <ul className="task-report__alerts">

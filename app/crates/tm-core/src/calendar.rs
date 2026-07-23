@@ -310,29 +310,7 @@ impl TmCore {
             .ok_or_else(|| invalid("calendar month must be a valid YYYY-MM value"))?;
         let month_end = last_day_of_month(year, month)?;
         let events = self.list_calendar_events(false)?;
-        let mut occurrences = events
-            .iter()
-            .filter_map(|event| {
-                occurrence_date(event, month_start, month_end).map(|date| (event, date))
-            })
-            .map(|(event, date)| CalendarOccurrence {
-                occurrence_key: format!("{}:{date}", event.id),
-                event_id: event.id.clone(),
-                title: event.title.clone(),
-                description: event.description.clone(),
-                kind: event.kind,
-                date,
-                event_time: event.event_time,
-                recurrence: event.recurrence,
-            })
-            .collect::<Vec<_>>();
-        occurrences.sort_by(|left, right| {
-            left.date
-                .cmp(&right.date)
-                .then_with(|| left.event_time.cmp(&right.event_time))
-                .then_with(|| left.title.to_lowercase().cmp(&right.title.to_lowercase()))
-                .then_with(|| left.event_id.cmp(&right.event_id))
-        });
+        let occurrences = occurrences_for_month(&events, month_start, month_end);
         Ok(CalendarMonth {
             month: format!("{year:04}-{month:02}"),
             month_start,
@@ -341,6 +319,71 @@ impl TmCore {
             occurrences,
         })
     }
+
+    pub fn calendar_occurrences_between(
+        &self,
+        start_date: NaiveDate,
+        end_date: NaiveDate,
+    ) -> Result<Vec<CalendarOccurrence>> {
+        if end_date < start_date {
+            return Err(invalid("calendar end date cannot be before its start date"));
+        }
+        if end_date.signed_duration_since(start_date).num_days() > 366 {
+            return Err(invalid("calendar occurrence window cannot exceed 367 days"));
+        }
+
+        let events = self.list_calendar_events(false)?;
+        let mut month_start = NaiveDate::from_ymd_opt(start_date.year(), start_date.month(), 1)
+            .ok_or_else(|| invalid("calendar occurrence window is outside the supported range"))?;
+        let mut occurrences = Vec::new();
+        while month_start <= end_date {
+            let month_end = last_day_of_month(month_start.year(), month_start.month())?;
+            occurrences.extend(
+                occurrences_for_month(&events, month_start, month_end)
+                    .into_iter()
+                    .filter(|item| item.date >= start_date && item.date <= end_date),
+            );
+            month_start = next_month_start(month_start)?;
+        }
+        Ok(occurrences)
+    }
+}
+
+fn occurrences_for_month(
+    events: &[CalendarEvent],
+    month_start: NaiveDate,
+    month_end: NaiveDate,
+) -> Vec<CalendarOccurrence> {
+    let mut occurrences = events
+        .iter()
+        .filter_map(|event| {
+            occurrence_date(event, month_start, month_end).map(|date| (event, date))
+        })
+        .map(|(event, date)| CalendarOccurrence {
+            occurrence_key: format!("{}:{date}", event.id),
+            event_id: event.id.clone(),
+            title: event.title.clone(),
+            description: event.description.clone(),
+            kind: event.kind,
+            date,
+            event_time: event.event_time,
+            recurrence: event.recurrence,
+        })
+        .collect::<Vec<_>>();
+    occurrences.sort_by(|left, right| {
+        left.date
+            .cmp(&right.date)
+            .then_with(|| left.event_time.cmp(&right.event_time))
+            .then_with(|| left.title.to_lowercase().cmp(&right.title.to_lowercase()))
+            .then_with(|| left.event_id.cmp(&right.event_id))
+    });
+    occurrences
+}
+
+fn next_month_start(month_start: NaiveDate) -> Result<NaiveDate> {
+    month_start
+        .checked_add_months(chrono::Months::new(1))
+        .ok_or_else(|| invalid("calendar occurrence window is outside the supported range"))
 }
 
 fn validate_calendar_fields(

@@ -671,13 +671,34 @@ export class MemoryTransport implements CommandTransport {
     const candidates = this.snapshot.tasks
       .filter((task) => !task.deletedAt && !["done", "cancelled"].includes(task.status))
       .slice(0, 3);
+    const startDate = this.snapshot.today;
+    const end = new Date(`${startDate}T00:00:00Z`);
+    end.setUTCDate(end.getUTCDate() + 6);
+    const endDate = end.toISOString().slice(0, 10);
+    const months = [...new Set([startDate.slice(0, 7), endDate.slice(0, 7)])];
+    const scheduleHighlights = months
+      .flatMap((month) => this.getCalendarMonth(month).occurrences)
+      .filter((item) => item.date >= startDate && item.date <= endDate)
+      .sort((left, right) => left.date.localeCompare(right.date) || (left.eventTime || "").localeCompare(right.eventTime || ""))
+      .slice(0, 5)
+      .map((item) => ({
+        occurrenceKey: item.occurrenceKey,
+        eventId: item.eventId,
+        title: item.title,
+        kind: item.kind,
+        date: item.date,
+        eventTime: item.eventTime,
+        reason: item.date === startDate ? "오늘 확인할 일정입니다." : "앞으로 7일 안에 예정된 일정입니다.",
+        alert: item.kind === "payment" ? "납부 여부를 확인하세요." : "",
+      }));
+    const hasBriefingItems = candidates.length > 0 || scheduleHighlights.length > 0;
     this.taskReport = {
       runId: id("report"),
       reportDate: this.snapshot.today,
-      status: candidates.length ? "succeeded" : "no_tasks",
+      status: hasBriefingItems ? "succeeded" : "no_tasks",
       report: {
-        headline: candidates.length ? "가장 중요한 일부터 하나씩 시작하세요" : "오늘 처리할 열린 Task가 없습니다",
-        summary: candidates.length ? "마감일과 진행 상태를 기준으로 우선순위를 정했습니다." : "새 Task를 만들면 우선순위를 제안합니다.",
+        headline: hasBriefingItems ? "오늘의 Task와 일정을 확인하세요" : "오늘 처리할 Task와 일정이 없습니다",
+        summary: hasBriefingItems ? "마감일과 진행 상태, 앞으로 7일의 일정을 함께 확인했습니다." : "새 Task나 일정을 추가하면 우선순위와 알림을 제안합니다.",
         priorities: candidates.map((task, index) => ({
           taskId: task.id,
           rank: index + 1,
@@ -685,14 +706,15 @@ export class MemoryTransport implements CommandTransport {
           nextAction: `${task.title}의 첫 단계를 10분 동안 시작하기`,
           alert: task.status === "blocked" ? "막힘 원인을 먼저 확인하세요." : "",
         })),
+        scheduleHighlights,
         alerts: [],
       },
-      candidateCount: candidates.length,
+      candidateCount: candidates.length + scheduleHighlights.length,
       model: "mock-step17",
-      promptVersion: "step17-task-report-v1",
-      usage: candidates.length ? { inputTokens: 320, cachedInputTokens: 0, outputTokens: 180, totalTokens: 500 } : null,
-      estimatedCostMicrousd: candidates.length ? 3500 : 0,
-      latencyMs: candidates.length ? 420 : 0,
+      promptVersion: "calendar-task-report-v1",
+      usage: hasBriefingItems ? { inputTokens: 320, cachedInputTokens: 0, outputTokens: 180, totalTokens: 500 } : null,
+      estimatedCostMicrousd: hasBriefingItems ? 3500 : 0,
+      latencyMs: hasBriefingItems ? 420 : 0,
       helpful: null,
       readOnly: true,
       limits: { dailyCalls: 4, maximumCostMicrousd: 50_000, maximumOutputTokens: 800 },

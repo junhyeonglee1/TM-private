@@ -113,9 +113,9 @@ try {
     $ops = Invoke-TmRequest -Client $client -Method ([System.Net.Http.HttpMethod]::Get) -Uri "$base/api/v1/ops/status" -Token $token
     Require-Status $ops 200 $stage
     $opsJson = $ops.Body | ConvertFrom-Json
-    if ([int]$opsJson.data.database.schemaVersion -ne 10 -or
+    if ([int]$opsJson.data.database.schemaVersion -ne 11 -or
         [string]$opsJson.data.remoteBackup.status -ne 'succeeded' -or
-        [int]$opsJson.data.remoteBackup.schemaVersion -ne 10 -or
+        [int]$opsJson.data.remoteBackup.schemaVersion -ne 11 -or
         [string]$opsJson.data.remoteBackup.integrityCheck -ne 'ok' -or
         [bool]$opsJson.data.controls.taskReportEnabled -ne $true -or
         [bool]$opsJson.data.controls.aiEnabled -ne $true -or
@@ -128,7 +128,8 @@ try {
     Require-Status $ai 200 $stage
     $aiJson = $ai.Body | ConvertFrom-Json
     if ([bool]$aiJson.data.configured -ne $true -or
-        [string]$aiJson.data.taskReportPromptVersion -ne 'step17-task-report-v1' -or
+        [string]$aiJson.data.assistantPromptVersion -ne 'calendar-assistant-v1' -or
+        [string]$aiJson.data.taskReportPromptVersion -ne 'calendar-task-report-v1' -or
         [int]$aiJson.data.taskReportDailyLimit -ne 4 -or
         [int64]$aiJson.data.taskReportMaximumCostMicrousd -ne 50000 -or
         [int64]$aiJson.data.budget.hardLimitMicrousd -ne 20000000) {
@@ -162,7 +163,7 @@ try {
     Require-Status $reportResponse 200 $stage
     $reportJson = $reportResponse.Body | ConvertFrom-Json
     $report = $reportJson.data
-    if ([string]$report.promptVersion -ne 'step17-task-report-v1' -or
+    if ([string]$report.promptVersion -ne 'calendar-task-report-v1' -or
         [bool]$report.readOnly -ne $true -or
         [int]$report.candidateCount -gt 20 -or
         [int64]$report.estimatedCostMicrousd -gt 50000 -or
@@ -176,6 +177,8 @@ try {
     }
     $priorities = @($report.report.priorities)
     if ($priorities.Count -gt 3) { throw 'The Task report returned more than three priorities.' }
+    $scheduleHighlights = @($report.report.scheduleHighlights)
+    if ($scheduleHighlights.Count -gt 5) { throw 'The Task report returned more than five schedule highlights.' }
     $allowedTaskIds = @{}
     foreach ($task in @($tasksBeforeJson.data.items)) { $allowedTaskIds[[string]$task.id] = $true }
     foreach ($priority in $priorities) {
@@ -206,12 +209,13 @@ try {
     $result = [ordered]@{
         verifiedAtUtc = [DateTime]::UtcNow.ToString('o')
         baseUri = $base
-        schemaVersion = 10
+        schemaVersion = 11
         runId = [string]$report.runId
         status = [string]$report.status
         headline = [string]$report.report.headline
         candidateCount = [int]$report.candidateCount
         priorityCount = $priorities.Count
+        scheduleHighlightCount = $scheduleHighlights.Count
         model = [string]$report.model
         promptVersion = [string]$report.promptVersion
         inputTokens = if ($null -eq $report.usage) { 0 } else { [int64]$report.usage.inputTokens }

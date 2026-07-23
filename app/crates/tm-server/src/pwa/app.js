@@ -376,6 +376,25 @@ function renderTaskReport(report) {
     });
     root.append(list);
   }
+  const scheduleHighlights = report.report.scheduleHighlights || [];
+  if (scheduleHighlights.length) {
+    const section = text("section", "", "brief-schedule");
+    section.append(text("h3", "가까운 일정"));
+    const list = text("ul", "");
+    scheduleHighlights.forEach((schedule) => {
+      const item = text("li", "");
+      item.append(text("span", schedule.kind === "payment" ? "납부" : "일정", `brief-schedule-kind ${schedule.kind}`));
+      const body = text("div", "");
+      body.append(text("strong", schedule.title));
+      body.append(text("small", `${schedule.date}${schedule.eventTime ? ` · ${schedule.eventTime.slice(0, 5)}` : ""}`));
+      body.append(text("p", schedule.reason));
+      if (schedule.alert) body.append(text("em", schedule.alert));
+      item.append(body);
+      list.append(item);
+    });
+    section.append(list);
+    root.append(section);
+  }
   if (report.report.alerts.length) {
     const alerts = text("ul", "", "task-report-alerts");
     report.report.alerts.forEach((alert) => alerts.append(text("li", alert)));

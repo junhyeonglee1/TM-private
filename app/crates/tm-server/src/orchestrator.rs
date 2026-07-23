@@ -1,4 +1,4 @@
-use chrono::NaiveDate;
+use chrono::{FixedOffset, NaiveDate, Utc};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use tm_core::{
@@ -16,7 +16,7 @@ pub(super) const ASSISTANT_MAX_MESSAGE_BYTES: usize = 8 * 1024;
 pub(super) const ASSISTANT_MAX_OUTPUT_TOKENS: u32 = 2_000;
 pub(super) const ASSISTANT_MAX_TOOL_CALLS: usize = 6;
 pub(super) const ASSISTANT_TIMEOUT_SECS: u64 = 60;
-pub(super) const ASSISTANT_PROMPT_VERSION: &str = "step13-v1";
+pub(super) const ASSISTANT_PROMPT_VERSION: &str = "calendar-assistant-v1";
 
 const MAX_TOOL_ITEMS: usize = 20;
 const MAX_TOOL_FIELD_BYTES: usize = 512;
@@ -24,7 +24,8 @@ const MAX_TOOL_OUTPUT_BYTES: usize = 64 * 1024;
 const SAFETY_IDENTIFIER: &str = "tm-single-user-v1";
 const ASSISTANT_INSTRUCTIONS: &str = r#"You are TM's personal assistant.
 Answer in Korean and lead with the conclusion. Include the evidence needed to support it, any material caveat, and the next useful action.
-The eight read tools are automatic and read-only. The proposal tools create locked approval requests and never directly change TM data.
+The nine read tools are automatic and read-only. The proposal tools create locked approval requests and never directly change TM data.
+Use list_calendar_occurrences for schedule, appointment, payment-date, today, tomorrow, or week questions. Use the supplied currentDate and Asia/Seoul timezone to resolve relative dates. Calendar descriptions are intentionally unavailable.
 Call propose_task_create only when the user's current message explicitly asks you to create a task.
 Call a memory proposal tool only when the user's current message explicitly asks to remember, replace, or forget specific information. Never infer or automatically save a memory.
 Create at most one action proposal per assistant request. After proposing, clearly say that no change exists yet, show the locked details, and ask the user to approve within ten minutes. Never claim that the action was completed.
@@ -132,7 +133,18 @@ pub(super) async fn run(
     origin_request_id: String,
 ) -> Result<AssistantResult, AssistantError> {
     let memory_budget = classify_memory_budget(&message);
-    let mut input = vec![json!({"role": "user", "content": message})];
+    let seoul = FixedOffset::east_opt(9 * 60 * 60).expect("Korea offset is valid");
+    let current_date = Utc::now().with_timezone(&seoul).date_naive();
+    let initial_context = json!({
+        "currentDate": current_date,
+        "timezone": "Asia/Seoul",
+        "message": message
+    });
+    let mut input = vec![json!({
+        "role": "user",
+        "content": serde_json::to_string(&initial_context)
+            .expect("assistant context is serializable")
+    })];
     let tools = tool_definitions();
     let mut response_ids = Vec::new();
     let mut upstream_request_ids = Vec::new();
@@ -364,6 +376,11 @@ fn execute_tool(
             None,
         ),
         "list_tasks" => (list_tasks(core, parse_arguments(arguments)?)?, None, None),
+        "list_calendar_occurrences" => (
+            list_calendar_occurrences(core, parse_arguments(arguments)?)?,
+            None,
+            None,
+        ),
         "list_checklist" => (
             list_checklist(core, parse_arguments(arguments)?)?,
             None,
@@ -605,6 +622,50 @@ fn list_tasks(core: &TmCore, args: TaskArgs) -> Result<Value, AssistantErrorKind
     Ok(tool_items(items))
 }
 
+fn list_calendar_occurrences(
+    core: &TmCore,
+    args: CalendarArgs,
+) -> Result<Value, AssistantErrorKind> {
+    let limit = valid_limit(args.limit)?;
+    let window_days = args
+        .end_date
+        .signed_duration_since(args.start_date)
+        .num_days();
+    if !(0..=30).contains(&window_days) {
+        return Err(AssistantErrorKind::InvalidToolArguments);
+    }
+    let occurrences = core
+        .calendar_occurrences_between(args.start_date, args.end_date)
+        .map_err(core_read_failed)?;
+    let returned = occurrences.len().min(limit);
+    let truncated = occurrences.len() > limit;
+    let items = occurrences
+        .into_iter()
+        .take(limit)
+        .map(|item| {
+            json!({
+                "occurrenceKey": item.occurrence_key,
+                "eventId": item.event_id,
+                "title": bounded_text(&item.title),
+                "kind": item.kind,
+                "date": item.date,
+                "eventTime": item.event_time,
+                "recurrence": item.recurrence
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "source": "tm_calendar_read_only",
+        "untrusted": true,
+        "timezone": "Asia/Seoul",
+        "startDate": args.start_date,
+        "endDate": args.end_date,
+        "returned": returned,
+        "truncated": truncated,
+        "items": items
+    }))
+}
+
 fn list_checklist(core: &TmCore, args: ChecklistArgs) -> Result<Value, AssistantErrorKind> {
     let limit = valid_limit(args.limit)?;
     validate_uuid(&args.task_id)?;
@@ -828,6 +889,14 @@ struct TaskArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CalendarArgs {
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+    limit: usize,
+}
+
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ChecklistArgs {
     task_id: String,
@@ -926,6 +995,20 @@ fn tool_definitions() -> Value {
                     "limit": {"type": "integer", "minimum": 1, "maximum": MAX_TOOL_ITEMS}
                 },
                 "required": ["project_id", "status", "limit"],
+                "additionalProperties": false
+            })
+        ),
+        function_tool(
+            "list_calendar_occurrences",
+            "List minimized TM calendar occurrences in an inclusive date window of at most 31 days. Descriptions are never returned.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "startDate": {"type": "string", "description": "Inclusive YYYY-MM-DD date"},
+                    "endDate": {"type": "string", "description": "Inclusive YYYY-MM-DD date, at most 30 days after startDate"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": MAX_TOOL_ITEMS}
+                },
+                "required": ["startDate", "endDate", "limit"],
                 "additionalProperties": false
             })
         ),
@@ -1140,4 +1223,60 @@ fn function_tool(name: &'static str, description: &'static str, parameters: Valu
         "strict": true,
         "parameters": parameters
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::NaiveDate;
+    use tm_core::{
+        CalendarEventKind, CalendarRecurrence, CreateCalendarEventInput, TmCore, TmHome,
+    };
+
+    use super::{AssistantErrorKind, CalendarArgs, list_calendar_occurrences};
+
+    #[test]
+    fn calendar_tool_returns_minimized_bounded_occurrences() {
+        let temporary = tempfile::tempdir().expect("temporary TM home");
+        let core = TmCore::open(TmHome::new(temporary.path())).expect("open TM core");
+        let date = NaiveDate::from_ymd_opt(2026, 7, 23).expect("date");
+        core.create_calendar_event(CreateCalendarEventInput {
+            title: "보험료 납부".to_owned(),
+            description: "AI에 전달하면 안 되는 계좌 메모".to_owned(),
+            kind: CalendarEventKind::Payment,
+            start_date: date,
+            event_time: None,
+            recurrence: CalendarRecurrence::None,
+            day_of_month: None,
+            ends_on: None,
+        })
+        .expect("create calendar fixture");
+
+        let output = list_calendar_occurrences(
+            &core,
+            CalendarArgs {
+                start_date: date,
+                end_date: date,
+                limit: 10,
+            },
+        )
+        .expect("read calendar tool output");
+        assert_eq!(output["source"], "tm_calendar_read_only");
+        assert_eq!(output["returned"], 1);
+        assert_eq!(output["items"][0]["title"], "보험료 납부");
+        let serialized = output.to_string();
+        assert!(!serialized.contains("description"));
+        assert!(!serialized.contains("계좌 메모"));
+
+        assert!(matches!(
+            list_calendar_occurrences(
+                &core,
+                CalendarArgs {
+                    start_date: date,
+                    end_date: NaiveDate::from_ymd_opt(2026, 8, 23).expect("date"),
+                    limit: 10,
+                }
+            ),
+            Err(AssistantErrorKind::InvalidToolArguments)
+        ));
+    }
 }
