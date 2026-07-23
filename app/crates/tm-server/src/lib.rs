@@ -2513,7 +2513,7 @@ async fn security_headers(request: Request<Body>, next: Next) -> Response {
         headers.insert(
             CONTENT_SECURITY_POLICY_HEADER,
             HeaderValue::from_static(
-                "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; frame-src 'self' data: https://s.tradingview.com https://www.tradingview-widget.com https://www.tradingview.com; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+                "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; frame-src 'self' https://s.tradingview.com https://www.tradingview-widget.com; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
             ),
         );
     } else {
@@ -5070,7 +5070,7 @@ mod tests {
                 .get("content-security-policy")
                 .and_then(|value| value.to_str().ok()),
             Some(
-                "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; frame-src 'self' data: https://s.tradingview.com https://www.tradingview-widget.com https://www.tradingview.com; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+                "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; frame-src 'self' https://s.tradingview.com https://www.tradingview-widget.com; manifest-src 'self'; worker-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
             )
         );
         assert!(shell.headers().get("access-control-allow-origin").is_none());
@@ -5104,14 +5104,17 @@ mod tests {
         )
         .expect("PWA script is UTF-8");
         assert!(stock_script.contains("/mobile/stock-catalog.json"));
-        assert!(stock_script.contains("data:text/html;charset=utf-8"));
+        assert!(stock_script.contains(
+            "https://www.tradingview-widget.com/embed-widget/advanced-chart/?locale=kr#"
+        ));
         assert!(stock_script.contains(
             "allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox"
         ));
-        assert!(stock_script.contains("default-src 'none'"));
-        assert!(stock_script.contains("embed-widget-advanced-chart.js"));
+        assert!(!stock_script.contains("data:text/html;charset=utf-8"));
+        assert!(!stock_script.contains("embed-widget-advanced-chart.js"));
         assert!(stock_script.contains("support_host"));
         assert!(stock_script.contains("save_image: false"));
+        assert!(stock_script.contains("stock-chart-loading"));
         assert!(!stock_script.contains("__TAURI"));
         assert!(stock_script.contains("차트를 보려면 인터넷 연결이 필요합니다."));
         assert!(stock_script.contains("selectedStockCandidate"));

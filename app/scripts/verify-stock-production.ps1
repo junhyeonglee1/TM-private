@@ -166,7 +166,7 @@ try {
     )
     $hasTradingViewFrame = [regex]::IsMatch(
         [string]$pwa.ContentSecurityPolicy,
-        'frame-src.+data:.+https://s\.tradingview\.com'
+        'frame-src.+https://s\.tradingview\.com.+https://www\.tradingview-widget\.com'
     )
     if (-not ($hasStockTab -and $hasExternalFallback -and $hasTradingViewFrame)) {
         throw (
@@ -178,12 +178,12 @@ try {
     $pwaScript = Invoke-TmRequest -Client $client -Method ([System.Net.Http.HttpMethod]::Get) -Uri "$base/mobile/app.js"
     Require-Status $pwaScript 200 "$stage-script"
     if ($pwaScript.Body -notmatch 'allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox' -or
-        $pwaScript.Body -notmatch 'data:text/html;charset=utf-8' -or
-        $pwaScript.Body -notmatch 'default-src ''none''' -or
-        $pwaScript.Body -notmatch 'embed-widget-advanced-chart\.js' -or
-        $pwaScript.Body -notmatch 'id="tradingview-embed-script"' -or
+        $pwaScript.Body -notmatch 'tradingview-widget\.com/embed-widget/advanced-chart/' -or
+        $pwaScript.Body -match 'data:text/html;charset=utf-8' -or
+        $pwaScript.Body -match 'embed-widget-advanced-chart\.js' -or
         $pwaScript.Body -match 'createElement\("script"\)' -or
         $pwaScript.Body -notmatch 'support_host' -or
+        $pwaScript.Body -notmatch 'stock-chart-loading' -or
         $pwaScript.Body -match '__TAURI' -or
         $pwaScript.Body -notmatch '/mobile/stock-catalog\.json') {
         throw 'The production PWA TradingView sandbox contract is invalid.'
@@ -288,7 +288,7 @@ try {
         symbols = @('NASDAQ:AAPL', 'KRX:005930')
         desktopSync = $true
         mobileSync = $true
-        opaqueDataOriginSandbox = $true
+        crossOriginTradingViewSandbox = $true
         pwaCspVerified = $true
         aiCostBeforeMicrousd = $costBefore
         aiCostAfterMicrousd = $costAfter

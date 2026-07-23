@@ -366,23 +366,23 @@ describe("TM 데스크톱 UI", () => {
     const source = frame.getAttribute("src") ?? "";
     expect(sandbox).toBe("allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox");
     expect(frame).toHaveAttribute("referrerpolicy", "no-referrer");
-    expect(source).toMatch(/^data:text\/html;charset=utf-8,/);
-    const widgetDocument = decodeURIComponent(source.slice(source.indexOf(",") + 1));
-    expect(widgetDocument).toContain("https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js");
-    expect(widgetDocument).toContain('id="tradingview-embed-script"');
-    expect(widgetDocument).toContain('"symbol":"NASDAQ:AAPL"');
-    expect(widgetDocument).toContain('"support_host":"https://www.tradingview.com"');
-    expect(widgetDocument).toContain('"timezone":"Asia/Seoul"');
-    expect(widgetDocument).toContain('"save_image":false');
-    expect(widgetDocument).not.toContain('document.createElement("script")');
-    expect(widgetDocument).toContain("default-src 'none'");
-    expect(widgetDocument).not.toContain("__TAURI");
+    expect(source).toMatch(/^https:\/\/www\.tradingview-widget\.com\/embed-widget\/advanced-chart\/\?locale=kr#/);
+    const widgetSettings = JSON.parse(decodeURIComponent(new URL(source).hash.slice(1)));
+    expect(widgetSettings).toMatchObject({
+      symbol: "NASDAQ:AAPL",
+      support_host: "https://www.tradingview.com",
+      timezone: "Asia/Seoul",
+      save_image: false,
+      "page-uri": "__NHTTP__",
+    });
+    expect(source).not.toContain("data:text/html");
+    expect(source).not.toContain("__TAURI");
 
     await user.type(screen.getByRole("combobox", { name: "회사명 또는 종목코드" }), "삼성전자");
     await user.click(await screen.findByRole("option", { name: /삼성전자.*KRX:005930/ }));
     await user.click(screen.getByRole("button", { name: /관심 종목 저장/ }));
 
-    expect(await screen.findByRole("status")).toHaveTextContent("삼성전자 관심 종목을 저장했습니다.");
+    expect(await screen.findByText("삼성전자 관심 종목을 저장했습니다.")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "KRX:005930", level: 2 })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "TradingView 외부 차트에서 확인" }))
       .toHaveAttribute("href", "https://www.tradingview.com/symbols/KRX-005930/");

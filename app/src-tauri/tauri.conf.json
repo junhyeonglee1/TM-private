@@ -24,7 +24,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: https://asset.localhost data:; connect-src ipc: http://ipc.localhost; frame-src 'self' data: https://s.tradingview.com https://www.tradingview-widget.com https://www.tradingview.com"
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: https://asset.localhost data:; connect-src ipc: http://ipc.localhost; frame-src 'self' https://s.tradingview.com https://www.tradingview-widget.com"
     }
   },
   "bundle": {

@@ -141,8 +141,12 @@ button { border: 0; border-radius: 13px; font-weight: 800; }
 .stock-chart-card, .stock-watchlist-panel { margin-top: 16px; border: 1px solid var(--line); border-radius: 16px; background: #121720; overflow: hidden; }
 .stock-chart-heading, .stock-watchlist-heading { align-items: center; display: flex; justify-content: space-between; gap: 10px; padding: 13px 14px; border-bottom: 1px solid var(--line); }
 .stock-chart-heading h2, .stock-watchlist-heading h2 { margin: 2px 0 0; font-size: 16px; }
-.stock-chart-container { min-height: 460px; background: #10141d; }
+.stock-chart-container { position: relative; min-height: 460px; background: #10141d; }
 .stock-chart-frame { width: 100%; min-height: 460px; border: 0; background: #10141d; }
+.stock-chart-loading { position: absolute; inset: 0; z-index: 1; align-content: center; display: grid; justify-items: center; gap: 7px; padding: 28px; background: #10141d; color: var(--muted); text-align: center; }
+.stock-chart-loading strong { color: var(--text); }
+.stock-chart-loading p { max-width: 420px; margin: 0; font-size: 12px; line-height: 1.5; }
+.stock-chart-loading a { color: #aebcff; }
 .stock-chart-placeholder { align-content: center; display: grid; justify-items: center; gap: 7px; min-height: 460px; padding: 28px; color: var(--muted); text-align: center; }
 .stock-chart-placeholder p { margin: 0; font-size: 12px; }
 .stock-disclaimer { margin: 0; padding: 11px 13px; border-top: 1px solid var(--line); color: var(--muted); font-size: 10px; line-height: 1.5; }

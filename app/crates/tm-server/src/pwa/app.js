@@ -20,6 +20,7 @@ const costRefreshIntervalMs = 5 * 60 * 1000;
 const defaultApiHardLimitMicrousd = 20_000_000;
 const defaultCloudHardLimitMicrousd = 30_000_000;
 let costRefreshTimer = null;
+let stockChartLoadTimer = null;
 
 const byId = (id) => document.getElementById(id);
 const show = (id, visible = true) => byId(id).classList.toggle("hidden", !visible);
@@ -317,7 +318,7 @@ function stockWidgetUrl(symbol, watchlist) {
   const pattern = /^(?:KRX:\d{6}|(?:NASDAQ|NYSE|AMEX):[A-Z0-9.-]{1,10})$/;
   const safeSymbol = pattern.test(symbol) ? symbol : "NASDAQ:AAPL";
   const safeWatchlist = watchlist.filter((item) => pattern.test(item)).slice(0, 50);
-  const configuration = JSON.stringify({
+  const configuration = {
     allow_symbol_change: true,
     autosize: true,
     calendar: false,
@@ -329,7 +330,7 @@ function stockWidgetUrl(symbol, watchlist) {
     hide_volume: false,
     hotlist: false,
     interval: "D",
-    locale: "kr",
+    "page-uri": "__NHTTP__",
     save_image: false,
     style: "1",
     support_host: "https://www.tradingview.com",
@@ -339,74 +340,17 @@ function stockWidgetUrl(symbol, watchlist) {
     watchlist: safeWatchlist,
     width: "100%",
     withdateranges: true
-  }).replaceAll("<", "\\u003c");
-  const externalUrl = stockTradingViewUrl(safeSymbol);
-  const widgetDocument = `<!doctype html>
-<html lang="ko">
-<head>
-  <meta charset="utf-8">
-  <meta name="referrer" content="no-referrer">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-tm-stock-widget-v1' https://s3.tradingview.com; style-src 'unsafe-inline'; frame-src https://s.tradingview.com https://www.tradingview-widget.com https://www.tradingview.com; base-uri 'none'; form-action 'none'">
-  <style>
-    :root{color-scheme:dark;font-family:system-ui,sans-serif}
-    *{box-sizing:border-box}html,body,.widget-shell,.tradingview-widget-container{width:100%;height:100%;margin:0}
-    body{min-height:420px;overflow:hidden;background:#10141d;color:#d9e0f2}
-    .widget-shell{position:relative;display:grid;grid-template-rows:minmax(0,1fr) 26px}
-    .tradingview-widget-container{min-height:0}.tradingview-widget-container__widget{width:100%;height:100%;min-height:394px}
-    .widget-status{position:absolute;inset:0 0 26px;z-index:2;align-content:center;display:grid;justify-items:center;gap:8px;padding:24px;background:#10141d;color:#929cb3;text-align:center}
-    .widget-status strong{color:#d9e0f2}.widget-status p{margin:0;font-size:12px;line-height:1.5}.widget-status a{color:#aebcff}.widget-status.hidden{display:none}
-    .tradingview-widget-copyright{height:26px;padding:5px 9px;background:#10141d;color:#929cb3;font-size:11px}
-    .tradingview-widget-copyright a{color:#aebcff;text-decoration:none}
-  </style>
-</head>
-<body>
-  <main class="widget-shell">
-    <div class="tradingview-widget-container">
-      <div class="tradingview-widget-container__widget"></div>
-      <script
-        id="tradingview-embed-script"
-        type="text/javascript"
-        src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js"
-        async
-      >${configuration}</script>
-    </div>
-    <div id="widget-status" class="widget-status" role="status"><strong>시장 차트를 불러오는 중입니다.</strong><p>TradingView 연결 상태에 따라 몇 초 정도 걸릴 수 있습니다.</p></div>
-    <div class="tradingview-widget-copyright"><a href="${externalUrl}" rel="noopener nofollow noreferrer" target="_blank">시장 차트</a> by TradingView</div>
-  </main>
-  <script nonce="tm-stock-widget-v1">
-    (() => {
-      const container = document.querySelector(".tradingview-widget-container");
-      const status = document.getElementById("widget-status");
-      const fail = () => {
-        status.innerHTML = '<strong>차트를 표시하지 못했습니다.</strong><p>인터넷 연결 또는 TradingView 위젯 제한을 확인하세요. <a href="${externalUrl}" rel="noopener nofollow noreferrer" target="_blank">TradingView에서 확인</a></p>';
-        status.classList.remove("hidden");
-      };
-      let observer;
-      const revealWhenReady = () => {
-        const frame = container.querySelector("iframe");
-        if (!frame) return false;
-        frame.addEventListener("load", () => status.classList.add("hidden"), { once: true });
-        setTimeout(() => status.classList.add("hidden"), 1500);
-        observer?.disconnect();
-        return true;
-      };
-      observer = new MutationObserver(revealWhenReady);
-      if (!revealWhenReady()) observer.observe(container, { childList: true, subtree: true });
-      window.addEventListener("error", (event) => {
-        if (event.target?.id === "tradingview-embed-script") fail();
-      }, true);
-      setTimeout(() => { if (!container.querySelector("iframe")) fail(); }, 12000);
-    })();
-  </script>
-</body>
-</html>`;
-  return `data:text/html;charset=utf-8,${encodeURIComponent(widgetDocument)}`;
+  };
+  return `https://www.tradingview-widget.com/embed-widget/advanced-chart/?locale=kr#${encodeURIComponent(JSON.stringify(configuration))}`;
 }
 
 function renderStockChart() {
   const container = byId("stock-chart-container");
   if (!container) return;
+  if (stockChartLoadTimer !== null) {
+    clearTimeout(stockChartLoadTimer);
+    stockChartLoadTimer = null;
+  }
   clear(container);
   const online = navigator.onLine;
   const network = byId("stock-network");
@@ -432,7 +376,32 @@ function renderStockChart() {
     state.selectedStockSymbol,
     state.stockWatchlist.map((item) => item.symbol)
   );
-  container.append(frame);
+  const loading = text("div", "", "stock-chart-loading");
+  loading.setAttribute("role", "status");
+  loading.append(text("strong", "시장 차트를 불러오는 중입니다."));
+  loading.append(text("p", "TradingView 연결 상태에 따라 몇 초 정도 걸릴 수 있습니다."));
+  frame.addEventListener("load", () => {
+    if (stockChartLoadTimer !== null) {
+      clearTimeout(stockChartLoadTimer);
+      stockChartLoadTimer = null;
+    }
+    loading.remove();
+  }, { once: true });
+  container.append(frame, loading);
+  stockChartLoadTimer = setTimeout(() => {
+    if (!loading.isConnected) return;
+    clear(loading);
+    loading.append(text("strong", "차트를 표시하지 못했습니다."));
+    const message = text("p", "TradingView 연결을 확인한 뒤 ");
+    const link = document.createElement("a");
+    link.href = stockTradingViewUrl(state.selectedStockSymbol);
+    link.rel = "noopener noreferrer";
+    link.target = "_blank";
+    link.textContent = "외부 차트에서 확인";
+    message.append(link, document.createTextNode("하세요."));
+    loading.append(message);
+    stockChartLoadTimer = null;
+  }, 15_000);
 }
 
 function normalizeStockSearch(value) {

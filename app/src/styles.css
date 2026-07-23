@@ -1023,7 +1023,12 @@ button.search-result:hover { background: var(--surface-subtle); }
 .stock-chart-card { display: grid; grid-template-rows: auto minmax(500px, 1fr) auto auto; min-width: 0; overflow: hidden; }
 .stock-chart-card__heading { align-items: center; display: flex; justify-content: space-between; padding: 14px 17px; border-bottom: 1px solid var(--border); }
 .stock-chart-card__heading h2 { margin: 3px 0 0; font-size: 18px; }
+.stock-chart-frame-shell { position: relative; min-height: 500px; background: #10141d; }
 .stock-chart-frame { width: 100%; height: 100%; min-height: 500px; border: 0; background: #10141d; }
+.stock-chart-loading { position: absolute; inset: 0; z-index: 1; align-content: center; display: grid; justify-items: center; gap: 8px; padding: 30px; background: #10141d; color: #929cb3; text-align: center; }
+.stock-chart-loading strong { color: #d9e0f2; }
+.stock-chart-loading p { max-width: 440px; margin: 0; font-size: 12px; line-height: 1.5; }
+.stock-chart-loading a { color: #aebcff; }
 .stock-network { padding: 5px 8px; border-radius: 999px; font-size: 10px; font-weight: 800; }
 .stock-network.online { background: var(--success-soft); color: var(--success); }
 .stock-network.offline { background: var(--danger-soft); color: var(--danger); }
@@ -1047,7 +1052,7 @@ button.search-result:hover { background: var(--surface-subtle); }
   .stock-watchlist { display: block; }
   .stock-form { border-top: 1px solid var(--border); border-left: 0; }
   .stock-chart-card { grid-template-rows: auto 470px auto auto; }
-  .stock-chart-frame, .stock-chart-placeholder { min-height: 470px; }
+  .stock-chart-frame-shell, .stock-chart-frame, .stock-chart-placeholder { min-height: 470px; }
 }
 .operations-panel { display: grid; gap: 14px; padding: 18px; border: 1px solid color-mix(in srgb, var(--success) 32%, var(--border)); border-radius: 16px; background: color-mix(in srgb, var(--success-soft) 56%, var(--surface)); box-shadow: var(--shadow-sm); }
 .operations-panel--warning { border-color: color-mix(in srgb, var(--warning) 42%, var(--border)); background: color-mix(in srgb, var(--warning-soft) 60%, var(--surface)); }

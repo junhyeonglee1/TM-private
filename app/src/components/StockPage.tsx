@@ -46,6 +46,8 @@ export function StockPage({
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [online, setOnline] = useState(() => navigator.onLine);
+  const [loadedChartUrl, setLoadedChartUrl] = useState<string | null>(null);
+  const [failedChartUrl, setFailedChartUrl] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -85,6 +87,19 @@ export function StockPage({
     () => stockWidgetUrl(selectedSymbol, watchlistSymbols),
     [selectedSymbol, watchlistSymbols],
   );
+  const chartLoadState = loadedChartUrl === chartUrl
+    ? "ready"
+    : failedChartUrl === chartUrl
+      ? "failed"
+      : "loading";
+
+  useEffect(() => {
+    if (!online || loadedChartUrl === chartUrl) return;
+    const timeout = window.setTimeout(() => {
+      setFailedChartUrl(chartUrl);
+    }, 15_000);
+    return () => window.clearTimeout(timeout);
+  }, [chartUrl, loadedChartUrl, online]);
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -220,15 +235,43 @@ export function StockPage({
               <p>관심 종목 목록은 연결 후 다시 동기화됩니다.</p>
             </div>
           ) : (
-            <iframe
-              className="stock-chart-frame"
-              data-testid="tradingview-frame"
-              key={`${selectedSymbol}:${watchlistSymbols.join(",")}`}
-              referrerPolicy="no-referrer"
-              sandbox="allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox"
-              src={chartUrl}
-              title={`${selectedSymbol} TradingView 조회 전용 차트`}
-            />
+            <div className="stock-chart-frame-shell">
+              {chartLoadState !== "ready" && (
+                <div className="stock-chart-loading" role="status">
+                  <Icon name="chart" size={28} />
+                  {chartLoadState === "failed" ? (
+                    <>
+                      <strong>차트를 표시하지 못했습니다.</strong>
+                      <p>
+                        TradingView 연결을 확인한 뒤{" "}
+                        <a href={tradingViewUrl(selectedSymbol)} rel="noopener noreferrer" target="_blank">
+                          외부 차트에서 확인
+                        </a>
+                        하세요.
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <strong>시장 차트를 불러오는 중입니다.</strong>
+                      <p>TradingView 연결 상태에 따라 몇 초 정도 걸릴 수 있습니다.</p>
+                    </>
+                  )}
+                </div>
+              )}
+              <iframe
+                className="stock-chart-frame"
+                data-testid="tradingview-frame"
+                key={`${selectedSymbol}:${watchlistSymbols.join(",")}`}
+                onLoad={() => {
+                  setLoadedChartUrl(chartUrl);
+                  setFailedChartUrl(null);
+                }}
+                referrerPolicy="no-referrer"
+                sandbox="allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox"
+                src={chartUrl}
+                title={`${selectedSymbol} TradingView 조회 전용 차트`}
+              />
+            </div>
           )}
           <p className="stock-disclaimer">
             시세는 거래소 정책에 따라 지연되거나 일부 종목이 위젯에서 제한될 수 있습니다. 투자 추천이나 주문 기능을 제공하지 않습니다.

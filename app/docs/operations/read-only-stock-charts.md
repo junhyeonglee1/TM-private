@@ -23,10 +23,9 @@ TradingView는 거래소 정책에 따라 지연 시세를 표시하며 KRX 일�
 
 ## 보안 경계
 
-- TradingView 스크립트는 TM 본문이 아닌 `data:` 격리 문서 iframe에서만 실행한다. `data:` 문서는 TM과 동일 출처가 될 수 없는 고유한 opaque origin이다.
-- 격리 문서 안에서는 TradingView 공식 iframe 위젯 코드를 정적 `<script>` 요소로 삽입한다. 런타임 동적 스크립트 생성은 Windows WebView2에서 초기화가 멈출 수 있으므로 사용하지 않는다.
-- TradingView가 자기 문서의 쿠키를 읽어 차트를 초기화할 수 있도록 sandbox에 `allow-same-origin`을 사용한다. 이 권한은 opaque `data:` 문서 안에서만 적용되므로 TM origin, 쿠키, 저장소, Tauri IPC에는 접근할 수 없다.
-- iframe은 `no-referrer`를 사용하고 격리 문서 자체 CSP에서 TradingView의 검토된 script/frame host만 허용한다.
+- TradingView 공식 Advanced Chart iframe URL을 직접 사용한다. `data:` 문서와 동적 외부 스크립트 주입은 Tauri의 CSP를 상속해 Windows WebView2에서 초기화가 멈출 수 있으므로 사용하지 않는다.
+- TradingView가 자기 출처의 문서를 정상 초기화할 수 있도록 sandbox에 `allow-same-origin`을 사용한다. iframe은 `tradingview-widget.com` 출처이므로 TM origin, 쿠키, 저장소, Tauri IPC에는 접근할 수 없다.
+- iframe은 `no-referrer`를 사용하고 TM CSP의 `frame-src`에는 TradingView의 검토된 iframe host만 허용한다.
 - TradingView 코드에는 TM bearer token, 기기 쿠키, CSRF 값, Tauri IPC 객체를 전달하지 않는다.
 - 모바일 관심 종목 변경은 승인 기기 범위, same-origin, CSRF, 정확한 command confirmation을 모두 통과해야 한다.
 - 관심 종목과 차트 데이터는 AI 도구·프롬프트의 입력 후보에 포함하지 않는다.
