@@ -25,10 +25,17 @@
 
 ## 검증
 
-- Rust format 및 Windows workspace test 예정
-- STEP 16 보안 정적 검사 예정
-- frontend 회귀 검사 예정
-- GitHub Actions Windows artifact 및 security 검증 예정
+- Rust format 통과
+- STEP 16 보안 정적 검사 271개 파일 통과
+- TypeScript, ESLint, frontend 전체 26개 테스트 통과
+- 로컬 Cargo는 Windows 애플리케이션 제어 정책이 생성된 build script를 차단해 실행 불가
+- GitHub Actions STEP 10 Windows build run `30096485441` 성공
+  - Windows Rust workspace test 성공
+  - Windows 실행 파일 빌드 및 artifact 업로드 성공
+- GitHub Actions STEP 16 security run `30096488983` 성공
+- Windows artifact `tm-step10-windows-x64` manifest 대조 성공
+  - `tm.exe`: `d424926a7603b2d8e9be3b166ee30384aebfe03ec6d274165ceed5530969069e`
+  - `tm-cli.exe`: `0bcb0832cbc20c2827d911ee6237de10d6b94f1af6f178a04670b0768e5c24c7`
 
 ## 복구
 

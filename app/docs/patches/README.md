@@ -15,4 +15,4 @@
 - `0006-production-embedded-frontend.md`: release 내장 프런트엔드 강제와 localhost 오류 수정 (`in-progress`)
 - `0007-cloud-change-request-processing.md`: Railway 개선 요청 claim·완료·실패 연결 (`verified`)
 - `0008-one-touch-task-completion.md`: Task 목록 원터치 완료와 확인 모달 (`verified`)
-- `0009-hide-cloud-credential-console.md`: Windows 탭 전환 시 콘솔 창 깜박임 제거 (`in-progress`)
+- `0009-hide-cloud-credential-console.md`: Windows 탭 전환 시 콘솔 창 깜박임 제거 (`verified`)
