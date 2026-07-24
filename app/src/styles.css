@@ -361,6 +361,13 @@ kbd { background: var(--surface-subtle); border: 1px solid var(--border); border
 .task-card--compact .task-card__body { min-height: 59px; padding-left: 16px; }
 .task-card--compact .task-card__actions { min-height: 33px; }
 .task-list--completed .task-card__title { color: var(--text-soft); text-decoration: line-through; }
+.completion-confirm-backdrop { align-items: center; background: rgba(17,19,27,.42); display: flex; inset: 0; justify-content: center; padding: 20px; position: fixed; z-index: 80; }
+.completion-confirm-dialog { align-items: flex-start; background: var(--surface-raised); border: 1px solid var(--border); border-radius: 15px; box-shadow: var(--shadow-lg); display: grid; gap: 13px; grid-template-columns: auto minmax(0, 1fr); max-width: 420px; padding: 20px; width: 100%; }
+.completion-confirm-dialog__icon { align-items: center; background: var(--success-soft); border-radius: 10px; color: var(--success); display: flex; height: 42px; justify-content: center; width: 42px; }
+.completion-confirm-dialog h2 { font-size: 16px; letter-spacing: -.02em; margin-top: 2px; }
+.completion-confirm-dialog p { color: var(--text-soft); font-size: 11px; line-height: 1.6; margin-top: 5px; overflow-wrap: anywhere; }
+.completion-confirm-dialog p strong { color: var(--text); }
+.completion-confirm-dialog footer { border-top: 1px solid var(--border); display: flex; gap: 7px; grid-column: 1 / -1; justify-content: flex-end; margin-top: 3px; padding-top: 14px; }
 
 .empty-state { align-items: center; color: var(--text-soft); display: flex; flex-direction: column; padding: 32px 20px; text-align: center; }
 .empty-state__icon { align-items: center; background: var(--surface-subtle); border: 1px solid var(--border); border-radius: 12px; color: var(--text-faint); display: flex; height: 44px; justify-content: center; margin-bottom: 9px; width: 44px; }
@@ -900,6 +907,7 @@ button.search-result:hover { background: var(--surface-subtle); }
   .task-card__meta { gap: 4px 8px; }
   .status-label { display: none; }
   .task-card__actions { overflow-x: auto; }
+  .completion-confirm-dialog { padding: 17px; }
   .history-day { gap: 10px; grid-template-columns: 49px minmax(0,1fr); }
   .history-day__date { height: 49px; }
   .history-day::before { left: 24px; top: 49px; }

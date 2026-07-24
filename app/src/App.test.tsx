@@ -40,6 +40,78 @@ describe("TM 데스크톱 UI", () => {
     expect(within(plannedSection as HTMLElement).queryByRole("button", { name: "이월" })).not.toBeInTheDocument();
   });
 
+  it("오늘 Task를 목록에서 확인 모달을 거쳐 원터치로 완료한다", async () => {
+    const user = userEvent.setup();
+    const { api } = renderApp();
+    await screen.findByRole("heading", { name: "오늘", level: 1 });
+
+    const progressTask = screen.getByText("데이터 모델 불변 조건 검토").closest("article");
+    expect(progressTask).not.toBeNull();
+    await user.click(within(progressTask as HTMLElement).getByRole("button", {
+      name: "데이터 모델 불변 조건 검토 완료",
+    }));
+
+    let dialog = await screen.findByRole("dialog", { name: "Task를 완료할까요?" });
+    expect(within(dialog).getByText("데이터 모델 불변 조건 검토")).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "취소" }));
+    expect(screen.queryByRole("dialog", { name: "Task를 완료할까요?" })).not.toBeInTheDocument();
+    expect((await api.getSnapshot()).tasks.find((task) => task.id === "task-schema")?.status)
+      .toBe("in_progress");
+
+    await user.click(within(progressTask as HTMLElement).getByRole("button", {
+      name: "데이터 모델 불변 조건 검토 완료",
+    }));
+    dialog = await screen.findByRole("dialog", { name: "Task를 완료할까요?" });
+    await user.click(within(dialog).getByRole("button", { name: "완료 처리" }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent("Task를 완료했습니다: 데이터 모델 불변 조건 검토");
+    await waitFor(async () => {
+      expect((await api.getSnapshot()).tasks.find((task) => task.id === "task-schema")?.status)
+        .toBe("done");
+    });
+  });
+
+  it("오늘 계획 Task 완료는 확인 모달 뒤 날짜 기록까지 함께 확정한다", async () => {
+    const user = userEvent.setup();
+    const { api } = renderApp();
+    await screen.findByRole("heading", { name: "오늘", level: 1 });
+
+    const plannedTask = screen.getByText("오늘 화면 정보 밀도 다듬기").closest("article");
+    expect(plannedTask).not.toBeNull();
+    await user.click(within(plannedTask as HTMLElement).getByRole("button", {
+      name: "오늘 화면 정보 밀도 다듬기 완료",
+    }));
+    const dialog = await screen.findByRole("dialog", { name: "Task를 완료할까요?" });
+    await user.click(within(dialog).getByRole("button", { name: "완료 처리" }));
+
+    await waitFor(async () => {
+      const snapshot = await api.getSnapshot();
+      expect(snapshot.todayView.completed.find((entry) => entry.taskId === "task-ui")?.status)
+        .toBe("done");
+      expect(snapshot.tasks.find((task) => task.id === "task-ui")?.status).toBe("done");
+    });
+  });
+
+  it("프로젝트의 열린 Task도 목록에서 바로 완료한다", async () => {
+    const user = userEvent.setup();
+    const { api } = renderApp();
+    await screen.findByRole("heading", { name: "오늘", level: 1 });
+    await user.click(screen.getAllByRole("button", { name: "프로젝트" })[0]);
+
+    const task = (await screen.findByText("JSON · Markdown 내보내기 검증")).closest("article");
+    expect(task).not.toBeNull();
+    await user.click(within(task as HTMLElement).getByRole("button", {
+      name: "JSON · Markdown 내보내기 검증 완료",
+    }));
+    const dialog = await screen.findByRole("dialog", { name: "Task를 완료할까요?" });
+    await user.click(within(dialog).getByRole("button", { name: "완료 처리" }));
+
+    await waitFor(async () => {
+      expect((await api.getSnapshot()).tasks.find((item) => item.id === "task-export")?.status)
+        .toBe("done");
+    });
+  });
+
   it("오늘의 Task·일정 AI 리포트를 만들고 품질 평가를 기록한다", async () => {
     const user = userEvent.setup();
     renderApp();

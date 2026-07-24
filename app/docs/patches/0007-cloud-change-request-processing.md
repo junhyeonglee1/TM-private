@@ -19,7 +19,10 @@ STEP 10 cloud cutover 이후 Railway가 유일한 데이터 기준 원본이 되
 - Rust unit/integration tests: command 직렬화, 단일 claim, claim identity, confirmation header, 모바일 차단
 - PowerShell parser validation
 - security static scan, workspace test, Clippy, frontend regression checks
-- Railway production 배포 후 `Status` read-only 확인
+- GitHub Actions STEP 16 security: run `30064585530` 성공
+- GitHub Actions STEP 10 Windows build: run `30064584133` 성공
+- Railway production deployment `b1df43e6-2b27-4b4c-8151-975085e5a6ed` 성공
+- production `Status` read-only 호출로 승인 요청 2건 조회 확인
 
 ## 롤백
 

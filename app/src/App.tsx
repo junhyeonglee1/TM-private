@@ -205,6 +205,35 @@ export function App({ api = defaultApi }: AppProps) {
       setSavingTask(false);
     }
   };
+  const completeTask = async (task: Task): Promise<void> => {
+    const plannedEntry = [
+      ...(snapshot?.todayView.planned ?? []),
+      ...(snapshot?.todayView.yesterdayIncomplete ?? []),
+    ].find((entry) => entry.taskId === task.id);
+
+    if (plannedEntry) {
+      await mutateVoid(
+        () => api.resolveDayEntry(plannedEntry.id, "done"),
+        `Task를 완료했습니다: ${task.title}`,
+      );
+      return;
+    }
+
+    await mutateVoid(
+      () => api.updateTask({
+        taskId: task.id,
+        title: task.title,
+        description: task.description,
+        status: "done",
+        priority: task.priority,
+        dueDate: task.dueDate,
+        projectId: task.projectId,
+        tags: task.tags,
+        checklist: task.checklist,
+      }),
+      `Task를 완료했습니다: ${task.title}`,
+    );
+  };
   const planTask = (task: Task) => snapshot
     ? mutate(() => api.planTask(task.id, snapshot.today), "오늘 계획에 추가했습니다.")
     : Promise.resolve();
@@ -371,11 +400,11 @@ export function App({ api = defaultApi }: AppProps) {
       case "inbox":
         return <InboxPage />;
       case "today":
-        return <TodayPage onGenerateReport={generateTaskReport} onOpen={(task) => setSelectedTaskId(task.id)} onRateReport={rateTaskReport} onResolve={resolveDayEntry} report={taskReport} reportLoading={taskReportLoading} tasks={snapshot.tasks} today={snapshot.today} view={snapshot.todayView} />;
+        return <TodayPage onComplete={completeTask} onGenerateReport={generateTaskReport} onOpen={(task) => setSelectedTaskId(task.id)} onRateReport={rateTaskReport} onResolve={resolveDayEntry} report={taskReport} reportLoading={taskReportLoading} tasks={snapshot.tasks} today={snapshot.today} view={snapshot.todayView} />;
       case "calendar":
         return <CalendarPage onCreate={api.createCalendarEvent} onDelete={api.deleteCalendarEvent} onLoad={api.getCalendarMonth} onNotify={notify} onUpdate={api.updateCalendarEvent} today={snapshot.today} />;
       case "projects":
-        return <ProjectsPage onCreateProject={createProject} onCreateTask={createTask} onOpen={(task) => setSelectedTaskId(task.id)} onPlan={(task) => void planTask(task)} projects={snapshot.projects} tasks={snapshot.tasks} />;
+        return <ProjectsPage onComplete={completeTask} onCreateProject={createProject} onCreateTask={createTask} onOpen={(task) => setSelectedTaskId(task.id)} onPlan={(task) => void planTask(task)} projects={snapshot.projects} tasks={snapshot.tasks} />;
       case "history":
         return <HistoryPage history={snapshot.history} onOpen={(task) => setSelectedTaskId(task.id)} />;
       case "sessions":

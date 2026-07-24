@@ -43,6 +43,7 @@ interface TodayPageProps {
   report: TaskReportResult | null;
   reportLoading: boolean;
   onOpen: (task: Task) => void;
+  onComplete: (task: Task) => Promise<void>;
   onResolve: (entryId: string, status: Exclude<DayEntryStatus, "planned">) => void;
   onGenerateReport: () => Promise<void>;
   onRateReport: (helpful: boolean) => Promise<void>;
@@ -63,6 +64,7 @@ export function TodayPage({
   report,
   reportLoading,
   onOpen,
+  onComplete,
   onResolve,
   onGenerateReport,
   onRateReport,
@@ -224,7 +226,7 @@ export function TodayPage({
             <span className="count-pill count-pill--accent">{view.inProgress.length}</span>
           </div>
           <div className="task-list">
-            {view.inProgress.map((task) => <TaskCard compact key={task.id} onOpen={onOpen} task={task} />)}
+            {view.inProgress.map((task) => <TaskCard compact key={task.id} onComplete={onComplete} onOpen={onOpen} task={task} />)}
             {view.inProgress.length === 0 && <EmptyState icon="play" title="진행 중인 Task가 없습니다" description="하나를 골라 집중 세션을 시작해 보세요." />}
           </div>
         </section>
@@ -251,6 +253,7 @@ interface ProjectsPageProps {
   projects: Project[];
   tasks: Task[];
   onOpen: (task: Task) => void;
+  onComplete: (task: Task) => Promise<void>;
   onPlan: (task: Task) => void;
   onCreateProject: (name: string) => Promise<string>;
   onCreateTask: (input: CreateTaskInput) => Promise<void>;
@@ -346,6 +349,7 @@ export function ProjectsPage({
   projects,
   tasks,
   onOpen,
+  onComplete,
   onPlan,
   onCreateProject,
   onCreateTask,
@@ -465,7 +469,15 @@ export function ProjectsPage({
                     </header>
                     {groupedTasks.length > 0 && (
                       <div className={`task-list ${group.status === "done" ? "task-list--completed" : ""}`}>
-                        {groupedTasks.map((task) => <TaskCard key={task.id} onOpen={onOpen} onPlan={onPlan} task={task} />)}
+                        {groupedTasks.map((task) => (
+                          <TaskCard
+                            key={task.id}
+                            onComplete={taskFilter === "open" ? onComplete : undefined}
+                            onOpen={onOpen}
+                            onPlan={taskFilter === "open" ? onPlan : undefined}
+                            task={task}
+                          />
+                        ))}
                       </div>
                     )}
                   </section>

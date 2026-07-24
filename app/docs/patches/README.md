@@ -13,4 +13,5 @@
 - `0004-change-request-writing-guide.md`: 개선 요청 유형별 작성 가이드 (`in-progress`)
 - `0005-compact-project-task-flow.md`: Inbox 보류와 compact 프로젝트 Task 생성 흐름 (`in-progress`)
 - `0006-production-embedded-frontend.md`: release 내장 프런트엔드 강제와 localhost 오류 수정 (`in-progress`)
-- `0007-cloud-change-request-processing.md`: Railway 개선 요청 claim·완료·실패 연결 (`in-progress`)
+- `0007-cloud-change-request-processing.md`: Railway 개선 요청 claim·완료·실패 연결 (`verified`)
+- `0008-one-touch-task-completion.md`: Task 목록 원터치 완료와 확인 모달 (`in-progress`)
