@@ -29,7 +29,12 @@
 - 진행 중 Task 목록 완료
 - 오늘 계획 Task의 날짜 이력 동시 확정
 - 프로젝트 열린 Task 목록 완료
-- production frontend build와 GitHub Actions Windows artifact 검증 예정
+- production frontend build 성공
+- GitHub Actions STEP 10 Windows build run `30066283966` 성공
+- GitHub Actions STEP 16 security run `30066285621` 성공
+- Windows artifact `tm-step10-windows-x64` 생성 및 manifest 대조
+  - `tm.exe`: `535bf0e5cc7c3f0294985d9069a9a4f21e711ea8ebaa32db086a9976e64b5ad9`
+  - `tm-cli.exe`: `abb838b3bdfc32265ef8fd788071b2374c1b206f50acc7030c672e9a85f92db1`
 
 ## 복구
 
