@@ -114,6 +114,15 @@ if ($changeRequestCloud -notmatch 'Windows\.Security\.Credentials\.PasswordVault
     $violations.Add('The cloud change request client credential and origin safeguards are incomplete.')
 }
 
+$desktopCloudClient = [System.IO.File]::ReadAllText(
+    (Join-Path $appRoot 'src-tauri\src\cloud_client.rs'),
+    [System.Text.Encoding]::UTF8
+)
+if ($desktopCloudClient -notmatch 'const\s+CREATE_NO_WINDOW:\s*u32\s*=\s*0x0800_0000;' -or
+    $desktopCloudClient -notmatch '\.creation_flags\(CREATE_NO_WINDOW\)') {
+    $violations.Add('The Windows credential helper must run without allocating a console window.')
+}
+
 $databaseSource = [System.IO.File]::ReadAllText((Join-Path $appRoot 'crates\tm-core\src\database.rs'), [System.Text.Encoding]::UTF8)
 $schemaMatch = [System.Text.RegularExpressions.Regex]::Match(
     $databaseSource,

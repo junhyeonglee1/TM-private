@@ -6,7 +6,10 @@ use std::{
 };
 
 #[cfg(windows)]
-use std::process::{Command, Stdio};
+use std::{
+    os::windows::process::CommandExt,
+    process::{Command, Stdio},
+};
 
 use reqwest::{Method, StatusCode, Url};
 use serde::{Deserialize, Serialize};
@@ -19,6 +22,8 @@ const CREDENTIAL_USER: &str = "single-user";
 const TOKEN_PREFIX: &str = "tm_pat_v1_";
 const TOKEN_SECRET_LENGTH: usize = 43;
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 type CloudResult<T> = std::result::Result<T, String>;
 
@@ -555,6 +560,7 @@ $credential.RetrievePassword()
 [Console]::Out.Write($credential.Password)
 "#;
     let output = Command::new("powershell.exe")
+        .creation_flags(CREATE_NO_WINDOW)
         .args([
             "-NoLogo",
             "-NoProfile",
@@ -591,6 +597,9 @@ mod tests {
 
     use super::{materialize_export, valid_command_name, valid_token, validate_base_url};
 
+    #[cfg(windows)]
+    use super::CREATE_NO_WINDOW;
+
     #[test]
     fn cloud_url_requires_a_clean_https_origin() {
         assert!(validate_base_url("https://tm.example.test").is_ok());
@@ -605,6 +614,12 @@ mod tests {
         assert!(!valid_command_name("../../snapshot"));
         assert!(valid_token(&format!("tm_pat_v1_{}", "A".repeat(43))));
         assert!(!valid_token("secret"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn credential_process_uses_the_windows_no_console_flag() {
+        assert_eq!(CREATE_NO_WINDOW, 0x0800_0000);
     }
 
     #[test]
