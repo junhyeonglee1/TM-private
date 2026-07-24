@@ -632,5 +632,17 @@ mod tests {
             &Method::POST,
             "/api/v1/desktop/commands/create_task"
         ));
+        assert!(!device_route_allowed(
+            &Method::POST,
+            "/api/v1/desktop/commands/list_change_requests"
+        ));
+        assert!(!device_route_allowed(
+            &Method::POST,
+            "/api/v1/desktop/commands/claim_next_change_request"
+        ));
+        assert!(!device_route_allowed(
+            &Method::POST,
+            "/api/v1/desktop/commands/complete_change_request"
+        ));
     }
 }

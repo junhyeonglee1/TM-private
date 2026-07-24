@@ -103,6 +103,17 @@ if ($entrypoint -notmatch 'exec\s+gosu\s+tm:tm\s+/usr/local/bin/tm-server' -or
     $violations.Add('The Railway entrypoint does not drop server and backup processes to the tm user.')
 }
 
+$changeRequestCloud = [System.IO.File]::ReadAllText(
+    (Join-Path $appRoot 'scripts\invoke-change-request-cloud.ps1'),
+    [System.Text.Encoding]::UTF8
+)
+if ($changeRequestCloud -notmatch 'Windows\.Security\.Credentials\.PasswordVault' -or
+    $changeRequestCloud -notmatch 'BaseUri must match the configured TM cloud origin' -or
+    $changeRequestCloud -notmatch 'x-tm-confirm-desktop-command' -or
+    $changeRequestCloud -notmatch 'AllowAutoRedirect\s*=\s*\$false') {
+    $violations.Add('The cloud change request client credential and origin safeguards are incomplete.')
+}
+
 $databaseSource = [System.IO.File]::ReadAllText((Join-Path $appRoot 'crates\tm-core\src\database.rs'), [System.Text.Encoding]::UTF8)
 $schemaMatch = [System.Text.RegularExpressions.Regex]::Match(
     $databaseSource,

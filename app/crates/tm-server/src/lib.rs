@@ -2726,10 +2726,11 @@ mod tests {
     use tempfile::Builder;
     use tm_core::{
         ASSISTANT_ACTION_APPROVAL_TTL_SECONDS, AiBudgetPolicy, CalendarEventKind,
-        CalendarRecurrence, CreateCalendarEventInput, CreateMemoryInput, CreateNoteInput,
-        CreateProjectInput, CreateTaskInput, CreateWorkLogInput, DEFAULT_TM_HOME, MemoryKind,
-        MemoryRetention, MemorySensitivity, NoteType, SessionStatus, StartSessionInput,
-        StockMarket, TaskStatus, TmCore, TmHome, UpsertStockWatchlistItemInput,
+        CalendarRecurrence, ChangeRequestKind, CreateCalendarEventInput, CreateChangeRequestInput,
+        CreateMemoryInput, CreateNoteInput, CreateProjectInput, CreateTaskInput,
+        CreateWorkLogInput, DEFAULT_TM_HOME, MemoryKind, MemoryRetention, MemorySensitivity,
+        NoteType, SessionStatus, StartSessionInput, StockMarket, TaskStatus, TmCore, TmHome,
+        UpsertStockWatchlistItemInput,
     };
     use tower::ServiceExt;
 
@@ -4961,6 +4962,123 @@ mod tests {
             core.stock_watchlist()
                 .expect("list deleted stocks")
                 .is_empty()
+        );
+        drop(temporary);
+    }
+
+    #[tokio::test]
+    async fn cloud_change_request_processing_requires_confirmation_and_matching_claim() {
+        let (temporary, core) = test_core();
+        let request = core
+            .create_change_request(CreateChangeRequestInput {
+                kind: ChangeRequestKind::Ui,
+                project_id: None,
+                task_id: None,
+                title: "One-touch completion".to_owned(),
+                description: "Open the detail drawer today.".to_owned(),
+                desired_outcome: "Complete from the list after confirmation.".to_owned(),
+                reproduction_steps: String::new(),
+                priority: 2,
+                requested_by: "desktop-user".to_owned(),
+            })
+            .expect("create change request");
+        core.approve_change_request(
+            &request.id,
+            request.revision,
+            request.attempt_count,
+            "desktop-user",
+        )
+        .expect("approve change request");
+        let router = build_cloud_authenticated_router(core.clone(), test_auth_config());
+        let claim_body = r#"{"args":{"workerId":"codex-cloud"}}"#;
+
+        let unconfirmed = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/desktop/commands/claim_next_change_request")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .body(Body::from(claim_body))
+                    .expect("build unconfirmed claim"),
+            )
+            .await
+            .expect("call unconfirmed claim");
+        assert_eq!(unconfirmed.status(), StatusCode::PRECONDITION_REQUIRED);
+        assert_eq!(
+            core.get_change_request(&request.id)
+                .expect("read unchanged request")
+                .status
+                .as_str(),
+            "approved"
+        );
+
+        let claimed = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/desktop/commands/claim_next_change_request")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header("x-tm-confirm-desktop-command", "claim_next_change_request")
+                    .body(Body::from(claim_body))
+                    .expect("build confirmed claim"),
+            )
+            .await
+            .expect("call confirmed claim");
+        assert_eq!(claimed.status(), StatusCode::OK);
+        let claim = response_json(claimed).await["data"].clone();
+        assert_eq!(claim["shouldProcess"], true);
+        let claim_key = claim["claimKey"].as_str().expect("claim key");
+
+        let complete_body = json!({
+            "args": {
+                "requestId": request.id,
+                "claimKey": claim_key,
+                "resultSummary": "Implemented and verified",
+                "patchRef": "0005",
+                "workerId": "codex-cloud"
+            }
+        })
+        .to_string();
+        let completed = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/desktop/commands/complete_change_request")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header("x-tm-confirm-desktop-command", "complete_change_request")
+                    .body(Body::from(complete_body))
+                    .expect("build complete request"),
+            )
+            .await
+            .expect("call complete request");
+        assert_eq!(completed.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(completed).await["data"]["status"],
+            "completed"
+        );
+
+        let listed = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/desktop/commands/list_change_requests")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"args":{}}"#))
+                    .expect("build list request"),
+            )
+            .await
+            .expect("call list request");
+        assert_eq!(listed.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(listed).await["data"][0]["status"],
+            "completed"
         );
         drop(temporary);
     }

@@ -48,6 +48,10 @@ pub enum DesktopCommand {
     ReturnChangeRequestToDraft,
     CancelChangeRequest,
     AbandonChangeRequest,
+    ListChangeRequests,
+    ClaimNextChangeRequest,
+    CompleteChangeRequest,
+    FailChangeRequest,
     PromoteWorkLog,
     Search,
     MoveToTrash,
@@ -61,7 +65,11 @@ impl DesktopCommand {
     pub const fn is_read_only(self) -> bool {
         matches!(
             self,
-            Self::GetAppSnapshot | Self::GetCalendarMonth | Self::GetStockWatchlist | Self::Search
+            Self::GetAppSnapshot
+                | Self::GetCalendarMonth
+                | Self::GetStockWatchlist
+                | Self::Search
+                | Self::ListChangeRequests
         )
     }
 
@@ -90,6 +98,10 @@ impl DesktopCommand {
             Self::ReturnChangeRequestToDraft => "return_change_request_to_draft",
             Self::CancelChangeRequest => "cancel_change_request",
             Self::AbandonChangeRequest => "abandon_change_request",
+            Self::ListChangeRequests => "list_change_requests",
+            Self::ClaimNextChangeRequest => "claim_next_change_request",
+            Self::CompleteChangeRequest => "complete_change_request",
+            Self::FailChangeRequest => "fail_change_request",
             Self::PromoteWorkLog => "promote_work_log",
             Self::Search => "search",
             Self::MoveToTrash => "move_to_trash",
@@ -569,6 +581,57 @@ pub fn execute_desktop_command(
         | DesktopCommand::CancelChangeRequest
         | DesktopCommand::AbandonChangeRequest => {
             execute_change_request_transition(core, command, args)
+        }
+        DesktopCommand::ListChangeRequests => {
+            serde_json::to_value(core.list_change_requests()?).map_err(Into::into)
+        }
+        DesktopCommand::ClaimNextChangeRequest => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase", deny_unknown_fields)]
+            struct Args {
+                worker_id: String,
+            }
+            let args: Args = parse_args(args)?;
+            serde_json::to_value(core.claim_next_change_request(&args.worker_id)?)
+                .map_err(Into::into)
+        }
+        DesktopCommand::CompleteChangeRequest => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase", deny_unknown_fields)]
+            struct Args {
+                request_id: String,
+                claim_key: String,
+                result_summary: String,
+                patch_ref: Option<String>,
+                worker_id: String,
+            }
+            let args: Args = parse_args(args)?;
+            serde_json::to_value(core.complete_change_request(
+                &args.request_id,
+                &args.claim_key,
+                &args.result_summary,
+                args.patch_ref.as_deref(),
+                &args.worker_id,
+            )?)
+            .map_err(Into::into)
+        }
+        DesktopCommand::FailChangeRequest => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase", deny_unknown_fields)]
+            struct Args {
+                request_id: String,
+                claim_key: String,
+                failure_reason: String,
+                worker_id: String,
+            }
+            let args: Args = parse_args(args)?;
+            serde_json::to_value(core.fail_change_request(
+                &args.request_id,
+                &args.claim_key,
+                &args.failure_reason,
+                &args.worker_id,
+            )?)
+            .map_err(Into::into)
         }
         DesktopCommand::PromoteWorkLog => {
             #[derive(Deserialize)]
@@ -1173,7 +1236,10 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    use crate::{CreateProjectInput, CreateTaskInput, TaskStatus, TmHome};
+    use crate::{
+        ChangeRequestKind, CreateChangeRequestInput, CreateProjectInput, CreateTaskInput,
+        TaskStatus, TmHome,
+    };
 
     use super::{DesktopCommand, execute_desktop_command};
 
@@ -1203,6 +1269,10 @@ mod tests {
             DesktopCommand::ReturnChangeRequestToDraft,
             DesktopCommand::CancelChangeRequest,
             DesktopCommand::AbandonChangeRequest,
+            DesktopCommand::ListChangeRequests,
+            DesktopCommand::ClaimNextChangeRequest,
+            DesktopCommand::CompleteChangeRequest,
+            DesktopCommand::FailChangeRequest,
             DesktopCommand::PromoteWorkLog,
             DesktopCommand::Search,
             DesktopCommand::MoveToTrash,
@@ -1278,6 +1348,80 @@ mod tests {
             )
             .is_err()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn cloud_change_request_commands_claim_once_and_require_the_claim_identity() -> crate::Result<()>
+    {
+        let temporary = tempdir()?;
+        let core = crate::TmCore::open(TmHome::new(temporary.path()))?;
+        let request = core.create_change_request(CreateChangeRequestInput {
+            kind: ChangeRequestKind::Ui,
+            project_id: None,
+            task_id: None,
+            title: "One-touch completion".to_owned(),
+            description: "The current flow opens the detail drawer.".to_owned(),
+            desired_outcome: "Complete from the list after confirmation.".to_owned(),
+            reproduction_steps: String::new(),
+            priority: 2,
+            requested_by: "desktop-user".to_owned(),
+        })?;
+        core.approve_change_request(
+            &request.id,
+            request.revision,
+            request.attempt_count,
+            "desktop-user",
+        )?;
+
+        let listed = execute_desktop_command(&core, DesktopCommand::ListChangeRequests, json!({}))?;
+        assert_eq!(listed.as_array().map(Vec::len), Some(1));
+
+        let claim = execute_desktop_command(
+            &core,
+            DesktopCommand::ClaimNextChangeRequest,
+            json!({"workerId": "codex-cloud"}),
+        )?;
+        assert_eq!(claim["shouldProcess"], true);
+        assert_eq!(claim["request"]["id"], request.id);
+        let claim_key = claim["claimKey"].as_str().expect("claim key");
+
+        let empty_claim = execute_desktop_command(
+            &core,
+            DesktopCommand::ClaimNextChangeRequest,
+            json!({"workerId": "other-worker"}),
+        )?;
+        assert_eq!(empty_claim["shouldProcess"], false);
+
+        assert!(
+            execute_desktop_command(
+                &core,
+                DesktopCommand::CompleteChangeRequest,
+                json!({
+                    "requestId": request.id,
+                    "claimKey": claim_key,
+                    "resultSummary": "Implemented",
+                    "patchRef": "0005",
+                    "workerId": "other-worker"
+                }),
+            )
+            .is_err()
+        );
+
+        let completed = execute_desktop_command(
+            &core,
+            DesktopCommand::CompleteChangeRequest,
+            json!({
+                "requestId": request.id,
+                "claimKey": claim_key,
+                "resultSummary": "Implemented",
+                "patchRef": "0005",
+                "workerId": "codex-cloud"
+            }),
+        )?;
+        assert_eq!(completed["status"], "completed");
+        assert_eq!(completed["resultSummary"], "Implemented");
+        assert_eq!(completed["patchRef"], "0005");
         Ok(())
     }
 }
