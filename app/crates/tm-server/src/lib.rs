@@ -5007,8 +5007,11 @@ mod tests {
             .expect("call unconfirmed claim");
         assert_eq!(unconfirmed.status(), StatusCode::PRECONDITION_REQUIRED);
         assert_eq!(
-            core.get_change_request(&request.id)
+            core.list_change_requests()
                 .expect("read unchanged request")
+                .into_iter()
+                .find(|candidate| candidate.id == request.id)
+                .expect("find unchanged request")
                 .status
                 .as_str(),
             "approved"
