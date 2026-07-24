@@ -1,4 +1,4 @@
-const CACHE_NAME = "tm-mobile-shell-v7";
+const CACHE_NAME = "tm-mobile-shell-v8";
 const SHELL = [
   "/mobile/",
   "/mobile/app.js",
