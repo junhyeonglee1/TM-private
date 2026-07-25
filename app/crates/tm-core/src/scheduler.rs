@@ -149,6 +149,58 @@ impl TmCore {
             })
     }
 
+    pub fn configure_stock_scheduler(&self, enabled: bool, as_of: DateTime<Utc>) -> Result<()> {
+        self.ensure_scheduler_defaults(as_of)?;
+        let now = timestamp(as_of);
+        let next_run = timestamp(next_daily_after(Seoul, time(10, 30)?, as_of)?);
+        self.database
+            .transaction(TransactionBehavior::Immediate, |transaction| {
+                transaction.execute(
+                    "INSERT INTO scheduler_jobs(
+                        id, job_key, kind, schedule_type, interval_seconds, local_time,
+                        timezone, enabled, max_attempts, misfire_grace_seconds, coalesce,
+                        next_run_at, last_scheduled_at, created_at, updated_at
+                     ) VALUES (
+                        ?1, 'stock.daily_screen', 'stock.daily_screen', 'daily', NULL,
+                        '10:30:00', 'Asia/Seoul', ?2, ?3, ?4, 1, ?5, NULL, ?6, ?6
+                     )
+                     ON CONFLICT(job_key) DO UPDATE SET
+                        enabled = excluded.enabled,
+                        max_attempts = excluded.max_attempts,
+                        misfire_grace_seconds = excluded.misfire_grace_seconds,
+                        coalesce = excluded.coalesce,
+                        next_run_at = CASE
+                            WHEN scheduler_jobs.enabled = 0 AND excluded.enabled = 1
+                            THEN excluded.next_run_at
+                            ELSE scheduler_jobs.next_run_at
+                        END,
+                        updated_at = excluded.updated_at",
+                    params![
+                        new_id(),
+                        if enabled { 1_i64 } else { 0_i64 },
+                        SCHEDULER_MAX_ATTEMPTS,
+                        SCHEDULER_MISFIRE_GRACE_SECONDS,
+                        next_run,
+                        now,
+                    ],
+                )?;
+                Ok(())
+            })
+    }
+
+    pub fn stock_scheduler_next_run_at(&self) -> Result<Option<String>> {
+        self.database
+            .connect()?
+            .query_row(
+                "SELECT next_run_at FROM scheduler_jobs
+                 WHERE job_key = 'stock.daily_screen'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn run_scheduler_cycle(
         &self,
         worker_id: &str,
@@ -166,7 +218,7 @@ impl TmCore {
             checked_at: timestamp(as_of),
         };
         for _ in 0..MAX_CLAIMS_PER_CYCLE {
-            let (claim, recovered) = self.claim_scheduler_run(worker_id, as_of)?;
+            let (claim, recovered) = self.claim_scheduler_run_internal(worker_id, as_of, false)?;
             report.lease_recoveries += recovered;
             let Some(claim) = claim else {
                 break;
@@ -209,6 +261,15 @@ impl TmCore {
         worker_id: &str,
         as_of: DateTime<Utc>,
     ) -> Result<(Option<SchedulerClaim>, usize)> {
+        self.claim_scheduler_run_internal(worker_id, as_of, true)
+    }
+
+    fn claim_scheduler_run_internal(
+        &self,
+        worker_id: &str,
+        as_of: DateTime<Utc>,
+        include_external_jobs: bool,
+    ) -> Result<(Option<SchedulerClaim>, usize)> {
         validate_worker_id(worker_id)?;
         self.database
             .transaction(TransactionBehavior::Immediate, |transaction| {
@@ -221,9 +282,10 @@ impl TmCore {
                          JOIN scheduler_jobs AS job ON job.id = run.job_id
                          WHERE run.status IN ('pending', 'retry_wait')
                            AND run.available_at <= ?1
+                           AND (?2 = 1 OR job.kind <> 'stock.daily_screen')
                          ORDER BY run.available_at, run.scheduled_for, run.id
                          LIMIT 1",
-                        [&now],
+                        params![now, if include_external_jobs { 1_i64 } else { 0_i64 }],
                         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                     )
                     .optional()?;
@@ -268,12 +330,54 @@ impl TmCore {
             })
     }
 
+    pub fn heartbeat_scheduler_claim(
+        &self,
+        claim: &SchedulerClaim,
+        as_of: DateTime<Utc>,
+    ) -> Result<String> {
+        let now = timestamp(as_of);
+        let lease_expires_at = timestamp(as_of + Duration::seconds(SCHEDULER_LEASE_SECONDS));
+        let connection = self.database.connect()?;
+        let changed = connection.execute(
+            "UPDATE scheduler_runs
+             SET lease_expires_at = ?2, updated_at = ?3
+             WHERE id = ?1 AND status = 'running' AND lease_owner = ?4
+               AND attempt_count = ?5 AND idempotency_key = ?6
+               AND lease_expires_at > ?3",
+            params![
+                claim.run_id,
+                lease_expires_at,
+                now,
+                claim.worker_id,
+                claim.attempt_number,
+                claim.idempotency_key,
+            ],
+        )?;
+        if changed != 1 {
+            return Err(Error::Conflict(
+                "scheduler claim is no longer active for heartbeat".to_owned(),
+            ));
+        }
+        Ok(lease_expires_at)
+    }
+
+    pub fn complete_scheduler_claim_with_result(
+        &self,
+        claim: &SchedulerClaim,
+        result: &Value,
+        as_of: DateTime<Utc>,
+    ) -> Result<()> {
+        self.database
+            .transaction(TransactionBehavior::Immediate, |transaction| {
+                complete_claim_in_transaction(transaction, claim, result, as_of)
+            })
+    }
+
     pub fn execute_scheduler_claim(
         &self,
         claim: &SchedulerClaim,
         as_of: DateTime<Utc>,
     ) -> Result<()> {
-        let now = timestamp(as_of);
         self.database
             .transaction(TransactionBehavior::Immediate, |transaction| {
                 validate_active_claim(transaction, claim)?;
@@ -284,10 +388,10 @@ impl TmCore {
                         |row| row.get(0),
                     )
                     .optional()?;
-                let result_json = if let Some(existing) = existing {
-                    existing
+                let result = if let Some(existing) = existing {
+                    serde_json::from_str(&existing)?
                 } else {
-                    let result = match claim.job_kind.as_str() {
+                    match claim.job_kind.as_str() {
                         "scheduler.canary" => json!({
                             "status": "ok",
                             "kind": "scheduler.canary",
@@ -302,52 +406,9 @@ impl TmCore {
                                 "unsupported scheduler job kind: {other}"
                             )));
                         }
-                    };
-                    let encoded = serde_json::to_string(&result)?;
-                    transaction.execute(
-                        "INSERT INTO scheduler_effects(
-                            idempotency_key, run_id, job_kind, result_json, applied_at
-                         ) VALUES (?1, ?2, ?3, ?4, ?5)",
-                        params![
-                            claim.idempotency_key,
-                            claim.run_id,
-                            claim.job_kind,
-                            encoded,
-                            now
-                        ],
-                    )?;
-                    encoded
+                    }
                 };
-                transaction.execute(
-                    "INSERT INTO scheduler_attempts(
-                        id, run_id, attempt_number, worker_id, started_at,
-                        completed_at, outcome, error, created_at
-                     ) SELECT ?1, id, attempt_count, lease_owner, lease_acquired_at,
-                              ?2, 'succeeded', NULL, ?2
-                       FROM scheduler_runs WHERE id = ?3",
-                    params![new_id(), now, claim.run_id],
-                )?;
-                let changed = transaction.execute(
-                    "UPDATE scheduler_runs
-                     SET status = 'succeeded', result_json = ?2, completed_at = ?3,
-                         updated_at = ?3, lease_owner = NULL, lease_acquired_at = NULL,
-                         lease_expires_at = NULL, last_error = NULL
-                     WHERE id = ?1 AND status = 'running' AND lease_owner = ?4
-                       AND attempt_count = ?5",
-                    params![
-                        claim.run_id,
-                        result_json,
-                        now,
-                        claim.worker_id,
-                        claim.attempt_number,
-                    ],
-                )?;
-                if changed != 1 {
-                    return Err(Error::Conflict(
-                        "scheduler claim changed during execution".to_owned(),
-                    ));
-                }
-                Ok(())
+                complete_claim_in_transaction(transaction, claim, &result, as_of)
             })
     }
 
@@ -718,6 +779,71 @@ fn validate_active_claim(transaction: &Transaction<'_>, claim: &SchedulerClaim) 
     if !active {
         return Err(Error::Conflict(
             "scheduler claim is no longer active".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn complete_claim_in_transaction(
+    transaction: &Transaction<'_>,
+    claim: &SchedulerClaim,
+    result: &Value,
+    as_of: DateTime<Utc>,
+) -> Result<()> {
+    validate_active_claim(transaction, claim)?;
+    let now = timestamp(as_of);
+    let requested_json = serde_json::to_string(result)?;
+    let existing: Option<String> = transaction
+        .query_row(
+            "SELECT result_json FROM scheduler_effects WHERE idempotency_key = ?1",
+            [&claim.idempotency_key],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let result_json = if let Some(existing) = existing {
+        existing
+    } else {
+        transaction.execute(
+            "INSERT INTO scheduler_effects(
+                idempotency_key, run_id, job_kind, result_json, applied_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                claim.idempotency_key,
+                claim.run_id,
+                claim.job_kind,
+                requested_json,
+                now
+            ],
+        )?;
+        requested_json
+    };
+    transaction.execute(
+        "INSERT INTO scheduler_attempts(
+            id, run_id, attempt_number, worker_id, started_at,
+            completed_at, outcome, error, created_at
+         ) SELECT ?1, id, attempt_count, lease_owner, lease_acquired_at,
+                  ?2, 'succeeded', NULL, ?2
+           FROM scheduler_runs WHERE id = ?3",
+        params![new_id(), now, claim.run_id],
+    )?;
+    let changed = transaction.execute(
+        "UPDATE scheduler_runs
+         SET status = 'succeeded', result_json = ?2, completed_at = ?3,
+             updated_at = ?3, lease_owner = NULL, lease_acquired_at = NULL,
+             lease_expires_at = NULL, last_error = NULL
+         WHERE id = ?1 AND status = 'running' AND lease_owner = ?4
+           AND attempt_count = ?5",
+        params![
+            claim.run_id,
+            result_json,
+            now,
+            claim.worker_id,
+            claim.attempt_number,
+        ],
+    )?;
+    if changed != 1 {
+        return Err(Error::Conflict(
+            "scheduler claim changed during completion".to_owned(),
         ));
     }
     Ok(())

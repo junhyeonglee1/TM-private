@@ -17,6 +17,7 @@ use zip::{ZipWriter, write::SimpleFileOptions};
 use crate::{
     Error, Result,
     database::{Database, SCHEMA_VERSION, database_lock, now_utc, register_runtime_functions},
+    export::EXPORTED_TABLES,
 };
 
 const DATABASE_BACKUP_LIMIT: usize = 30;
@@ -128,6 +129,7 @@ pub(crate) fn restore_database(
     let assistant_action_ledger = read_assistant_action_ledger(&current)?;
     let assistant_memory_ledger = read_assistant_memory_ledger(&current)?;
     let task_report_ledger = read_task_report_ledger(&current)?;
+    let stock_screen_ledger = read_stock_screen_ledger(&current)?;
     let safety_backup = online_backup_connection_inner(
         &current,
         backup_directory,
@@ -146,6 +148,7 @@ pub(crate) fn restore_database(
     validate_assistant_action_restore_source(&source, &assistant_action_ledger)?;
     validate_assistant_memory_restore_source(&source, &assistant_memory_ledger)?;
     validate_task_report_restore_source(&source, &task_report_ledger)?;
+    validate_stock_screen_restore_source(&source, &stock_screen_ledger)?;
     let mut destination = Connection::open(database_path)?;
     destination.busy_timeout(Duration::from_secs(15))?;
     register_runtime_functions(&destination)?;
@@ -286,6 +289,13 @@ fn validate_database(path: &Path, require_tm_schema: bool) -> Result<()> {
     } else {
         true
     };
+    let has_complete_manifest = if require_tm_schema {
+        has_complete_migration_manifest(&connection, version).unwrap_or(false)
+            && (version != SCHEMA_VERSION
+                || has_complete_schema_tables(&connection).unwrap_or(false))
+    } else {
+        true
+    };
     let has_foreign_key_violation = {
         let mut statement = connection
             .prepare("PRAGMA foreign_key_check")
@@ -300,11 +310,43 @@ fn validate_database(path: &Path, require_tm_schema: bool) -> Result<()> {
     if integrity != "ok"
         || (require_tm_schema && !(1..=SCHEMA_VERSION).contains(&version))
         || !has_core_tables
+        || !has_complete_manifest
         || has_foreign_key_violation
     {
         return Err(Error::InvalidBackup(path.to_path_buf()));
     }
     Ok(())
+}
+
+fn has_complete_migration_manifest(
+    connection: &Connection,
+    version: i64,
+) -> rusqlite::Result<bool> {
+    if !(1..=SCHEMA_VERSION).contains(&version) {
+        return Ok(false);
+    }
+    let mut statement =
+        connection.prepare("SELECT version FROM schema_migrations ORDER BY version")?;
+    let versions = statement
+        .query_map([], |row| row.get::<_, i64>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(versions == (1..=version).collect::<Vec<_>>())
+}
+
+fn has_complete_schema_tables(connection: &Connection) -> rusqlite::Result<bool> {
+    for table in EXPORTED_TABLES {
+        let exists: bool = connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1
+             )",
+            [table],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn artifact_for(path: &Path, created_at: String) -> Result<BackupArtifact> {
@@ -659,6 +701,118 @@ fn validate_task_report_restore_source(
     if &restored != current {
         return Err(Error::Conflict(
             "restore would alter the Task report usage and feedback ledger".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct StockScreenLedger {
+    universe_snapshots: Vec<String>,
+    universe_members: Vec<String>,
+    market_data_batches: Vec<String>,
+    runs: Vec<String>,
+    results: Vec<String>,
+    ai_reports: Vec<String>,
+}
+
+fn read_stock_screen_ledger(connection: &Connection) -> Result<StockScreenLedger> {
+    let table_names = [
+        "stock_universe_snapshots",
+        "stock_universe_members",
+        "stock_market_data_batches",
+        "stock_screen_runs",
+        "stock_screen_results",
+        "stock_ai_reports",
+    ];
+    let mut exists = Vec::with_capacity(table_names.len());
+    for table in table_names {
+        exists.push(connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1
+             )",
+            [table],
+            |row| row.get::<_, bool>(0),
+        )?);
+    }
+    if exists.iter().all(|value| !value) {
+        return Ok(StockScreenLedger::default());
+    }
+    if exists.iter().any(|value| !value) {
+        return Err(Error::Invariant(
+            "stock screen ledger tables must exist together".to_owned(),
+        ));
+    }
+    let universe_snapshots = canonical_json_rows(
+        connection,
+        "SELECT json_array(
+            id, name, effective_date, source_url, source_revision, source_sha256,
+            license_name, license_url, attribution_text, member_count, fetched_at, created_at
+         ) FROM stock_universe_snapshots ORDER BY id",
+    )?;
+    let universe_members = canonical_json_rows(
+        connection,
+        "SELECT json_array(
+            snapshot_id, ticker, display_name, sector, sub_industry, created_at
+         ) FROM stock_universe_members ORDER BY snapshot_id, ticker",
+    )?;
+    let market_data_batches = canonical_json_rows(
+        connection,
+        "SELECT json_array(
+            source_sha256, source, feed, adjustment, session_count, bar_count,
+            earliest_session, latest_session, fetched_at, created_at
+         ) FROM stock_market_data_batches ORDER BY source_sha256",
+    )?;
+    let runs = canonical_json_rows(
+        connection,
+        "SELECT json_array(
+            id, market_date, universe_snapshot_id, status, total_members,
+            current_covered, baseline_5_covered, baseline_21_covered, result_count,
+            universe_sha256, market_data_sha256, failure_code, started_at,
+            completed_at, created_at
+         ) FROM stock_screen_runs ORDER BY id",
+    )?;
+    let results = canonical_json_rows(
+        connection,
+        "SELECT json_array(
+            run_id, ticker, display_name, sector, current_date,
+            current_close_microusd, baseline_5_date, baseline_5_close_microusd,
+            return_5_micros, band_5, baseline_21_date,
+            baseline_21_close_microusd, return_21_micros, band_21,
+            universe_sha256, market_data_sha256, created_at
+         ) FROM stock_screen_results ORDER BY run_id, ticker",
+    )?;
+    let ai_reports = canonical_json_rows(
+        connection,
+        "SELECT json_array(
+            id, screen_run_id, status, prompt_version, model, response_id,
+            upstream_request_id, result_json, input_tokens, cached_input_tokens,
+            output_tokens, total_tokens, estimated_cost_microusd, failure_code,
+            request_started_at, created_at, completed_at
+         ) FROM stock_ai_reports ORDER BY id",
+    )?;
+    Ok(StockScreenLedger {
+        universe_snapshots,
+        universe_members,
+        market_data_batches,
+        runs,
+        results,
+        ai_reports,
+    })
+}
+
+fn validate_stock_screen_restore_source(
+    source: &Connection,
+    current: &StockScreenLedger,
+) -> Result<()> {
+    if current == &StockScreenLedger::default() {
+        return Ok(());
+    }
+    let restored = read_stock_screen_ledger(source)?;
+    if &restored != current {
+        return Err(Error::Conflict(
+            "restore would alter immutable stock provenance, screen results, or AI reports"
+                .to_owned(),
         ));
     }
     Ok(())

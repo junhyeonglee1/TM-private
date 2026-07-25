@@ -107,14 +107,35 @@ fn migrates_schema_eleven_with_a_pre_migration_backup() -> Result<()> {
 
     let connection = Connection::open(&database_path)?;
     connection.execute_batch(
-        "DROP TABLE stock_watchlist_items;
+        "DROP TRIGGER stock_ai_reports_no_delete;
+         DROP TRIGGER stock_ai_reports_identity_immutable;
+         DROP TRIGGER stock_screen_results_no_delete;
+         DROP TRIGGER stock_screen_results_no_update;
+         DROP TRIGGER stock_screen_runs_no_delete;
+         DROP TRIGGER stock_screen_runs_identity_immutable;
+         DROP TRIGGER stock_universe_members_no_delete;
+         DROP TRIGGER stock_universe_members_no_update;
+         DROP TRIGGER stock_universe_snapshots_no_delete;
+         DROP TRIGGER stock_universe_snapshots_no_update;
+         DROP TRIGGER stock_market_data_batches_no_delete;
+         DROP TRIGGER stock_market_data_batches_no_update;
+         DROP TABLE stock_ai_reports;
+         DROP TABLE stock_screen_results;
+         DROP TABLE stock_screen_runs;
+         DROP TABLE stock_daily_bars;
+         DROP TABLE stock_market_sessions;
+         DROP TABLE stock_market_data_batches;
+         DROP TABLE stock_universe_members;
+         DROP TABLE stock_universe_snapshots;
+         DROP TABLE stock_watchlist_items;
+         DELETE FROM schema_migrations WHERE version = 13;
          DELETE FROM schema_migrations WHERE version = 12;
          PRAGMA user_version = 11;",
     )?;
     drop(connection);
 
     let migrated = TmCore::open(TmHome::new(temporary.path()))?;
-    assert_eq!(migrated.health()?.schema_version, 12);
+    assert_eq!(migrated.health()?.schema_version, 13);
     assert!(migrated.stock_watchlist()?.is_empty());
     assert!(
         migrated

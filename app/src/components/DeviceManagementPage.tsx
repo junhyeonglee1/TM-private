@@ -62,6 +62,8 @@ interface OperationsStatus {
     checkedAt: string | null;
     schemaVersion: number | null;
     integrityCheck: string | null;
+    migrationLedgerComplete: boolean | null;
+    requiredTablesComplete: boolean | null;
   };
 }
 

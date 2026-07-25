@@ -13,10 +13,10 @@ use crate::{
     ChangeRequest, ChangeRequestKind, ChecklistMutationInput, CreateCalendarEventInput,
     CreateChangeRequestInput, CreateNoteAggregateInput, CreateNoteInput, CreateProjectInput,
     CreateTaskAggregateInput, CreateTaskInput, CreateWorkLogInput, EndSessionInput, EntityLink,
-    EntityType, Error, LinkTargetType, Note, NoteLinksInput, NoteType, Result, SearchHit,
-    SessionStatus, StartSessionInput, Task, TaskDayEntry, TaskDayStatus, TaskPatch, TaskStatus,
-    TmCore, TrashEntityType, UpdateCalendarEventInput, UpdateChangeRequestInput,
-    UpdateTaskAggregateInput, UpsertStockWatchlistItemInput, WorkSession,
+    EntityType, Error, LinkTargetType, ListStockScreenResultsInput, Note, NoteLinksInput, NoteType,
+    Result, SearchHit, SessionStatus, StartSessionInput, Task, TaskDayEntry, TaskDayStatus,
+    TaskPatch, TaskStatus, TmCore, TrashEntityType, UpdateCalendarEventInput,
+    UpdateChangeRequestInput, UpdateTaskAggregateInput, UpsertStockWatchlistItemInput, WorkSession,
 };
 
 const DESKTOP_ACTOR: &str = "desktop-user";
@@ -33,6 +33,8 @@ pub enum DesktopCommand {
     GetStockWatchlist,
     UpsertStockWatchlistItem,
     DeleteStockWatchlistItem,
+    GetLatestStockScreen,
+    ListStockScreenResults,
     CreateProject,
     CreateTask,
     UpdateTask,
@@ -68,6 +70,8 @@ impl DesktopCommand {
             Self::GetAppSnapshot
                 | Self::GetCalendarMonth
                 | Self::GetStockWatchlist
+                | Self::GetLatestStockScreen
+                | Self::ListStockScreenResults
                 | Self::Search
                 | Self::ListChangeRequests
         )
@@ -83,6 +87,8 @@ impl DesktopCommand {
             Self::GetStockWatchlist => "get_stock_watchlist",
             Self::UpsertStockWatchlistItem => "upsert_stock_watchlist_item",
             Self::DeleteStockWatchlistItem => "delete_stock_watchlist_item",
+            Self::GetLatestStockScreen => "get_latest_stock_screen",
+            Self::ListStockScreenResults => "list_stock_screen_results",
             Self::CreateProject => "create_project",
             Self::CreateTask => "create_task",
             Self::UpdateTask => "update_task",
@@ -357,6 +363,17 @@ pub fn execute_desktop_command(
             let args: Args = parse_args(args)?;
             core.delete_stock_watchlist_item(&args.symbol)?;
             Ok(Value::Null)
+        }
+        DesktopCommand::GetLatestStockScreen => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Args {}
+            let _args: Args = parse_args(args)?;
+            serde_json::to_value(core.get_latest_stock_screen()?).map_err(Into::into)
+        }
+        DesktopCommand::ListStockScreenResults => {
+            let args: ListStockScreenResultsInput = parse_args(args)?;
+            serde_json::to_value(core.list_stock_screen_results(args)?).map_err(Into::into)
         }
         DesktopCommand::CreateProject => {
             #[derive(Deserialize)]
@@ -1254,6 +1271,8 @@ mod tests {
             DesktopCommand::GetStockWatchlist,
             DesktopCommand::UpsertStockWatchlistItem,
             DesktopCommand::DeleteStockWatchlistItem,
+            DesktopCommand::GetLatestStockScreen,
+            DesktopCommand::ListStockScreenResults,
             DesktopCommand::CreateProject,
             DesktopCommand::CreateTask,
             DesktopCommand::UpdateTask,
@@ -1345,6 +1364,43 @@ mod tests {
                 &core,
                 DesktopCommand::CreateTask,
                 json!({"input": {"title": "bad", "unexpected": true}}),
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn stock_screen_commands_are_read_only_and_strict() -> crate::Result<()> {
+        let temporary = tempdir()?;
+        let core = crate::TmCore::open(TmHome::new(temporary.path()))?;
+        assert!(DesktopCommand::GetLatestStockScreen.is_read_only());
+        assert!(DesktopCommand::ListStockScreenResults.is_read_only());
+        assert!(!DesktopCommand::UpsertStockWatchlistItem.is_read_only());
+
+        let latest =
+            execute_desktop_command(&core, DesktopCommand::GetLatestStockScreen, json!({}))?;
+        assert!(latest["latestSuccess"].is_null());
+        assert_eq!(latest["aiBudget"]["hardLimitMicrousd"], 2_000_000);
+        assert_eq!(latest["aiBudget"]["committedMicrousd"], 0);
+        assert!(
+            execute_desktop_command(
+                &core,
+                DesktopCommand::GetLatestStockScreen,
+                json!({"unexpected": true}),
+            )
+            .is_err()
+        );
+        assert!(
+            execute_desktop_command(
+                &core,
+                DesktopCommand::ListStockScreenResults,
+                json!({
+                    "runId": "missing",
+                    "horizon": 5,
+                    "direction": "up",
+                    "unknown": true
+                }),
             )
             .is_err()
         );

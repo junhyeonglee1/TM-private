@@ -91,6 +91,143 @@ export interface UpsertStockWatchlistItemInput {
   displayName: string;
 }
 
+export type StockScreenHorizon = 5 | 21;
+export type StockScreenDirection = "up" | "down";
+export type StockScreenFilterBand = "ten_to_twenty" | "twenty_plus";
+export type StockScreenResultBand =
+  | "down_20_plus"
+  | "down_10_to_20"
+  | "up_10_to_20"
+  | "up_20_plus";
+export type StockScreenAiStatus = "started" | "succeeded" | "failed" | "ai_uncertain";
+export type StockScreenAttemptStatus =
+  | "started"
+  | "succeeded"
+  | "no_candidates"
+  | "upstream_unavailable"
+  | "coverage_failed"
+  | "failed";
+
+export interface StockScreenCoverage {
+  currentCovered: number;
+  total: number;
+  currentPct: number;
+  baseline5Covered: number;
+  baseline5Pct: number;
+  baseline21Covered: number;
+  baseline21Pct: number;
+}
+
+export interface StockScreenUniverse {
+  name: string;
+  sourceUrl: string;
+  revision: string;
+  asOfDate: string;
+  memberCount: number;
+  ageDays: number;
+  attributionText: string;
+}
+
+export interface StockScreenCounts {
+  up5TenToTwenty: number;
+  up5TwentyPlus: number;
+  down5TenToTwenty: number;
+  down5TwentyPlus: number;
+  up21TenToTwenty: number;
+  up21TwentyPlus: number;
+  down21TenToTwenty: number;
+  down21TwentyPlus: number;
+}
+
+export interface StockScreenResult {
+  runId: string;
+  ticker: string;
+  displayName: string;
+  sector: string | null;
+  horizon: StockScreenHorizon;
+  direction: StockScreenDirection;
+  band: StockScreenResultBand;
+  currentDate: string;
+  currentCloseMicrousd: number;
+  baselineDate: string;
+  baselineCloseMicrousd: number;
+  returnMicros: number;
+  returnPct: number;
+  universeSha256: string;
+  marketDataSha256: string;
+}
+
+export interface StockScreenAiSummary {
+  id: string;
+  screenRunId: string;
+  status: StockScreenAiStatus;
+  promptVersion: string;
+  model: string;
+  responseId: string | null;
+  upstreamRequestId: string | null;
+  requestStartedAt: string | null;
+  result: unknown;
+  inputTokens: number | null;
+  cachedInputTokens: number | null;
+  outputTokens: number | null;
+  totalTokens: number | null;
+  estimatedCostMicrousd: number;
+  failureCode: string | null;
+  createdAt: string;
+  completedAt: string | null;
+}
+
+export interface StockScreenSummary {
+  runId: string;
+  marketDate: string;
+  completedAt: string;
+  coverage: StockScreenCoverage;
+  universe: StockScreenUniverse;
+  counts: StockScreenCounts;
+  top3: StockScreenResult[];
+  ai: StockScreenAiSummary | null;
+}
+
+export interface StockScreenAttempt {
+  runId: string;
+  status: StockScreenAttemptStatus;
+  marketDate: string;
+  startedAt: string;
+  completedAt: string | null;
+  failureCode: string | null;
+  coverage: StockScreenCoverage;
+}
+
+export interface LatestStockScreen {
+  latestSuccess: StockScreenSummary | null;
+  latestAttempt: StockScreenAttempt | null;
+  aiBudget: {
+    budgetMonth: string;
+    operation: string;
+    hardLimitMicrousd: number;
+    committedMicrousd: number;
+    remainingMicrousd: number;
+    hardStopReached: boolean;
+  };
+  stale: boolean;
+  stalenessReason: string | null;
+}
+
+export interface ListStockScreenResultsInput {
+  runId: string;
+  horizon: StockScreenHorizon;
+  direction: StockScreenDirection;
+  band?: StockScreenFilterBand;
+  cursor?: string;
+  limit?: number;
+}
+
+export interface StockScreenResultPage {
+  items: StockScreenResult[];
+  nextCursor: string | null;
+  total: number;
+}
+
 export interface Project {
   id: string;
   name: string;

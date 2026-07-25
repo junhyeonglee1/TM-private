@@ -12,10 +12,13 @@ import type {
   DayEntryStatus,
   ExportResult,
   FinishSessionInput,
+  LatestStockScreen,
+  ListStockScreenResultsInput,
   NoteType,
   SearchResult,
   StartSessionInput,
   StockWatchlistItem,
+  StockScreenResultPage,
   UpdateTaskInput,
   UpdateChangeRequestInput,
   UpdateCalendarEventInput,
@@ -104,6 +107,8 @@ export interface TmApi {
   getStockWatchlist(): Promise<StockWatchlistItem[]>;
   upsertStockWatchlistItem(input: UpsertStockWatchlistItemInput): Promise<StockWatchlistItem>;
   deleteStockWatchlistItem(symbol: string): Promise<void>;
+  getLatestStockScreen(): Promise<LatestStockScreen>;
+  listStockScreenResults(input: ListStockScreenResultsInput): Promise<StockScreenResultPage>;
   createProject(name: string, description?: string): Promise<string>;
   createTask(input: CreateTaskInput): Promise<void>;
   updateTask(input: UpdateTaskInput): Promise<void>;
@@ -189,6 +194,10 @@ export const createApi = (transport: CommandTransport): TmApi => ({
     transport.invoke<StockWatchlistItem>("upsert_stock_watchlist_item", { input }),
   deleteStockWatchlistItem: (symbol) =>
     run(transport, "delete_stock_watchlist_item", { symbol }),
+  getLatestStockScreen: () =>
+    transport.invoke<LatestStockScreen>("get_latest_stock_screen"),
+  listStockScreenResults: (input) =>
+    transport.invoke<StockScreenResultPage>("list_stock_screen_results", { ...input }),
   createProject: (name, description = "") =>
     transport.invoke<string>("create_project", { name, description }),
   createTask: (input) => run(transport, "create_task", { input }),

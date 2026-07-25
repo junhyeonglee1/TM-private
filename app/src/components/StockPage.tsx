@@ -8,10 +8,14 @@ import {
 
 import { Icon } from "./Icon";
 import { StockSearchCombobox } from "./StockSearchCombobox";
+import { StockScreenPanel } from "./StockScreen";
 import { stockWidgetUrl, tradingViewUrl } from "../lib/tradingview";
-import type { StockCatalogItem } from "../lib/stock-catalog";
+import { findUsStockCatalogItem, type StockCatalogItem } from "../lib/stock-catalog";
 import type {
+  LatestStockScreen,
+  ListStockScreenResultsInput,
   StockMarket,
+  StockScreenResultPage,
   StockWatchlistItem,
   UpsertStockWatchlistItemInput,
 } from "../types";
@@ -30,6 +34,11 @@ interface StockPageProps {
   onLoad: () => Promise<StockWatchlistItem[]>;
   onNotify: (message: string, type?: "success" | "error") => void;
   onUpsert: (input: UpsertStockWatchlistItemInput) => Promise<StockWatchlistItem>;
+  onListScreenResults: (input: ListStockScreenResultsInput) => Promise<StockScreenResultPage>;
+  onRefreshScreen: () => Promise<void>;
+  screen: LatestStockScreen | null;
+  screenError: string | null;
+  screenLoading: boolean;
 }
 
 export function StockPage({
@@ -37,6 +46,11 @@ export function StockPage({
   onLoad,
   onNotify,
   onUpsert,
+  onListScreenResults,
+  onRefreshScreen,
+  screen,
+  screenError,
+  screenLoading,
 }: StockPageProps) {
   const [items, setItems] = useState<StockWatchlistItem[]>([]);
   const [selectedSymbol, setSelectedSymbol] = useState(DEFAULT_SYMBOL);
@@ -169,6 +183,22 @@ export function StockPage({
         </a>
       </header>
 
+      <StockScreenPanel
+        error={screenError}
+        loading={screenLoading}
+        onList={onListScreenResults}
+        onRefresh={onRefreshScreen}
+        onSelectSymbol={(ticker) => {
+          const catalogItem = findUsStockCatalogItem(ticker);
+          if (!catalogItem) {
+            onNotify(`${ticker}의 거래소를 확인하지 못해 차트를 자동 선택하지 않았습니다.`, "error");
+            return;
+          }
+          setSelectedSymbol(`${catalogItem.market}:${catalogItem.ticker}`);
+        }}
+        screen={screen}
+      />
+
       <div className="stock-layout">
         <aside className="stock-watchlist" aria-label="관심 종목">
           <div className="stock-watchlist__heading">
@@ -267,7 +297,7 @@ export function StockPage({
                   setFailedChartUrl(null);
                 }}
                 referrerPolicy="no-referrer"
-                sandbox="allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox"
+                sandbox="allow-scripts allow-popups"
                 src={chartUrl}
                 title={`${selectedSymbol} TradingView 조회 전용 차트`}
               />

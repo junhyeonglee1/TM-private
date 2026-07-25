@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use crate::{Error, Result, TmHome};
 
-pub(crate) const SCHEMA_VERSION: i64 = 12;
+pub(crate) const SCHEMA_VERSION: i64 = 13;
 const INITIAL_MIGRATION: &str = include_str!("../migrations/0001_initial.sql");
 const CHANGE_REQUESTS_MIGRATION: &str = include_str!("../migrations/0002_change_requests.sql");
 const CHANGE_REQUESTS_STRICT_CAS_MIGRATION: &str =
@@ -29,6 +29,8 @@ const DEVICE_AUTH_MIGRATION: &str = include_str!("../migrations/0009_device_auth
 const TASK_REPORTS_MIGRATION: &str = include_str!("../migrations/0010_task_reports.sql");
 const CALENDAR_EVENTS_MIGRATION: &str = include_str!("../migrations/0011_calendar_events.sql");
 const STOCK_WATCHLIST_MIGRATION: &str = include_str!("../migrations/0012_stock_watchlist.sql");
+const STOCK_DAILY_SCREEN_MIGRATION: &str =
+    include_str!("../migrations/0013_stock_daily_screen.sql");
 const BUSY_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone)]
@@ -250,6 +252,18 @@ impl Database {
                 [now_utc()],
             )?;
             transaction.pragma_update(None, "user_version", 12_i64)?;
+            transaction.commit()?;
+        }
+        if current_version < 13 {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(STOCK_DAILY_SCREEN_MIGRATION)?;
+            transaction.execute(
+                "INSERT INTO schema_migrations(version, name, applied_at)
+                 VALUES (13, 'sp500-daily-stock-screen', ?1)",
+                [now_utc()],
+            )?;
+            transaction.pragma_update(None, "user_version", 13_i64)?;
             transaction.commit()?;
         }
         Ok(())

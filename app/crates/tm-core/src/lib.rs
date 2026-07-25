@@ -18,9 +18,11 @@ mod migration;
 mod model;
 mod mutation;
 mod scheduler;
+mod stock_screen;
 mod stock_watchlist;
 mod task_report;
 
+pub use ai_budget::{AiBudgetSettlementRecord, AiOperationBudgetStatus};
 pub use assistant_action::*;
 pub use backup::BackupArtifact;
 pub use calendar::*;
@@ -35,5 +37,6 @@ pub use migration::{MigrationDryRun, MigrationManifest, MigrationTableManifest};
 pub use model::*;
 pub use mutation::*;
 pub use scheduler::*;
+pub use stock_screen::*;
 pub use stock_watchlist::*;
 pub use task_report::{TaskReportCompletion, TaskReportRun, TaskReportStart};

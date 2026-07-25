@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { DataPage, TrashPage } from "./components/DataPages";
 import { ChangeRequestsPage } from "./components/ChangeRequestsPage";
@@ -24,6 +24,7 @@ import type {
   CreateWorkLogInput,
   DayEntryStatus,
   FinishSessionInput,
+  LatestStockScreen,
   NoteType,
   StartSessionInput,
   Task,
@@ -99,6 +100,10 @@ export function App({ api = defaultApi }: AppProps) {
   const [taskReport, setTaskReport] = useState<TaskReportResult | null>(null);
   const [taskReportLoading, setTaskReportLoading] = useState(false);
   const [costStatus, setCostStatus] = useState<CostStatus | null>(null);
+  const [stockScreen, setStockScreen] = useState<LatestStockScreen | null>(null);
+  const [stockScreenLoading, setStockScreenLoading] = useState(true);
+  const [stockScreenError, setStockScreenError] = useState<string | null>(null);
+  const stockScreenLoadGeneration = useRef(0);
 
   const loadSnapshot = useCallback(async () => {
     try {
@@ -129,6 +134,26 @@ export function App({ api = defaultApi }: AppProps) {
     const timer = window.setInterval(() => void loadCostStatus(), COST_REFRESH_INTERVAL_MS);
     return () => window.clearInterval(timer);
   }, [loadCostStatus]);
+
+  const loadStockScreen = useCallback(async () => {
+    const generation = ++stockScreenLoadGeneration.current;
+    setStockScreenLoading(true);
+    try {
+      const next = await api.getLatestStockScreen();
+      if (generation !== stockScreenLoadGeneration.current) return;
+      setStockScreen(next);
+      setStockScreenError(null);
+    } catch (error) {
+      if (generation !== stockScreenLoadGeneration.current) return;
+      setStockScreenError(errorMessage(error));
+    } finally {
+      if (generation === stockScreenLoadGeneration.current) setStockScreenLoading(false);
+    }
+  }, [api]);
+
+  useEffect(() => {
+    void loadStockScreen();
+  }, [loadStockScreen]);
 
   useEffect(() => {
     let active = true;
@@ -400,7 +425,7 @@ export function App({ api = defaultApi }: AppProps) {
       case "inbox":
         return <InboxPage />;
       case "today":
-        return <TodayPage onComplete={completeTask} onGenerateReport={generateTaskReport} onOpen={(task) => setSelectedTaskId(task.id)} onRateReport={rateTaskReport} onResolve={resolveDayEntry} report={taskReport} reportLoading={taskReportLoading} tasks={snapshot.tasks} today={snapshot.today} view={snapshot.todayView} />;
+        return <TodayPage onComplete={completeTask} onGenerateReport={generateTaskReport} onOpen={(task) => setSelectedTaskId(task.id)} onOpenStocks={() => navigate("stocks")} onRateReport={rateTaskReport} onResolve={resolveDayEntry} report={taskReport} reportLoading={taskReportLoading} stockScreen={stockScreen} stockScreenError={stockScreenError} stockScreenLoading={stockScreenLoading} tasks={snapshot.tasks} today={snapshot.today} view={snapshot.todayView} />;
       case "calendar":
         return <CalendarPage onCreate={api.createCalendarEvent} onDelete={api.deleteCalendarEvent} onLoad={api.getCalendarMonth} onNotify={notify} onUpdate={api.updateCalendarEvent} today={snapshot.today} />;
       case "projects":
@@ -414,7 +439,7 @@ export function App({ api = defaultApi }: AppProps) {
       case "notes":
         return <NotesPage notes={snapshot.notes} onCreate={createNote} onOpenTask={(task) => setSelectedTaskId(task.id)} onTrash={(noteId) => moveRecordToTrash(noteId, "note", "Note")} sessions={snapshot.recentSessions} tasks={snapshot.tasks} />;
       case "stocks":
-        return <StockPage onDelete={api.deleteStockWatchlistItem} onLoad={api.getStockWatchlist} onNotify={notify} onUpsert={api.upsertStockWatchlistItem} />;
+        return <StockPage onDelete={api.deleteStockWatchlistItem} onListScreenResults={api.listStockScreenResults} onLoad={api.getStockWatchlist} onNotify={notify} onRefreshScreen={loadStockScreen} onUpsert={api.upsertStockWatchlistItem} screen={stockScreen} screenError={stockScreenError} screenLoading={stockScreenLoading} />;
       case "search":
         return <SearchPage onOpenTask={(taskId) => setSelectedTaskId(taskId)} onSearch={(query) => api.search(query)} />;
       case "change-requests":

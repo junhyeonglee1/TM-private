@@ -132,6 +132,8 @@ pub(super) fn device_route_allowed(method: &Method, path: &str) -> bool {
             | "/api/v1/desktop/commands/update_calendar_event"
             | "/api/v1/desktop/commands/delete_calendar_event"
             | "/api/v1/desktop/commands/get_stock_watchlist"
+            | "/api/v1/desktop/commands/get_latest_stock_screen"
+            | "/api/v1/desktop/commands/list_stock_screen_results"
             | "/api/v1/desktop/commands/upsert_stock_watchlist_item"
             | "/api/v1/desktop/commands/delete_stock_watchlist_item"
     ) {
@@ -615,6 +617,14 @@ mod tests {
         assert!(device_route_allowed(
             &Method::POST,
             "/api/v1/desktop/commands/get_stock_watchlist"
+        ));
+        assert!(device_route_allowed(
+            &Method::POST,
+            "/api/v1/desktop/commands/get_latest_stock_screen"
+        ));
+        assert!(device_route_allowed(
+            &Method::POST,
+            "/api/v1/desktop/commands/list_stock_screen_results"
         ));
         assert!(device_route_allowed(
             &Method::POST,

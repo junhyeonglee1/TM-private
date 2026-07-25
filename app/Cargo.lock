@@ -4409,7 +4409,7 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tm-cli"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4420,7 +4420,7 @@ dependencies = [
 
 [[package]]
 name = "tm-core"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -4440,7 +4440,7 @@ dependencies = [
 
 [[package]]
 name = "tm-desktop"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -4462,7 +4462,7 @@ dependencies = [
 
 [[package]]
 name = "tm-server"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "axum",
  "chrono",

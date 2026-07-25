@@ -6,6 +6,10 @@
 
 ### Added
 
+- schema 13에 S&P 500 universe snapshot, split-adjusted 일봉 session, 5·21거래일 정량 screen 결과와 선택적 AI 요약 이력을 추가했다.
+- 무료 Alpaca Basic·DataHub 자료만 사용하고 기존 Railway service를 재사용하는 비용 우선 주식 screen을 Windows·모바일에 추가했다.
+- 주식 AI는 pinned `gpt-5.4-nano-2026-03-17`, 요청당 USD 0.01 reservation과 월 USD 2 기능별 내부 원장 한도에서 신규 호출을 차단하고, 모델에는 최대 40개 ticker·수익률만 전달한다.
+- 정량 숫자와 사용자 문구는 서버가 결정적으로 생성하고 raw OHLC·회사명·Task·Calendar·관심 종목은 OpenAI에 전달하지 않으며, 기능 gate 세 개는 최초 배포에서 모두 꺼진다.
 - schema 11 기반 개인 캘린더와 Windows·모바일 일정 추가·편집·삭제 화면을 추가했다.
 - 개인 일정과 납부일을 일회성, 매월 특정일, 매월 초일, 매월 말일로 반복 등록하고 선택적 종료일·시간·메모를 저장할 수 있다.
 - 매월 31일은 31일이 없는 달을 건너뛰고 매월 말일은 윤년을 포함한 실제 월말로 계산하며, optimistic version과 soft delete로 동시 수정을 보호한다.

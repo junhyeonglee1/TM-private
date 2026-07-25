@@ -149,11 +149,11 @@ try {
     $ops = Invoke-TmRequest -Client $client -Method ([System.Net.Http.HttpMethod]::Get) -Uri "$base/api/v1/ops/status" -Token $token
     Require-Status $ops 200 $stage
     $opsData = ($ops.Body | ConvertFrom-Json).data
-    if ([int]$opsData.database.schemaVersion -ne 12 -or
+    if ([int]$opsData.database.schemaVersion -ne 13 -or
         [string]$opsData.remoteBackup.status -ne 'succeeded' -or
-        [int]$opsData.remoteBackup.schemaVersion -ne 12 -or
+        [int]$opsData.remoteBackup.schemaVersion -ne 13 -or
         [string]$opsData.remoteBackup.integrityCheck -ne 'ok') {
-        throw 'Production DB and remote backup must both be healthy schema 12.'
+        throw 'Production DB and remote backup must both be healthy schema 13.'
     }
 
     $stage = 'pwa-security'
@@ -284,7 +284,7 @@ try {
     $result = [ordered]@{
         verifiedAtUtc = [DateTime]::UtcNow.ToString('o')
         baseUri = $base
-        schemaVersion = 12
+        schemaVersion = 13
         symbols = @('NASDAQ:AAPL', 'KRX:005930')
         desktopSync = $true
         mobileSync = $true

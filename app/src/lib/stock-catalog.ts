@@ -73,3 +73,13 @@ export const stockCatalogCount = (market: StockMarket): number =>
   catalog.counts[market];
 
 export const stockCatalogGeneratedAt = catalog.generatedAt;
+
+export const findUsStockCatalogItem = (ticker: string): StockCatalogItem | null => {
+  const normalizedTicker = normalize(ticker);
+  for (const market of ["NASDAQ", "NYSE", "AMEX"] as const) {
+    const item = (searchableByMarket.get(market) ?? [])
+      .find((candidate) => candidate.normalizedTicker === normalizedTicker);
+    if (item) return { market: item.market, ticker: item.ticker, name: item.name };
+  }
+  return null;
+};

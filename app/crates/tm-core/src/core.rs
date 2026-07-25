@@ -7,16 +7,17 @@ use rusqlite::{
 use serde_json::{Value, json};
 
 use crate::{
-    AiBudgetPolicy, AiBudgetReservation, AiBudgetStatus, AiTokenUsage, Attachment, BackupArtifact,
-    BackupInfo, ChangeRequest, ChangeRequestClaim, ChangeRequestEvent, ChecklistItem,
-    ChecklistMutationInput, CreateAttachmentInput, CreateChangeRequestInput, CreateLinkInput,
-    CreateNoteAggregateInput, CreateNoteInput, CreateProjectInput, CreateTaskAggregateInput,
-    CreateTaskInput, CreateWorkLogInput, DigestDelivery, DigestKind, DigestPreparation,
-    EndSessionInput, EntityLink, EntityType, Error, ExportArtifact, HealthReport, LinkTargetType,
-    MigrationDryRun, MigrationManifest, Note, NoteAggregate, NotePatch, NoteType, Project, Result,
-    SearchHit, SessionCompletion, SessionStatus, StartSessionInput, Tag, Task, TaskAggregate,
-    TaskDayEntry, TaskDayStatus, TaskEvent, TaskPatch, TaskReportCompletion, TaskReportRun,
-    TaskReportStart, TaskStatus, TmHome, TrashEntityType, TrashItem, UpdateChangeRequestInput,
+    AiBudgetPolicy, AiBudgetReservation, AiBudgetSettlementRecord, AiBudgetStatus,
+    AiOperationBudgetStatus, AiTokenUsage, Attachment, BackupArtifact, BackupInfo, ChangeRequest,
+    ChangeRequestClaim, ChangeRequestEvent, ChecklistItem, ChecklistMutationInput,
+    CreateAttachmentInput, CreateChangeRequestInput, CreateLinkInput, CreateNoteAggregateInput,
+    CreateNoteInput, CreateProjectInput, CreateTaskAggregateInput, CreateTaskInput,
+    CreateWorkLogInput, DigestDelivery, DigestKind, DigestPreparation, EndSessionInput, EntityLink,
+    EntityType, Error, ExportArtifact, HealthReport, LinkTargetType, MigrationDryRun,
+    MigrationManifest, Note, NoteAggregate, NotePatch, NoteType, Project, Result, SearchHit,
+    SessionCompletion, SessionStatus, StartSessionInput, Tag, Task, TaskAggregate, TaskDayEntry,
+    TaskDayStatus, TaskEvent, TaskPatch, TaskReportCompletion, TaskReportRun, TaskReportStart,
+    TaskStatus, TmHome, TrashEntityType, TrashItem, UpdateChangeRequestInput,
     UpdateTaskAggregateInput, WorkLog, WorkSession, ai_budget, backup, change_request,
     database::{Database, SCHEMA_VERSION, new_id, now_utc, today_seoul},
     digest,
@@ -1178,6 +1179,51 @@ impl TmCore {
             maximum_cost_microusd,
             policy,
         )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn reserve_ai_budget_with_operation_limit(
+        &self,
+        request_id: &str,
+        provider: &str,
+        model: &str,
+        operation: &str,
+        maximum_cost_microusd: u64,
+        policy: AiBudgetPolicy,
+        operation_hard_limit_microusd: u64,
+    ) -> Result<AiBudgetReservation> {
+        ai_budget::reserve_with_operation_limit(
+            &self.database,
+            request_id,
+            provider,
+            model,
+            operation,
+            maximum_cost_microusd,
+            policy,
+            Some(operation_hard_limit_microusd),
+        )
+    }
+
+    pub fn ai_operation_budget_status(
+        &self,
+        operation: &str,
+        hard_limit_microusd: u64,
+    ) -> Result<AiOperationBudgetStatus> {
+        ai_budget::operation_status(&self.database, operation, hard_limit_microusd)
+    }
+
+    pub fn get_ai_budget_reservation(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<AiBudgetReservation>> {
+        ai_budget::reservation(&self.database, request_id)
+    }
+
+    pub fn get_ai_budget_settlement(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<AiBudgetSettlementRecord>> {
+        ai_budget::settlement(&self.database, request_id)
     }
 
     pub fn settle_ai_budget(

@@ -3,9 +3,9 @@ use std::{env, error::Error, io};
 use tm_core::{TmCore, TmHome};
 use tm_server::{
     IncidentMode, MaintenanceMode, ServerConfig, ServerProfile,
-    build_cloud_authenticated_router_with_feature_controls_and_costs, build_cloud_bootstrap_router,
-    build_cloud_import_router, build_router_with_openai, costs::RailwayUsageClient,
-    openai::OpenAiClient, scheduler,
+    build_cloud_authenticated_router_with_feature_controls_costs_and_stock,
+    build_cloud_bootstrap_router, build_cloud_import_router, build_router_with_openai,
+    costs::RailwayUsageClient, openai::OpenAiClient, scheduler, stock::StockDataClient,
 };
 
 #[tokio::main]
@@ -20,6 +20,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         && config.maintenance_mode == MaintenanceMode::Disabled
         && config.incident_mode == IncidentMode::Normal;
     let scheduler_core = core.clone();
+    let mut scheduler_runtime = None;
 
     tracing::info!(
         profile = %config.profile,
@@ -43,7 +44,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     let openai = OpenAiClient::new(config.openai).map_err(io::Error::other)?;
                     let railway_usage =
                         RailwayUsageClient::new(config.railway_usage).map_err(io::Error::other)?;
-                    build_cloud_authenticated_router_with_feature_controls_and_costs(
+                    let stock_config = config.stock;
+                    let stock_data =
+                        StockDataClient::new(stock_config.clone()).map_err(io::Error::other)?;
+                    if scheduler_enabled {
+                        scheduler_runtime =
+                            Some((stock_data, stock_config.clone(), openai.clone()));
+                    }
+                    build_cloud_authenticated_router_with_feature_controls_costs_and_stock(
                         core,
                         auth,
                         openai,
@@ -51,6 +59,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         config.ai_enabled,
                         config.task_report_enabled,
                         railway_usage,
+                        stock_config,
                     )
                 }
                 MaintenanceMode::Import => build_cloud_import_router(core, auth),
@@ -58,7 +67,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     };
 
-    let scheduler_handle = scheduler_enabled.then(|| scheduler::spawn(scheduler_core));
+    let scheduler_handle = scheduler_runtime.map(|(stock_data, stock_config, openai)| {
+        scheduler::spawn(scheduler_core, stock_data, stock_config, openai)
+    });
     let result = axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal())
         .await;

@@ -13,12 +13,16 @@ import type {
   DayEntryStatus,
   ExportResult,
   FinishSessionInput,
+  LatestStockScreen,
+  ListStockScreenResultsInput,
   Note,
   NoteType,
   Project,
   SearchResult,
   StartSessionInput,
   StockWatchlistItem,
+  StockScreenResult,
+  StockScreenResultPage,
   Task,
   TaskDayEntry,
   TrashItem,
@@ -538,11 +542,138 @@ const sampleCalendarEvents = (today: string): CalendarEvent[] => {
   ];
 };
 
+const sampleStockScreen = (today: string): {
+  latest: LatestStockScreen;
+  results: StockScreenResult[];
+} => {
+  const marketDate = shiftDate(today, -1);
+  const completedAt = `${marketDate}T21:30:00Z`;
+  const base = (
+    ticker: string,
+    displayName: string,
+    exchange: "NASDAQ" | "NYSE" | "AMEX",
+    horizon: StockScreenResult["horizon"],
+    direction: StockScreenResult["direction"],
+    band: StockScreenResult["band"],
+    returnPct: number,
+  ): StockScreenResult => ({
+    runId: "stock-screen-sample",
+    ticker,
+    displayName,
+    sector: exchange === "NASDAQ" ? "Information Technology" : "Industrials",
+    horizon,
+    direction,
+    band,
+    currentDate: marketDate,
+    currentCloseMicrousd: Math.round(100_000_000 * (1 + returnPct / 100)),
+    baselineDate: shiftDate(marketDate, horizon === 5 ? -7 : -30),
+    baselineCloseMicrousd: 100_000_000,
+    returnMicros: Math.round(returnPct * 1_000_000),
+    returnPct,
+    universeSha256: "a".repeat(64),
+    marketDataSha256: "b".repeat(64),
+  });
+  const results: StockScreenResult[] = [
+    base("NVDA", "NVIDIA Corporation", "NASDAQ", 5, "up", "up_10_to_20", 14.3),
+    base("AMD", "Advanced Micro Devices, Inc.", "NASDAQ", 5, "up", "up_10_to_20", 11.2),
+    base("META", "Meta Platforms, Inc.", "NASDAQ", 5, "up", "up_10_to_20", 10.08),
+    base("TSLA", "Tesla, Inc.", "NASDAQ", 5, "down", "down_20_plus", -22.4),
+    base("F", "Ford Motor Company", "NYSE", 21, "down", "down_10_to_20", -13.8),
+    base("PLTR", "Palantir Technologies Inc.", "NASDAQ", 21, "up", "up_20_plus", 25.3),
+  ];
+  const coverage = {
+    currentCovered: 503,
+    total: 503,
+    currentPct: 100,
+    baseline5Covered: 501,
+    baseline5Pct: 99.6,
+    baseline21Covered: 500,
+    baseline21Pct: 99.4,
+  };
+  return {
+    latest: {
+      latestSuccess: {
+        runId: "stock-screen-sample",
+        marketDate,
+        completedAt,
+        coverage,
+        universe: {
+          name: "S&P 500 구성종목",
+          sourceUrl: "https://github.com/datasets/s-and-p-500-companies",
+          revision: "sample-revision",
+          asOfDate: marketDate,
+          memberCount: 503,
+          ageDays: 1,
+          attributionText: "S&P 500 구성종목 공개 데이터 · DataHub/Wikipedia",
+        },
+        counts: {
+          up5TenToTwenty: 3,
+          up5TwentyPlus: 0,
+          down5TenToTwenty: 0,
+          down5TwentyPlus: 1,
+          up21TenToTwenty: 0,
+          up21TwentyPlus: 1,
+          down21TenToTwenty: 1,
+          down21TwentyPlus: 0,
+        },
+        top3: results.slice(0, 3),
+        ai: {
+          id: "stock-ai-sample",
+          screenRunId: "stock-screen-sample",
+          status: "succeeded",
+          promptVersion: "stock-daily-v1",
+          model: "gpt-5.4-nano-2026-03-17",
+          responseId: "resp_stock_sample",
+          upstreamRequestId: null,
+          requestStartedAt: completedAt,
+          result: {
+            headline: "단기 상승 종목이 하락 종목보다 많았습니다.",
+            bullets: [
+              "5거래일 10~20% 상승 구간에 3개 종목이 있습니다.",
+              "수치는 분할 조정 종가로 계산했으며 투자 추천이 아닙니다.",
+            ],
+            notableSymbols: ["NVDA", "AMD"],
+          },
+          inputTokens: 900,
+          cachedInputTokens: 0,
+          outputTokens: 110,
+          totalTokens: 1_010,
+          estimatedCostMicrousd: 2_800,
+          failureCode: null,
+          createdAt: completedAt,
+          completedAt,
+        },
+      },
+      latestAttempt: {
+        runId: "stock-screen-sample",
+        status: "succeeded",
+        marketDate,
+        startedAt: `${marketDate}T21:28:00Z`,
+        completedAt,
+        failureCode: null,
+        coverage,
+      },
+      aiBudget: {
+        budgetMonth: today.slice(0, 7),
+        operation: "stock_daily_report",
+        hardLimitMicrousd: 2_000_000,
+        committedMicrousd: 2_800,
+        remainingMicrousd: 1_997_200,
+        hardStopReached: false,
+      },
+      stale: false,
+      stalenessReason: null,
+    },
+    results,
+  };
+};
+
 export class MemoryTransport implements CommandTransport {
   private snapshot = buildSample();
   private taskReport: TaskReportResult | null = null;
   private calendarEvents = sampleCalendarEvents(this.snapshot.today);
   private stockWatchlist: StockWatchlistItem[] = [];
+  private stockScreen = sampleStockScreen(this.snapshot.today);
 
   async invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
     const result = this.handle(command, args);
@@ -587,6 +718,10 @@ export class MemoryTransport implements CommandTransport {
         return this.upsertStockWatchlistItem(args.input as UpsertStockWatchlistItemInput);
       case "delete_stock_watchlist_item":
         return this.deleteStockWatchlistItem(textValue(args.symbol));
+      case "get_latest_stock_screen":
+        return this.stockScreen.latest;
+      case "list_stock_screen_results":
+        return this.listStockScreenResults(args as unknown as ListStockScreenResultsInput);
       case "create_project":
         return this.createProject(textValue(args.name), textValue(args.description));
       case "create_task":
@@ -865,6 +1000,28 @@ export class MemoryTransport implements CommandTransport {
   private deleteStockWatchlistItem(symbol: string): null {
     this.stockWatchlist = this.stockWatchlist.filter((item) => item.symbol !== symbol);
     return null;
+  }
+
+  private listStockScreenResults(
+    input: ListStockScreenResultsInput,
+  ): StockScreenResultPage {
+    const limit = Math.min(Math.max(Number(input.limit ?? 50), 1), 50);
+    const offset = input.cursor ? Number.parseInt(input.cursor, 10) : 0;
+    const resultBand = input.band
+      ? `${input.direction}_${input.band === "ten_to_twenty" ? "10_to_20" : "20_plus"}`
+      : null;
+    const matching = this.stockScreen.results.filter((item) =>
+      item.horizon === Number(input.horizon)
+      && item.direction === input.direction
+      && (!resultBand || item.band === resultBand));
+    const items = matching.slice(offset, offset + limit);
+    return {
+      items,
+      nextCursor: offset + items.length < matching.length
+        ? String(offset + items.length)
+        : null,
+      total: matching.length,
+    };
   }
 
   private createProject(name: string, description: string): string {

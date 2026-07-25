@@ -36,6 +36,8 @@ STEP 17은 schema 10의 첫 전용 비서 기능으로 `오늘의 Task AI 리포
 
 조회 전용 주식 차트는 schema 12의 `stock_watchlist_items`에 시장·티커·표시 이름만 저장한다. Windows와 모바일이 최대 50개의 관심 종목을 같은 cloud 원본에서 읽고 쓰며, 시세와 차트는 TM origin과 분리된 opaque `data:` sandbox iframe 안의 TradingView 위젯이 직접 가져온다. TM은 가격 데이터를 저장하거나 OpenAI에 관심 종목을 전달하지 않고, 계좌 연결·주문·추천도 제공하지 않는다.
 
+schema 13의 비용 우선 S&P 500 일일 스크리닝은 기존 Railway service 안에서 DataHub PDDL 구성 종목과 Alpaca Basic 일봉으로 5/21 session 수익률을 결정론적으로 계산한다. 정량 결과가 primary artifact이며 선택적 `gpt-5.4-nano-2026-03-17` 요약은 월 `$2` 내부 원장 한도에서 신규 호출을 차단한다. 세 stock gate는 기본적으로 꺼져 있고 provider 사용 범위의 서면 확인 전에는 production network 호출을 하지 않는다.
+
 상단 비용 상태는 별도 OpenAI Admin key 없이 TM의 월간 AI 비용 원장을 사용하고, Railway workspace billing usage는 10분 캐시된 공식 GraphQL 조회로 보완한다. Windows와 모바일에는 비용/한도 두 값만 표시하며 외부 provider 장애가 핵심 기능으로 전파되지 않는다.
 
 - [수동 승인 개선 요청 흐름](change-request-workflow.md)
@@ -62,6 +64,7 @@ STEP 17은 schema 10의 첫 전용 비서 기능으로 `오늘의 Task AI 리포
 - [상단 비용 상태 운영 절차](../operations/cost-status.md)
 - [개인 캘린더 운영·사용 절차](../operations/personal-calendar.md)
 - [조회 전용 주식 차트 운영·사용 절차](../operations/read-only-stock-charts.md)
+- [비용 우선 S&P 500 일일 스크리닝 최종안](../operations/cost-first-stock-screening.md)
 - [STEP 5 단일 사용자 인증](../operations/single-user-auth-setup.md)
 
 기본 홈은 `C:\Users\tkfk0\Desktop\codex\TM`이다. 테스트는 프로세스별 임시 `TM_HOME`을 사용한다. 모든 저장 시각은 UTC RFC 3339로 기록하고, 사용자 날짜는 `Asia/Seoul`로 계산한다.

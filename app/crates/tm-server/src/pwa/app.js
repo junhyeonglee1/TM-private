@@ -14,7 +14,14 @@ const state = {
   stockCatalog: null,
   selectedStockCandidate: null,
   stockSearchActiveIndex: 0,
-  selectedStockSymbol: "NASDAQ:AAPL"
+  selectedStockSymbol: "NASDAQ:AAPL",
+  stockScreen: null,
+  stockScreenError: null,
+  stockScreenResults: [],
+  stockScreenNextCursor: null,
+  stockScreenResultTotal: 0,
+  stockScreenLoadGeneration: 0,
+  stockScreenResultGeneration: 0
 };
 const costRefreshIntervalMs = 5 * 60 * 1000;
 const defaultApiHardLimitMicrousd = 20_000_000;
@@ -217,6 +224,7 @@ function showApp(device) {
   renderDevice(device);
   startCostRefresh();
   void loadTaskReport();
+  void loadStockScreen();
 }
 
 async function boot() {
@@ -303,6 +311,7 @@ function selectTab(tab) {
   if (tab === "stocks") {
     void loadStockCatalog();
     void loadStockWatchlist();
+    void loadStockScreen();
   }
   if (tab === "tasks") void loadTasks();
   if (tab === "notes") void loadNotes();
@@ -344,6 +353,330 @@ function stockWidgetUrl(symbol, watchlist) {
   return `https://www.tradingview-widget.com/embed-widget/advanced-chart/?locale=kr#${encodeURIComponent(JSON.stringify(configuration))}`;
 }
 
+function formatStockReturn(value) {
+  const number = Number(value);
+  return `${number > 0 ? "+" : ""}${number.toFixed(2)}%`;
+}
+
+function formatStockPrice(microusd) {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  }).format(Number(microusd) / 1_000_000);
+}
+
+function stockAttemptMessage(screen) {
+  const status = screen?.latestAttempt?.status;
+  if (status === "started") return "최신 미국 시장 데이터를 확인하고 있습니다.";
+  if (status === "no_candidates") return "10% 이상 움직인 종목이 없어 AI를 호출하지 않았습니다.";
+  if (status === "upstream_unavailable") return "시장 데이터 제공처에 연결하지 못했습니다. 이전 성공 결과를 유지합니다.";
+  if (status === "coverage_failed") return "필수 종목의 98%를 확인하지 못해 이번 결과를 발행하지 않았습니다.";
+  if (status === "failed") return "이번 분석을 완료하지 못했습니다.";
+  return null;
+}
+
+function stockStalenessMessage(reason) {
+  if (reason === "first_run_pending") return "첫 시장 데이터 수집과 검증을 기다리고 있습니다.";
+  if (reason === "latest_attempt_started") return "최신 미국 시장 데이터를 확인하는 동안 이전 성공 결과를 표시합니다.";
+  if (reason === "latest_attempt_succeeded") return "최신 분석은 끝났지만 기대 시장일 확인이 완료되지 않았습니다.";
+  if (reason === "latest_attempt_no_candidates") return "최신 시장일에는 10% 이상 움직인 종목이 없어 AI를 호출하지 않았습니다.";
+  if (reason === "latest_attempt_coverage_failed") return "필수 종목의 98%를 확인하지 못해 이전 성공 결과를 표시합니다.";
+  if (reason === "latest_attempt_upstream_unavailable") return "시장 데이터 제공처에 연결하지 못해 이전 성공 결과를 표시합니다.";
+  if (reason === "latest_attempt_failed") return "최신 분석을 완료하지 못해 이전 성공 결과를 표시합니다.";
+  if (reason === "latest_success_before_expected_market_date") return "예상된 최신 미국 시장일 결과가 없어 이전 성공 결과를 표시합니다.";
+  return "최신 확정 결과가 없어 이전 성공 결과를 표시합니다.";
+}
+
+function stockAiResult(ai) {
+  const result = ai?.result;
+  if (!result || typeof result !== "object" || Array.isArray(result)) return null;
+  return {
+    headline: typeof result.headline === "string" ? result.headline : null,
+    bullets: Array.isArray(result.bullets)
+      ? result.bullets.filter((item) => typeof item === "string")
+      : []
+  };
+}
+
+function stockFilterCount(summary) {
+  if (!summary) return 0;
+  const horizon = byId("stock-screen-horizon").value;
+  const direction = byId("stock-screen-direction").value;
+  const band = byId("stock-screen-band").value === "ten_to_twenty" ? "TenToTwenty" : "TwentyPlus";
+  return Number(summary.counts[`${direction}${horizon}${band}`] || 0);
+}
+
+function stockAiStatus(ai, budget) {
+  if (budget?.hardStopReached) return "AI 월 예산 도달 · 숫자 결과만 표시";
+  if (!ai) return "AI 호출 없음";
+  const failureCode = String(ai.failureCode || "").toLocaleLowerCase("en-US");
+  if (failureCode.includes("budget_blocked")) return "AI 월 예산 도달 · 숫자 결과만 표시";
+  if (failureCode.includes("disabled")) return "AI 요약 꺼짐 · 숫자 결과만 표시";
+  if (ai.status === "started") return "AI 요약 준비 중";
+  if (ai.status === "succeeded") return "AI 요약 완료";
+  if (ai.status === "failed") return "AI 요약 실패 · 수치 결과는 정상";
+  if (ai.status === "ai_uncertain") return "AI 결과 불명확 · 자동 재시도 안 함";
+  return "AI 상태 확인 필요";
+}
+
+function renderStockScreenBrief() {
+  const root = byId("stock-screen-brief");
+  const content = byId("stock-screen-brief-content");
+  if (!root || !content) return;
+  root.setAttribute("aria-busy", "false");
+  clear(content);
+  const summary = state.stockScreen?.latestSuccess;
+  if (!summary) {
+    const message = state.stockScreenError
+      || (state.stockScreen?.stalenessReason
+        ? stockStalenessMessage(state.stockScreen.stalenessReason)
+        : null)
+      || stockAttemptMessage(state.stockScreen)
+      || "아직 발행된 분석 결과가 없습니다.";
+    content.append(text("p", message, state.stockScreenError ? "empty stock-screen-error" : "empty"));
+    return;
+  }
+  const meta = text("div", "", "stock-screen-brief-meta");
+  meta.append(
+    text("strong", `${summary.marketDate} 미국 시장 확정 종가`),
+    text("small", `${summary.coverage.currentCovered}/${summary.coverage.total} 종목${state.stockScreenError ? " · 연결 오류 시 저장된 결과" : state.stockScreen.stale ? " · 이전 성공 결과" : ""}`)
+  );
+  content.append(meta);
+  if (state.stockScreenError) {
+    const refreshError = text("p", `서버 새로고침에 실패해 마지막으로 불러온 결과를 표시합니다. ${state.stockScreenError}`, "stock-screen-notice stock-screen-error");
+    refreshError.setAttribute("role", "alert");
+    content.append(refreshError);
+  }
+  const notice = !state.stockScreenError && state.stockScreen.stale
+    ? stockStalenessMessage(state.stockScreen.stalenessReason)
+    : !state.stockScreenError ? stockAttemptMessage(state.stockScreen) : null;
+  if (notice) content.append(text("p", notice, "stock-screen-notice"));
+  const list = document.createElement("ol");
+  list.className = "stock-screen-brief-list";
+  summary.top3.slice(0, 3).forEach((item) => {
+    const row = document.createElement("li");
+    row.append(
+      text("span", item.direction === "up" ? "↑ 상승" : "↓ 하락"),
+      text("strong", item.displayName),
+      text("em", formatStockReturn(item.returnPct))
+    );
+    list.append(row);
+  });
+  if (list.childElementCount) content.append(list);
+  else content.append(text("p", "10% 이상 움직인 종목이 없습니다.", "empty"));
+  content.append(text("small", "가격 변화만 계산하며 투자 추천이나 예측이 아닙니다.", "stock-screen-disclaimer"));
+}
+
+function renderStockScreenResults(loading = false) {
+  const container = byId("stock-screen-results");
+  const more = byId("stock-screen-more");
+  if (!container || !more) return;
+  clear(container);
+  const horizon = byId("stock-screen-horizon").value;
+  const direction = byId("stock-screen-direction").value === "up" ? "상승" : "하락";
+  const band = byId("stock-screen-band").value === "ten_to_twenty"
+    ? "10% 이상 20% 미만"
+    : "20% 이상";
+  container.append(text(
+    "p",
+    `${horizon}거래일 ${direction} ${band} 결과 ${state.stockScreenResults.length.toLocaleString("ko-KR")}개 표시`,
+    "sr-only"
+  ));
+  more.classList.toggle("hidden", !state.stockScreenNextCursor);
+  more.disabled = loading;
+  if (loading && !state.stockScreenResults.length) {
+    container.append(text("p", "종목 목록을 불러오는 중입니다.", "empty"));
+    return;
+  }
+  if (!state.stockScreenResults.length) {
+    const expected = stockFilterCount(state.stockScreen?.latestSuccess);
+    container.append(text(
+      "p",
+      expected > 0
+        ? "조건 집계는 있지만 서버가 표시할 종목을 반환하지 않았습니다."
+        : "선택한 조건에 해당하는 종목이 없습니다.",
+      "empty"
+    ));
+    return;
+  }
+  const list = document.createElement("ol");
+  state.stockScreenResults.forEach((item) => {
+    const row = document.createElement("li");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.setAttribute("aria-label", `${item.displayName} ${formatStockReturn(item.returnPct)}, 차트에서 보기`);
+    const movement = text("span", "", `stock-screen-move ${item.direction}`);
+    movement.append(
+      text("strong", item.direction === "up" ? "↑ 상승" : "↓ 하락"),
+      text("em", formatStockReturn(item.returnPct))
+    );
+    const identity = text("span", "", "stock-screen-identity");
+    identity.append(text("strong", item.displayName), text("small", `${item.ticker}${item.sector ? ` · ${item.sector}` : ""} · ${item.horizon}거래일`));
+    const price = text("span", "", "stock-screen-prices");
+    price.append(
+      text("strong", formatStockPrice(item.currentCloseMicrousd)),
+      text("small", `${item.baselineDate} ${formatStockPrice(item.baselineCloseMicrousd)}`)
+    );
+    button.append(movement, identity, price, text("span", "›", "stock-screen-chevron"));
+    button.addEventListener("click", () => {
+      const catalogItem = state.stockCatalog?.items.find((candidate) =>
+        candidate.market !== "KRX" && candidate.ticker === item.ticker);
+      if (!catalogItem) {
+        toast(`${item.ticker}의 거래소를 확인하지 못해 차트를 자동 선택하지 않았습니다.`);
+        return;
+      }
+      state.selectedStockSymbol = `${catalogItem.market}:${catalogItem.ticker}`;
+      renderStockWatchlist();
+      renderStockChart();
+      byId("stock-chart-container").scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+    row.append(button);
+    list.append(row);
+  });
+  container.append(list);
+}
+
+function renderStockScreen() {
+  const panel = byId("stock-screen-panel");
+  const status = byId("stock-screen-status");
+  if (!panel || !status) return;
+  panel.setAttribute("aria-busy", "false");
+  clear(status);
+  const summary = state.stockScreen?.latestSuccess;
+  if (!summary) {
+    const message = state.stockScreenError
+      || (state.stockScreen?.stalenessReason
+        ? stockStalenessMessage(state.stockScreen.stalenessReason)
+        : null)
+      || stockAttemptMessage(state.stockScreen)
+      || "첫 결과를 기다리고 있습니다.";
+    status.append(text("p", message, state.stockScreenError ? "empty stock-screen-error" : "empty"));
+    renderStockScreenResults(false);
+    return;
+  }
+  const meta = text("div", "", "stock-screen-meta");
+  const badge = text(
+    "span",
+    state.stockScreenError ? "연결 오류 · 저장된 결과" : state.stockScreen.stale ? "이전 성공 결과" : "최신 확정 결과",
+    (state.stockScreenError || state.stockScreen.stale) ? "stock-screen-badge warning" : "stock-screen-badge"
+  );
+  const market = text("div");
+  market.append(
+    badge,
+    text("strong", `${summary.marketDate} 미국 시장`),
+    text("small", `현재 ${Number(summary.coverage.currentPct).toFixed(1)}% · 5일 ${Number(summary.coverage.baseline5Pct).toFixed(1)}% · 21일 ${Number(summary.coverage.baseline21Pct).toFixed(1)}%`)
+  );
+  const universe = text("div");
+  const source = document.createElement("a");
+  source.href = summary.universe.sourceUrl;
+  source.rel = "noopener noreferrer";
+  source.target = "_blank";
+  source.textContent = `출처·기준일 ${summary.universe.asOfDate}`;
+  universe.append(
+    text("span", summary.universe.name),
+    text("strong", `${Number(summary.universe.memberCount).toLocaleString("ko-KR")}개 종목`),
+    source,
+    text("small", summary.universe.attributionText || "구성종목 출처는 위 링크에서 확인")
+  );
+  meta.append(market, universe);
+  status.append(meta);
+  if (state.stockScreenError) {
+    const refreshError = text("p", `서버 새로고침에 실패해 마지막으로 불러온 결과를 표시합니다. ${state.stockScreenError}`, "stock-screen-notice stock-screen-error");
+    refreshError.setAttribute("role", "alert");
+    status.append(refreshError);
+  }
+  const notice = !state.stockScreenError && state.stockScreen.stale
+    ? stockStalenessMessage(state.stockScreen.stalenessReason)
+    : !state.stockScreenError ? stockAttemptMessage(state.stockScreen) : null;
+  if (notice) status.append(text("p", notice, "stock-screen-notice"));
+  const ai = text("div", "", "stock-screen-ai");
+  const result = stockAiResult(summary.ai);
+  const aiText = text("div");
+  aiText.append(text("span", stockAiStatus(summary.ai, state.stockScreen.aiBudget)));
+  if (result?.headline) aiText.append(text("strong", result.headline));
+  ai.append(
+    aiText,
+    text(
+      "small",
+      `${summary.ai?.model || "AI 호출 없음"} · 이번 요약 $${(Number(summary.ai?.estimatedCostMicrousd || 0) / 1_000_000).toFixed(4)} · 이번 달 $${(Number(state.stockScreen.aiBudget?.committedMicrousd || 0) / 1_000_000).toFixed(4)} / $${(Number(state.stockScreen.aiBudget?.hardLimitMicrousd || 2_000_000) / 1_000_000).toFixed(0)}`
+    )
+  );
+  if (result?.bullets.length) {
+    const bullets = document.createElement("ul");
+    result.bullets.forEach((bullet) => bullets.append(text("li", bullet)));
+    ai.append(bullets);
+  }
+  status.append(ai);
+  const count = stockFilterCount(summary);
+  const countNode = text("p", `${count.toLocaleString("ko-KR")}개`, "stock-screen-count");
+  status.append(countNode);
+  renderStockScreenResults(false);
+}
+
+async function loadStockScreenResults(append = false) {
+  const summary = state.stockScreen?.latestSuccess;
+  if (!summary) return renderStockScreenResults(false);
+  const runId = summary.runId;
+  const generation = ++state.stockScreenResultGeneration;
+  const cursor = append ? state.stockScreenNextCursor : undefined;
+  if (!append) {
+    state.stockScreenResults = [];
+    state.stockScreenNextCursor = null;
+    state.stockScreenResultTotal = 0;
+  }
+  renderStockScreenResults(true);
+  try {
+    const page = await stockCommand("list_stock_screen_results", {
+      runId,
+      horizon: Number(byId("stock-screen-horizon").value),
+      direction: byId("stock-screen-direction").value,
+      band: byId("stock-screen-band").value,
+      cursor,
+      limit: 50
+    });
+    if (
+      generation !== state.stockScreenResultGeneration
+      || state.stockScreen?.latestSuccess?.runId !== runId
+    ) return;
+    state.stockScreenResults = append
+      ? state.stockScreenResults.concat(page.items)
+      : page.items;
+    state.stockScreenNextCursor = page.nextCursor;
+    state.stockScreenResultTotal = Number(page.total || page.items.length);
+    renderStockScreenResults(false);
+  } catch (error) {
+    if (generation !== state.stockScreenResultGeneration) return;
+    if (!append) state.stockScreenResults = [];
+    renderStockScreenResults(false);
+    const message = text("p", `등락 종목을 불러오지 못했습니다. ${error.message}`, "empty stock-screen-error");
+    byId("stock-screen-results").prepend(message);
+  }
+}
+
+async function loadStockScreen() {
+  const generation = ++state.stockScreenLoadGeneration;
+  const previousRunId = state.stockScreen?.latestSuccess?.runId || null;
+  byId("stock-screen-brief")?.setAttribute("aria-busy", "true");
+  byId("stock-screen-panel")?.setAttribute("aria-busy", "true");
+  try {
+    const next = await stockCommand("get_latest_stock_screen");
+    if (generation !== state.stockScreenLoadGeneration) return;
+    state.stockScreen = next;
+    state.stockScreenError = null;
+  } catch (error) {
+    if (generation !== state.stockScreenLoadGeneration) return;
+    state.stockScreenError = `최근 시장 결과를 확인하지 못했습니다. ${error.message}`;
+  }
+  renderStockScreenBrief();
+  renderStockScreen();
+  const nextRunId = state.stockScreen?.latestSuccess?.runId || null;
+  if (nextRunId && (nextRunId !== previousRunId || !state.stockScreenResults.length)) {
+    await loadStockScreenResults(false);
+  }
+}
+
 function renderStockChart() {
   const container = byId("stock-chart-container");
   if (!container) return;
@@ -371,7 +704,7 @@ function renderStockChart() {
   frame.className = "stock-chart-frame";
   frame.title = `${state.selectedStockSymbol} TradingView 조회 전용 차트`;
   frame.referrerPolicy = "no-referrer";
-  frame.setAttribute("sandbox", "allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox");
+  frame.setAttribute("sandbox", "allow-scripts allow-popups");
   frame.src = stockWidgetUrl(
     state.selectedStockSymbol,
     state.stockWatchlist.map((item) => item.symbol)
@@ -575,6 +908,32 @@ async function loadStockWatchlist() {
     toast(`관심 종목을 불러오지 못했습니다. ${error.message}`);
   }
 }
+
+byId("stock-screen-open").addEventListener("click", () => selectTab("stocks"));
+byId("stock-screen-refresh").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  setBusy(button, true, "새로고침");
+  try {
+    await loadStockScreen();
+  } finally {
+    setBusy(button, false, "새로고침");
+  }
+});
+["stock-screen-horizon", "stock-screen-direction", "stock-screen-band"].forEach((id) => {
+  byId(id).addEventListener("change", () => {
+    renderStockScreen();
+    void loadStockScreenResults(false);
+  });
+});
+byId("stock-screen-more").addEventListener("click", async (event) => {
+  const button = event.currentTarget;
+  setBusy(button, true, "다음 50개");
+  try {
+    await loadStockScreenResults(true);
+  } finally {
+    setBusy(button, false, "다음 50개");
+  }
+});
 
 byId("stock-market").addEventListener("change", (event) => {
   const krx = event.currentTarget.value === "KRX";

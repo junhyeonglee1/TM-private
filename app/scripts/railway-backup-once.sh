@@ -49,9 +49,78 @@ case "$schema_version" in
         exit 1
         ;;
 esac
-if [ "$schema_version" -lt 1 ] || [ "$schema_version" -gt 12 ]; then
+if [ "$schema_version" -lt 1 ] || [ "$schema_version" -gt 13 ]; then
     echo "event=tm_backup_failed reason=unsupported_schema_version" >&2
     exit 1
+fi
+migration_summary="$(
+    sqlite3 -readonly "$snapshot" \
+        "SELECT COUNT(*) || '|' || COALESCE(MIN(version), 0) || '|' ||
+                COALESCE(MAX(version), 0) || '|' || COUNT(DISTINCT version)
+         FROM schema_migrations;"
+)"
+expected_migration_summary="$schema_version|1|$schema_version|$schema_version"
+if [ "$migration_summary" != "$expected_migration_summary" ]; then
+    echo "event=tm_backup_failed reason=incomplete_migration_ledger" >&2
+    exit 1
+fi
+if [ "$schema_version" -eq 13 ]; then
+    required_tables='schema_migrations
+projects
+tasks
+checklist_items
+tags
+task_tags
+task_day_entries
+task_events
+work_sessions
+session_tasks
+worklogs
+notes
+calendar_events
+stock_watchlist_items
+stock_universe_snapshots
+stock_universe_members
+stock_market_data_batches
+stock_market_sessions
+stock_daily_bars
+stock_screen_runs
+stock_screen_results
+stock_ai_reports
+task_report_runs
+task_report_feedback
+entity_links
+attachments
+digest_deliveries
+change_requests
+change_request_events
+mutation_idempotency_records
+mutation_audit_events
+ai_budget_ledger
+assistant_action_requests
+assistant_action_events
+assistant_memories
+assistant_memory_sources
+assistant_memory_events
+scheduler_jobs
+scheduler_runs
+scheduler_attempts
+scheduler_effects
+device_pairings
+registered_devices
+device_auth_events
+app_state'
+    for table in $required_tables; do
+        table_exists="$(
+            sqlite3 -readonly "$snapshot" \
+                "SELECT COUNT(*) FROM sqlite_schema
+                 WHERE type = 'table' AND name = '$table';"
+        )"
+        if [ "$table_exists" != "1" ]; then
+            echo "event=tm_backup_failed reason=required_table_missing table=$table" >&2
+            exit 1
+        fi
+    done
 fi
 
 created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -62,7 +131,9 @@ jq -n \
     --arg sha256 "$database_sha256" \
     --argjson byteSize "$database_bytes" \
     --argjson schemaVersion "$schema_version" \
-    '{createdAt:$createdAt,sha256:$sha256,byteSize:$byteSize,schemaVersion:$schemaVersion}' \
+    --argjson migrationLedgerComplete true \
+    --argjson requiredTablesComplete true \
+    '{createdAt:$createdAt,sha256:$sha256,byteSize:$byteSize,schemaVersion:$schemaVersion,migrationLedgerComplete:$migrationLedgerComplete,requiredTablesComplete:$requiredTablesComplete}' \
     > "$manifest"
 
 endpoint="${TM_BACKUP_S3_ENDPOINT%/}"
@@ -108,7 +179,9 @@ jq -n \
     --arg sha256 "$database_sha256" \
     --argjson byteSize "$database_bytes" \
     --argjson schemaVersion "$schema_version" \
-    '{status:"succeeded",checkedAt:$checkedAt,snapshotId:$snapshotId,databaseSha256:$sha256,databaseByteSize:$byteSize,schemaVersion:$schemaVersion,retention:{daily:7,weekly:4,monthly:12},integrityCheck:"ok"}' \
+    --argjson migrationLedgerComplete true \
+    --argjson requiredTablesComplete true \
+    '{status:"succeeded",checkedAt:$checkedAt,snapshotId:$snapshotId,databaseSha256:$sha256,databaseByteSize:$byteSize,schemaVersion:$schemaVersion,retention:{daily:7,weekly:4,monthly:12},integrityCheck:"ok",migrationLedgerComplete:$migrationLedgerComplete,requiredTablesComplete:$requiredTablesComplete}' \
     > "$status_tmp"
 chmod 0600 "$status_tmp"
 mv "$status_tmp" "$status_directory/status.json"

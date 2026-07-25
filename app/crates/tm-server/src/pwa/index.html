@@ -70,6 +70,13 @@
             <p class="muted task-report-description">Task와 앞으로 7일의 일정·납부일만 선별합니다. 1회 비용 상한은 $0.05입니다.</p>
             <div id="task-report-result" class="task-report-result" aria-live="polite"><p class="empty">아직 생성한 리포트가 없습니다.</p></div>
           </section>
+          <section id="stock-screen-brief" class="stock-screen-brief" aria-labelledby="stock-screen-brief-heading" aria-busy="true">
+            <div class="stock-screen-brief-heading">
+              <div><p class="eyebrow">조회 전용 · 매일 자동 계산</p><h2 id="stock-screen-brief-heading">S&amp;P 500 일일 등락</h2></div>
+              <button id="stock-screen-open" class="secondary" type="button">전체 보기</button>
+            </div>
+            <div id="stock-screen-brief-content" aria-live="polite"><p class="empty">최근 결과를 불러오는 중입니다.</p></div>
+          </section>
           <div id="assistant-log" class="assistant-log" aria-live="polite">
             <article class="assistant-message assistant-message--tm">질문을 전송할 때만 AI 사용료가 발생합니다. 답변과 TM 데이터는 이 브라우저의 오프라인 캐시에 저장하지 않습니다.</article>
           </div>
@@ -136,7 +143,27 @@
             <div><p class="eyebrow">조회 전용 · 거래소별 지연 가능</p><h1>주식 차트</h1></div>
             <a id="stock-external-link" class="secondary stock-external-link" href="https://www.tradingview.com/symbols/NASDAQ-AAPL/" rel="noopener noreferrer" target="_blank">TradingView에서 열기</a>
           </div>
-          <p class="muted">한국·미국 시세를 조회합니다. 주문, 계좌 연결, AI 분석은 없습니다.</p>
+          <p class="muted">한국·미국 지연 차트와 S&amp;P 500 종가 변화를 조회합니다. 주문과 계좌 연결은 없습니다.</p>
+          <section id="stock-screen-panel" class="stock-screen-panel" aria-labelledby="stock-screen-title" aria-busy="true">
+            <div class="stock-screen-panel-heading">
+              <div><p class="eyebrow">주가 데이터 API 추가비용 $0 · AI 요약 월 $2 제한</p><h2 id="stock-screen-title">S&amp;P 500 일일 등락 스캐너</h2></div>
+              <button id="stock-screen-refresh" class="secondary" type="button">새로고침</button>
+            </div>
+            <p class="stock-screen-description">분할 조정 종가를 정확히 5·21거래일 전과 비교합니다.</p>
+            <div id="stock-screen-status" class="stock-screen-status" aria-live="polite"><p class="empty">최근 시장 결과를 불러오는 중입니다.</p></div>
+            <fieldset class="stock-screen-filters">
+              <legend>등락 조건</legend>
+              <label for="stock-screen-horizon">기간</label>
+              <select id="stock-screen-horizon"><option value="5">5거래일</option><option value="21">21거래일</option></select>
+              <label for="stock-screen-direction">방향</label>
+              <select id="stock-screen-direction"><option value="down">하락</option><option value="up">상승</option></select>
+              <label for="stock-screen-band">구간</label>
+              <select id="stock-screen-band"><option value="ten_to_twenty">10% 이상 20% 미만</option><option value="twenty_plus">20% 이상</option></select>
+            </fieldset>
+            <div id="stock-screen-results" class="stock-screen-results" aria-live="polite"><p class="empty">발행된 결과를 기다리고 있습니다.</p></div>
+            <button id="stock-screen-more" class="secondary stock-screen-more hidden" type="button">다음 50개</button>
+            <p class="stock-screen-legal">S&amp;P 500 구성종목 공개 스냅샷과 지연 시장 데이터를 사용합니다. 투자 추천이나 총수익률이 아닙니다.</p>
+          </section>
           <section class="stock-chart-card" aria-labelledby="stock-chart-symbol">
             <div class="stock-chart-heading"><div><p class="eyebrow">외부 데이터 · OpenAI 비용 없음</p><h2 id="stock-chart-symbol">NASDAQ:AAPL</h2></div><span id="stock-network" class="status-pill">온라인</span></div>
             <div id="stock-chart-container" class="stock-chart-container"></div>

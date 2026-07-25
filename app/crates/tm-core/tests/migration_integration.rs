@@ -37,10 +37,10 @@ fn manifest_is_deterministic_and_does_not_expose_row_contents() -> Result<()> {
     let first = core.migration_manifest()?;
     let second = core.migration_manifest()?;
     assert!(first.logically_matches(&second));
-    assert_eq!(first.schema_version, 12);
+    assert_eq!(first.schema_version, 13);
     assert_eq!(
         first.migration_versions,
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
     );
     assert_eq!(first.logical_sha256.len(), 64);
     assert_eq!(first.tables["tasks"].row_count, 1);
@@ -77,6 +77,37 @@ fn preflight_rejects_a_database_with_an_unsupported_schema() -> Result<()> {
 
     let result = TmCore::inspect_migration_database(&backup.path);
     assert!(matches!(result, Err(Error::InvalidBackup(_))));
+    Ok(())
+}
+
+#[test]
+fn restore_rejects_schema_thirteen_backups_with_an_incomplete_manifest() -> Result<()> {
+    let (temporary, core) = fixture()?;
+    let backup = core.create_backup()?;
+
+    let missing_migration = temporary.path().join("missing-migration.sqlite3");
+    std::fs::copy(&backup.path, &missing_migration)?;
+    let connection = Connection::open(&missing_migration)?;
+    connection.execute("DELETE FROM schema_migrations WHERE version = 13", [])?;
+    connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+    drop(connection);
+    assert!(matches!(
+        core.restore_backup(&missing_migration),
+        Err(Error::InvalidBackup(_))
+    ));
+
+    let missing_table = temporary.path().join("missing-required-table.sqlite3");
+    std::fs::copy(&backup.path, &missing_table)?;
+    let connection = Connection::open(&missing_table)?;
+    connection.execute_batch(
+        "DROP TABLE stock_watchlist_items;
+         PRAGMA wal_checkpoint(TRUNCATE);",
+    )?;
+    drop(connection);
+    assert!(matches!(
+        core.restore_backup(&missing_table),
+        Err(Error::InvalidBackup(_))
+    ));
     Ok(())
 }
 

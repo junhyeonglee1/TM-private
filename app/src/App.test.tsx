@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import { App } from "./App";
@@ -429,14 +429,19 @@ describe("TM 데스크톱 UI", () => {
     const user = userEvent.setup();
     const { api } = renderApp();
     await screen.findByRole("heading", { name: "오늘", level: 1 });
+    expect(await screen.findByRole("heading", { name: "S&P 500 일일 등락" })).toBeInTheDocument();
+    expect(await screen.findByText("NVIDIA Corporation")).toBeInTheDocument();
 
     await user.click(screen.getAllByRole("button", { name: "주식" })[0]);
     expect(await screen.findByRole("heading", { name: "주식 차트", level: 1 })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "S&P 500 일일 등락 스캐너" })).toBeInTheDocument();
 
     const frame = screen.getByTestId("tradingview-frame");
     const sandbox = frame.getAttribute("sandbox") ?? "";
     const source = frame.getAttribute("src") ?? "";
-    expect(sandbox).toBe("allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox");
+    expect(sandbox).toBe("allow-scripts allow-popups");
+    expect(sandbox).not.toContain("allow-same-origin");
+    expect(sandbox).not.toContain("allow-popups-to-escape-sandbox");
     expect(frame).toHaveAttribute("referrerpolicy", "no-referrer");
     expect(source).toMatch(/^https:\/\/www\.tradingview-widget\.com\/embed-widget\/advanced-chart\/\?locale=kr#/);
     const widgetSettings = JSON.parse(decodeURIComponent(new URL(source).hash.slice(1)));
@@ -449,6 +454,11 @@ describe("TM 데스크톱 UI", () => {
     });
     expect(source).not.toContain("data:text/html");
     expect(source).not.toContain("__TAURI");
+
+    await user.selectOptions(screen.getByLabelText("방향"), "up");
+    const nvidia = await screen.findByRole("button", { name: /NVIDIA Corporation \+14\.30%, 차트에서 보기/ });
+    await user.click(nvidia);
+    expect(screen.getByRole("heading", { name: "NASDAQ:NVDA", level: 2 })).toBeInTheDocument();
 
     await user.type(screen.getByRole("combobox", { name: "회사명 또는 종목코드" }), "삼성전자");
     await user.click(await screen.findByRole("option", { name: /삼성전자.*KRX:005930/ }));
@@ -471,12 +481,12 @@ describe("TM 데스크톱 UI", () => {
 
     try {
       Object.defineProperty(window.navigator, "onLine", { configurable: true, value: false });
-      window.dispatchEvent(new Event("offline"));
+      act(() => window.dispatchEvent(new Event("offline")));
       expect(await screen.findByText("차트를 보려면 인터넷 연결이 필요합니다.")).toBeInTheDocument();
       expect(screen.queryByTestId("tradingview-frame")).not.toBeInTheDocument();
     } finally {
       Object.defineProperty(window.navigator, "onLine", { configurable: true, value: true });
-      window.dispatchEvent(new Event("online"));
+      act(() => window.dispatchEvent(new Event("online")));
     }
   });
 

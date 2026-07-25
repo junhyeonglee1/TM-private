@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "TM",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "identifier": "io.local.tm.desktop",
   "build": {
     "beforeDevCommand": "pnpm dev",

@@ -143,6 +143,8 @@ pub fn run() {
             commands::update_calendar_event,
             commands::delete_calendar_event,
             commands::get_stock_watchlist,
+            commands::get_latest_stock_screen,
+            commands::list_stock_screen_results,
             commands::upsert_stock_watchlist_item,
             commands::delete_stock_watchlist_item,
             commands::create_project,

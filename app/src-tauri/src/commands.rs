@@ -12,10 +12,11 @@ use tm_core::{
     CalendarEvent, CalendarMonth, ChangeRequest, ChangeRequestKind, ChecklistMutationInput,
     CreateCalendarEventInput, CreateChangeRequestInput as CoreCreateChangeRequestInput,
     CreateNoteAggregateInput, CreateNoteInput, CreateProjectInput, CreateTaskAggregateInput,
-    CreateTaskInput, CreateWorkLogInput, EndSessionInput, EntityLink, EntityType, LinkTargetType,
-    Note, NoteLinksInput, NoteType, SearchHit, SessionStatus, StartSessionInput,
-    StockWatchlistItem, Task, TaskDayEntry, TaskDayStatus, TaskPatch, TaskStatus, TmCore,
-    TrashEntityType, UpdateCalendarEventInput,
+    CreateTaskInput, CreateWorkLogInput, EndSessionInput, EntityLink, EntityType,
+    LatestStockScreen, LinkTargetType, ListStockScreenResultsInput, Note, NoteLinksInput, NoteType,
+    SearchHit, SessionStatus, StartSessionInput, StockScreenBandFilter, StockScreenDirection,
+    StockScreenHorizon, StockScreenResultPage, StockWatchlistItem, Task, TaskDayEntry,
+    TaskDayStatus, TaskPatch, TaskStatus, TmCore, TrashEntityType, UpdateCalendarEventInput,
     UpdateChangeRequestInput as CoreUpdateChangeRequestInput, UpdateTaskAggregateInput,
     UpsertStockWatchlistItemInput, WorkSession,
 };
@@ -299,6 +300,36 @@ pub(crate) fn delete_stock_watchlist_item(
     state
         .core
         .delete_stock_watchlist_item(&symbol)
+        .map_err(command_error)
+}
+
+#[tauri::command]
+pub(crate) fn get_latest_stock_screen(
+    state: State<'_, AppState>,
+) -> CommandResult<LatestStockScreen> {
+    state.core.get_latest_stock_screen().map_err(command_error)
+}
+
+#[tauri::command]
+pub(crate) fn list_stock_screen_results(
+    run_id: String,
+    horizon: StockScreenHorizon,
+    direction: StockScreenDirection,
+    band: Option<StockScreenBandFilter>,
+    cursor: Option<String>,
+    limit: Option<u32>,
+    state: State<'_, AppState>,
+) -> CommandResult<StockScreenResultPage> {
+    state
+        .core
+        .list_stock_screen_results(ListStockScreenResultsInput {
+            run_id,
+            horizon,
+            direction,
+            band,
+            cursor,
+            limit,
+        })
         .map_err(command_error)
 }
 

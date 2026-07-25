@@ -268,15 +268,18 @@ pub(super) async fn run(
         },
         "safety_identifier": SAFETY_IDENTIFIER
     });
-    let call = openai
-        .create_response(&request)
-        .await
-        .map_err(|error| TaskReportError {
-            possibly_billed: matches!(error, OpenAiError::Transport | OpenAiError::InvalidResponse),
+    let call = openai.create_response(&request).await.map_err(|error| {
+        let upstream_request_id = error.upstream_request_id().map(ToOwned::to_owned);
+        TaskReportError {
+            possibly_billed: matches!(
+                &error,
+                OpenAiError::Transport | OpenAiError::InvalidResponse { .. }
+            ),
             kind: TaskReportErrorKind::OpenAi(error),
             response_id: None,
-            upstream_request_id: None,
-        })?;
+            upstream_request_id,
+        }
+    })?;
     let response_id = call.response.id.clone();
     let upstream_request_id = call.upstream_request_id.clone();
     if call.response.status != "completed" {

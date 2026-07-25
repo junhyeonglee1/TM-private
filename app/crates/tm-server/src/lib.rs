@@ -21,6 +21,7 @@ mod orchestrator;
 mod pwa;
 mod read_api;
 pub mod scheduler;
+pub mod stock;
 mod task_report;
 mod write_api;
 
@@ -39,8 +40,10 @@ use axum::{
 use chrono::{DateTime, FixedOffset, Utc};
 use serde::{Deserialize, Serialize};
 use tm_core::{
-    ASSISTANT_ACTION_APPROVAL_TTL_SECONDS, AiBudgetStatus, AiTokenUsage, Error as CoreError,
-    HealthReport, SchedulerStatus, TaskReportCompletion, TaskReportStart, TmCore,
+    ASSISTANT_ACTION_APPROVAL_TTL_SECONDS, AiBudgetStatus, AiTokenUsage, DesktopCommand,
+    Error as CoreError, HealthReport, STOCK_AI_MONTHLY_HARD_LIMIT_MICROUSD, STOCK_AI_OPERATION,
+    SchedulerStatus, StockScreenAttemptSummary, StockScreenCoverage, TaskReportCompletion,
+    TaskReportStart, TmCore,
 };
 use uuid::Uuid;
 
@@ -56,6 +59,10 @@ use crate::orchestrator::{
     ASSISTANT_MAX_BODY_BYTES, ASSISTANT_MAX_MESSAGE_BYTES, ASSISTANT_MAX_TOOL_CALLS,
     ASSISTANT_MAXIMUM_COST_MICROUSD, ASSISTANT_PROMPT_VERSION, ASSISTANT_TIMEOUT_SECS,
     AssistantError, AssistantErrorKind, AssistantRequest, AssistantResult,
+};
+use crate::stock::{
+    ALPACA_KEY_ID_ENV, ALPACA_SECRET_KEY_ENV, STOCK_AI_ENABLED_ENV, STOCK_LICENSE_ACK_ENV,
+    STOCK_OPENAI_MODEL_ENV, STOCK_SCREEN_ENABLED_ENV, StockConfig,
 };
 use crate::task_report::{
     TASK_REPORT_CONFIRMATION, TASK_REPORT_DAILY_LIMIT, TASK_REPORT_MAXIMUM_COST_MICROUSD,
@@ -172,6 +179,7 @@ pub struct ServerConfig {
     pub incident_mode: IncidentMode,
     pub ai_enabled: bool,
     pub task_report_enabled: bool,
+    pub stock: StockConfig,
     pub railway_usage: RailwayUsageConfig,
 }
 
@@ -231,6 +239,17 @@ impl ServerConfig {
                 ));
             }
         };
+        let stock = StockConfig::from_env()?;
+        if stock.ai_enabled() && !ai_enabled {
+            return Err(format!(
+                "{STOCK_AI_ENABLED_ENV}=true requires {AI_ENABLED_ENV}=true"
+            ));
+        }
+        if profile != ServerProfile::CloudAuthenticated && stock.screen_enabled() {
+            return Err(format!(
+                "{STOCK_SCREEN_ENABLED_ENV}=true is supported only by {CLOUD_AUTHENTICATED_PROFILE}"
+            ));
+        }
         let railway_usage = if profile == ServerProfile::CloudAuthenticated {
             RailwayUsageConfig::from_env()?
         } else {
@@ -290,6 +309,11 @@ impl ServerConfig {
                 )
             }
         };
+        if stock.ai_enabled() && !openai.configured() {
+            return Err(format!(
+                "OPENAI_API_KEY is required when {STOCK_AI_ENABLED_ENV}=true"
+            ));
+        }
 
         Ok(Self {
             profile,
@@ -301,6 +325,7 @@ impl ServerConfig {
             incident_mode,
             ai_enabled,
             task_report_enabled,
+            stock,
             railway_usage,
         })
     }
@@ -313,6 +338,7 @@ struct AppState {
     incident_mode: IncidentMode,
     ai_enabled: bool,
     task_report_enabled: bool,
+    stock: StockConfig,
     railway_usage: RailwayUsageClient,
     security: SecurityMonitor,
 }
@@ -345,6 +371,7 @@ impl AppState {
             task_report_enabled,
             security,
             RailwayUsageClient::disabled(),
+            StockConfig::default(),
         )
     }
 
@@ -356,6 +383,7 @@ impl AppState {
         task_report_enabled: bool,
         security: SecurityMonitor,
         railway_usage: RailwayUsageClient,
+        stock: StockConfig,
     ) -> Self {
         Self {
             core,
@@ -363,6 +391,7 @@ impl AppState {
             incident_mode,
             ai_enabled,
             task_report_enabled,
+            stock,
             railway_usage,
             security,
         }
@@ -632,6 +661,7 @@ struct OperationsStatus {
     scheduler: SchedulerStatus,
     local_backup: LocalBackupStatus,
     remote_backup: RemoteBackupStatus,
+    stock: OperationsStockStatus,
 }
 
 #[derive(Debug, Serialize)]
@@ -704,6 +734,8 @@ struct RemoteBackupStatus {
     schema_version: Option<i64>,
     retention: Option<RemoteBackupRetention>,
     integrity_check: Option<String>,
+    migration_ledger_complete: Option<bool>,
+    required_tables_complete: Option<bool>,
     reason: Option<String>,
     retry_after_seconds: Option<u64>,
 }
@@ -713,6 +745,23 @@ struct RemoteBackupRetention {
     daily: u32,
     weekly: u32,
     monthly: u32,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OperationsStockStatus {
+    license_gate: bool,
+    screen_enabled: bool,
+    ai_enabled: bool,
+    latest_expected_trading_date: Option<chrono::NaiveDate>,
+    latest_success: Option<chrono::NaiveDate>,
+    latest_attempt: Option<StockScreenAttemptSummary>,
+    coverage: Option<StockScreenCoverage>,
+    universe_age_days: Option<u32>,
+    next_run_at: Option<String>,
+    monthly_feature_cost_microusd: u64,
+    hard_limit_microusd: u64,
+    last_error_code: Option<String>,
 }
 
 pub fn build_router(core: TmCore) -> Router {
@@ -814,6 +863,29 @@ pub fn build_cloud_authenticated_router_with_feature_controls_and_costs(
     task_report_enabled: bool,
     railway_usage: RailwayUsageClient,
 ) -> Router {
+    build_cloud_authenticated_router_with_feature_controls_costs_and_stock(
+        core,
+        auth,
+        openai,
+        incident_mode,
+        ai_enabled,
+        task_report_enabled,
+        railway_usage,
+        StockConfig::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_cloud_authenticated_router_with_feature_controls_costs_and_stock(
+    core: TmCore,
+    auth: AuthConfig,
+    openai: OpenAiClient,
+    incident_mode: IncidentMode,
+    ai_enabled: bool,
+    task_report_enabled: bool,
+    railway_usage: RailwayUsageClient,
+    stock: StockConfig,
+) -> Router {
     let security = SecurityMonitor::new();
     let authenticator = TokenAuthenticator::new(auth);
     let auth_state = CloudAuthState {
@@ -914,6 +986,7 @@ pub fn build_cloud_authenticated_router_with_feature_controls_and_costs(
             task_report_enabled,
             security,
             railway_usage,
+            stock,
         ))
         .layer(write_api::body_limit())
         .layer(middleware::from_fn_with_state(
@@ -1206,8 +1279,10 @@ async fn ai_probe(
     let mut result = match state.openai.probe().await {
         Ok(result) => result,
         Err(error) => {
-            let may_have_been_billed =
-                matches!(error, OpenAiError::Transport | OpenAiError::InvalidResponse);
+            let may_have_been_billed = matches!(
+                &error,
+                OpenAiError::Transport | OpenAiError::InvalidResponse { .. }
+            );
             let estimated_cost = if may_have_been_billed {
                 reservation.reserved_microusd
             } else {
@@ -1834,11 +1909,54 @@ async fn operations_status(
 ) -> Result<Json<ApiEnvelope<OperationsStatus>>, ApiError> {
     let error_request_id = request_id.0.clone();
     let status = tokio::task::spawn_blocking(move || {
+        let checked_at = Utc::now();
         let health = state.core.health()?;
-        let scheduler = state.core.scheduler_status(Utc::now())?;
+        let effective_stock_ai = state.ai_enabled
+            && state.stock.screen_enabled()
+            && state.stock.ai_enabled()
+            && state.stock.license_ack()
+            && state.openai.config().configured();
+        let mut scheduler = state.core.scheduler_status(checked_at)?;
+        scheduler.openai_calls_enabled = effective_stock_ai;
         let ai_budget = state
             .core
             .ai_budget_status(state.openai.config().budget_policy())?;
+        let stock_budget = state
+            .core
+            .ai_operation_budget_status(STOCK_AI_OPERATION, STOCK_AI_MONTHLY_HARD_LIMIT_MICROUSD)?;
+        let stock_latest = state.core.get_latest_stock_screen()?;
+        let stock_expected_date = Some(state.core.latest_expected_stock_market_date(checked_at)?);
+        let stock_next_run_at = state.core.stock_scheduler_next_run_at()?;
+        let stock_universe_age_days = state
+            .core
+            .latest_stock_universe()?
+            .and_then(|snapshot| DateTime::parse_from_rfc3339(&snapshot.fetched_at).ok())
+            .map(|fetched| {
+                let days = checked_at
+                    .signed_duration_since(fetched.with_timezone(&Utc))
+                    .num_days()
+                    .max(0);
+                u32::try_from(days).unwrap_or(u32::MAX)
+            });
+        let stock_latest_success = stock_latest
+            .latest_success
+            .as_ref()
+            .map(|success| success.market_date);
+        let stock_coverage = stock_latest
+            .latest_attempt
+            .as_ref()
+            .filter(|attempt| attempt.coverage.total > 0)
+            .map(|attempt| attempt.coverage.clone())
+            .or_else(|| {
+                stock_latest
+                    .latest_success
+                    .as_ref()
+                    .map(|success| success.coverage.clone())
+            });
+        let stock_last_error = stock_latest
+            .latest_attempt
+            .as_ref()
+            .and_then(|attempt| attempt.failure_code.clone());
         let security = state.security.snapshot();
         let backups = state.core.list_backups()?;
         let latest = backups.first();
@@ -1866,6 +1984,8 @@ async fn operations_status(
                 schema_version: None,
                 retention: None,
                 integrity_check: None,
+                migration_ledger_complete: None,
+                required_tables_complete: None,
                 reason: None,
                 retry_after_seconds: None,
             }
@@ -1878,7 +1998,7 @@ async fn operations_status(
             &security,
             state.incident_mode,
             state.ai_enabled,
-            Utc::now(),
+            checked_at,
         );
         Ok::<_, CoreError>(OperationsStatus {
             service_version: env!("CARGO_PKG_VERSION"),
@@ -1916,6 +2036,20 @@ async fn operations_status(
                 latest_byte_size: latest.map(|backup| backup.byte_size),
             },
             remote_backup,
+            stock: OperationsStockStatus {
+                license_gate: state.stock.license_ack(),
+                screen_enabled: state.stock.screen_enabled(),
+                ai_enabled: effective_stock_ai,
+                latest_expected_trading_date: stock_expected_date,
+                latest_success: stock_latest_success,
+                latest_attempt: stock_latest.latest_attempt,
+                coverage: stock_coverage,
+                universe_age_days: stock_universe_age_days,
+                next_run_at: stock_next_run_at,
+                monthly_feature_cost_microusd: stock_budget.committed_microusd,
+                hard_limit_microusd: stock_budget.hard_limit_microusd,
+                last_error_code: stock_last_error,
+            },
         })
     })
     .await
@@ -2007,6 +2141,20 @@ fn operations_alerts(
             severity: "critical",
             code: "REMOTE_BACKUP_SCHEMA_MISMATCH",
             message: "The latest remote backup schema does not match production",
+        });
+    }
+    if remote_backup.migration_ledger_complete != Some(true) {
+        alerts.push(OperationsAlert {
+            severity: "critical",
+            code: "REMOTE_BACKUP_MIGRATION_LEDGER_INCOMPLETE",
+            message: "The latest remote backup did not verify the complete migration ledger",
+        });
+    }
+    if remote_backup.required_tables_complete != Some(true) {
+        alerts.push(OperationsAlert {
+            severity: "critical",
+            code: "REMOTE_BACKUP_REQUIRED_TABLES_INCOMPLETE",
+            message: "The latest remote backup did not verify all required tables",
         });
     }
     let backup_stale = remote_backup.checked_at.as_deref().is_none_or(|value| {
@@ -2108,6 +2256,12 @@ fn reject_cloud_overrides(forbid_auth: bool) -> Result<(), String> {
             "TM_OPENAI_MONTHLY_HARD_LIMIT_USD",
             AUTH_TOKEN_HASH_ENV,
             AUTH_TOKEN_EXPIRY_ENV,
+            STOCK_SCREEN_ENABLED_ENV,
+            STOCK_AI_ENABLED_ENV,
+            STOCK_LICENSE_ACK_ENV,
+            STOCK_OPENAI_MODEL_ENV,
+            ALPACA_KEY_ID_ENV,
+            ALPACA_SECRET_KEY_ENV,
         ]);
     }
     for name in forbidden {
@@ -2177,7 +2331,7 @@ fn openai_api_error(error: OpenAiError, request_id: String) -> ApiError {
             message: "the OpenAI service could not be reached".to_owned(),
             request_id,
         },
-        OpenAiError::InvalidResponse => ApiError {
+        OpenAiError::InvalidResponse { .. } => ApiError {
             status: StatusCode::BAD_GATEWAY,
             code: "OPENAI_RESPONSE_INVALID",
             message: "OpenAI returned an unexpected response".to_owned(),
@@ -2407,7 +2561,7 @@ async fn runtime_controls_guard(
     );
     let blocked = match runtime.incident_mode {
         IncidentMode::Normal => None,
-        IncidentMode::ReadOnly if !matches!(*request.method(), Method::GET | Method::HEAD) => {
+        IncidentMode::ReadOnly if !incident_read_only_request_allowed(request.method(), path) => {
             Some(("INCIDENT_READ_ONLY", "TM is in incident read-only mode"))
         }
         IncidentMode::Lockdown if !lockdown_allowlist => {
@@ -2448,6 +2602,18 @@ async fn runtime_controls_guard(
         .into_response();
     }
     next.run(request).await
+}
+
+fn incident_read_only_request_allowed(method: &Method, path: &str) -> bool {
+    if matches!(*method, Method::GET | Method::HEAD) {
+        return true;
+    }
+    if *method != Method::POST {
+        return false;
+    }
+    path.strip_prefix("/api/v1/desktop/commands/")
+        .and_then(|command| command.parse::<DesktopCommand>().ok())
+        .is_some_and(DesktopCommand::is_read_only)
 }
 
 fn ai_execution_path(method: &Method, path: &str) -> bool {
@@ -2729,8 +2895,8 @@ mod tests {
         CalendarRecurrence, ChangeRequestKind, CreateCalendarEventInput, CreateChangeRequestInput,
         CreateMemoryInput, CreateNoteInput, CreateProjectInput, CreateTaskInput,
         CreateWorkLogInput, DEFAULT_TM_HOME, MemoryKind, MemoryRetention, MemorySensitivity,
-        NoteType, SessionStatus, StartSessionInput, StockMarket, TaskStatus, TmCore, TmHome,
-        UpsertStockWatchlistItemInput,
+        NoteType, STOCK_AI_MONTHLY_HARD_LIMIT_MICROUSD, SessionStatus, StartSessionInput,
+        StockMarket, TaskStatus, TmCore, TmHome, UpsertStockWatchlistItemInput,
     };
     use tower::ServiceExt;
 
@@ -3145,7 +3311,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
         assert_eq!(body["data"]["status"], "ready");
-        assert_eq!(body["data"]["schemaVersion"], 12);
+        assert_eq!(body["data"]["schemaVersion"], 13);
         assert_eq!(body["data"]["journalMode"], "wal");
     }
 
@@ -4166,7 +4332,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
         assert_eq!(body["data"]["database"]["ok"], true);
-        assert_eq!(body["data"]["database"]["schemaVersion"], 12);
+        assert_eq!(body["data"]["database"]["schemaVersion"], 13);
         assert_eq!(body["data"]["scheduler"]["status"], "healthy");
         assert_eq!(body["data"]["scheduler"]["openaiCallsEnabled"], false);
         assert_eq!(body["data"]["scheduler"]["effectCount"], 0);
@@ -5228,9 +5394,9 @@ mod tests {
         assert!(stock_script.contains(
             "https://www.tradingview-widget.com/embed-widget/advanced-chart/?locale=kr#"
         ));
-        assert!(stock_script.contains(
-            "allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox"
-        ));
+        assert!(stock_script.contains(r#"setAttribute("sandbox", "allow-scripts allow-popups")"#));
+        assert!(!stock_script.contains("allow-same-origin"));
+        assert!(!stock_script.contains("allow-popups-to-escape-sandbox"));
         assert!(!stock_script.contains("data:text/html;charset=utf-8"));
         assert!(!stock_script.contains("embed-widget-advanced-chart.js"));
         assert!(stock_script.contains("support_host"));
@@ -5379,6 +5545,49 @@ mod tests {
             .await
             .expect("call device self");
         assert_eq!(self_response.status(), StatusCode::OK);
+
+        let stock_screen_latest = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/desktop/commands/get_latest_stock_screen")
+                    .header("host", "tm.example.test")
+                    .header("origin", "https://tm.example.test")
+                    .header("cookie", &cookie_header)
+                    .header("x-tm-csrf", &csrf)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"args":{}}"#))
+                    .expect("build device latest stock screen request"),
+            )
+            .await
+            .expect("call device latest stock screen request");
+        assert_eq!(stock_screen_latest.status(), StatusCode::OK);
+        let stock_screen_latest = response_json(stock_screen_latest).await;
+        assert_eq!(
+            stock_screen_latest["data"]["aiBudget"]["hardLimitMicrousd"],
+            STOCK_AI_MONTHLY_HARD_LIMIT_MICROUSD
+        );
+
+        let stock_screen_missing_run = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/desktop/commands/list_stock_screen_results")
+                    .header("host", "tm.example.test")
+                    .header("origin", "https://tm.example.test")
+                    .header("cookie", &cookie_header)
+                    .header("x-tm-csrf", &csrf)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"args":{"runId":"missing-run","horizon":5,"direction":"up","band":null,"cursor":null,"limit":50}}"#,
+                    ))
+                    .expect("build device stock screen list request"),
+            )
+            .await
+            .expect("call device stock screen list request");
+        assert_eq!(stock_screen_missing_run.status(), StatusCode::NOT_FOUND);
 
         let forbidden_admin = router
             .clone()
@@ -5570,6 +5779,20 @@ mod tests {
             .await
             .expect("call read-only read route");
         assert_eq!(read.status(), StatusCode::OK);
+        let stock_read = read_only
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/desktop/commands/get_latest_stock_screen")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"args":{}}"#))
+                    .expect("build read-only stock command"),
+            )
+            .await
+            .expect("call read-only stock command");
+        assert_eq!(stock_read.status(), StatusCode::OK);
         let write = read_only
             .oneshot(
                 Request::builder()

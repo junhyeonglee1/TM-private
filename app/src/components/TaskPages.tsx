@@ -4,6 +4,7 @@ import type {
   CreateTaskInput,
   DayEntryStatus,
   HistoryDay,
+  LatestStockScreen,
   Project,
   Task,
   TodaySnapshot,
@@ -12,6 +13,7 @@ import type { TaskReportResult } from "../lib/api";
 import { EmptyState } from "./EmptyState";
 import { Icon } from "./Icon";
 import { TaskCard } from "./TaskCard";
+import { StockScreenCompactCard } from "./StockScreen";
 
 export function InboxPage() {
   return (
@@ -47,6 +49,10 @@ interface TodayPageProps {
   onResolve: (entryId: string, status: Exclude<DayEntryStatus, "planned">) => void;
   onGenerateReport: () => Promise<void>;
   onRateReport: (helpful: boolean) => Promise<void>;
+  onOpenStocks: () => void;
+  stockScreen: LatestStockScreen | null;
+  stockScreenError: string | null;
+  stockScreenLoading: boolean;
 }
 
 const friendlyDate = (date: string): string =>
@@ -68,6 +74,10 @@ export function TodayPage({
   onResolve,
   onGenerateReport,
   onRateReport,
+  onOpenStocks,
+  stockScreen,
+  stockScreenError,
+  stockScreenLoading,
 }: TodayPageProps) {
   const total = view.planned.length + view.inProgress.length + view.completed.length;
   const progress = total ? Math.round((view.completed.length / total) * 100) : 0;
@@ -181,6 +191,13 @@ export function TodayPage({
           </div>
         )}
       </section>
+
+      <StockScreenCompactCard
+        error={stockScreenError}
+        loading={stockScreenLoading}
+        onOpen={onOpenStocks}
+        screen={stockScreen}
+      />
 
       {view.yesterdayIncomplete.length > 0 && (
         <section className="panel panel--attention" aria-labelledby="yesterday-heading">

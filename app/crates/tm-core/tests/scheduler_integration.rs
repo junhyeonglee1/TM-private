@@ -186,3 +186,60 @@ fn restore_preserves_completed_scheduler_effect_ledger() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn stock_scheduler_configuration_preserves_an_overdue_run_across_restart() -> Result<()> {
+    let (temporary, core) = fixture()?;
+    let before_due = instant(2026, 7, 22, 0, 0, 0);
+    core.configure_stock_scheduler(true, before_due)?;
+    drop(core);
+
+    let reopened = TmCore::open(TmHome::new(temporary.path()))?;
+    let after_due = instant(2026, 7, 23, 1, 29, 0);
+    reopened.configure_stock_scheduler(true, after_due)?;
+    reopened.reconcile_scheduler(after_due)?;
+    let stock_runs = reopened
+        .list_scheduler_runs()?
+        .into_iter()
+        .filter(|run| run.job_key == "stock.daily_screen")
+        .collect::<Vec<_>>();
+    assert_eq!(stock_runs.len(), 1);
+    assert_eq!(stock_runs[0].status, "pending");
+    assert_eq!(stock_runs[0].scheduled_for, "2026-07-22T01:30:00.000Z");
+    Ok(())
+}
+
+#[test]
+fn external_stock_claim_can_be_heartbeated_and_completed_atomically() -> Result<()> {
+    let (_temporary, core) = fixture()?;
+    let before_due = instant(2026, 7, 22, 0, 0, 0);
+    core.run_scheduler_cycle("core-worker", before_due)?;
+    core.configure_stock_scheduler(true, before_due)?;
+    let due = instant(2026, 7, 22, 1, 31, 0);
+    core.run_scheduler_cycle("core-worker", due)?;
+    let (claim, _) = core.claim_scheduler_run("stock-worker", due)?;
+    let claim = claim.expect("external stock claim");
+    assert_eq!(claim.job_kind, "stock.daily_screen");
+    let heartbeat_at = due + chrono::Duration::seconds(30);
+    let renewed = core.heartbeat_scheduler_claim(&claim, heartbeat_at)?;
+    assert_eq!(renewed, "2026-07-22T01:36:30.000Z");
+    core.complete_scheduler_claim_with_result(
+        &claim,
+        &serde_json::json!({"status": "upstream_unavailable", "openAiCalls": 0}),
+        heartbeat_at,
+    )?;
+    let completed = core
+        .list_scheduler_runs()?
+        .into_iter()
+        .find(|run| run.id == claim.run_id)
+        .expect("completed external run");
+    assert_eq!(completed.status, "succeeded");
+    assert_eq!(
+        completed.result,
+        Some(serde_json::json!({
+            "status": "upstream_unavailable",
+            "openAiCalls": 0
+        }))
+    );
+    Ok(())
+}

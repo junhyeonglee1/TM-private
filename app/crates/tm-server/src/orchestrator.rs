@@ -187,7 +187,10 @@ pub(super) async fn run(
 
         let call = openai.create_response(&request).await.map_err(|error| {
             let possibly_billed = received_response
-                || matches!(error, OpenAiError::Transport | OpenAiError::InvalidResponse);
+                || matches!(
+                    &error,
+                    OpenAiError::Transport | OpenAiError::InvalidResponse { .. }
+                );
             AssistantError {
                 kind: AssistantErrorKind::OpenAi(error),
                 possibly_billed,

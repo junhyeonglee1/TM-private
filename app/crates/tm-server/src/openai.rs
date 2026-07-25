@@ -159,22 +159,7 @@ impl OpenAiConfig {
 
     #[must_use]
     pub fn estimate_cost_microusd(&self, usage: &ProbeUsage) -> Option<u64> {
-        let (uncached_rate, cached_rate, output_rate) = if self.model.starts_with("gpt-5.6-terra") {
-            (2_500_000_u128, 250_000_u128, 15_000_000_u128)
-        } else if self.model.starts_with("gpt-5.6-luna") {
-            (1_000_000_u128, 100_000_u128, 6_000_000_u128)
-        } else if self.model.starts_with("gpt-5.6") {
-            (5_000_000_u128, 500_000_u128, 30_000_000_u128)
-        } else {
-            return None;
-        };
-        let uncached_input = usage.input_tokens.saturating_sub(usage.cached_input_tokens);
-        let numerator = u128::from(uncached_input)
-            .saturating_mul(uncached_rate)
-            .saturating_add(u128::from(usage.cached_input_tokens).saturating_mul(cached_rate))
-            .saturating_add(u128::from(usage.output_tokens).saturating_mul(output_rate));
-        let rounded_up = numerator.saturating_add(999_999) / 1_000_000;
-        u64::try_from(rounded_up).ok()
+        estimate_model_cost_microusd(&self.model, usage)
     }
 
     fn responses_url(&self) -> Result<Url, OpenAiError> {
@@ -182,6 +167,31 @@ impl OpenAiConfig {
             .join("responses")
             .map_err(|_| OpenAiError::InvalidConfiguration)
     }
+}
+
+/// Returns the standard-processing token cost for a model in millionths of a US
+/// dollar. Unknown models fail closed so a newly named model cannot bypass TM's
+/// persisted budget guard.
+#[must_use]
+pub fn estimate_model_cost_microusd(model: &str, usage: &ProbeUsage) -> Option<u64> {
+    let (uncached_rate, cached_rate, output_rate) = if model.starts_with("gpt-5.4-nano") {
+        (200_000_u128, 20_000_u128, 1_250_000_u128)
+    } else if model.starts_with("gpt-5.6-terra") {
+        (2_500_000_u128, 250_000_u128, 15_000_000_u128)
+    } else if model.starts_with("gpt-5.6-luna") {
+        (1_000_000_u128, 100_000_u128, 6_000_000_u128)
+    } else if model.starts_with("gpt-5.6") {
+        (5_000_000_u128, 500_000_u128, 30_000_000_u128)
+    } else {
+        return None;
+    };
+    let uncached_input = usage.input_tokens.saturating_sub(usage.cached_input_tokens);
+    let numerator = u128::from(uncached_input)
+        .saturating_mul(uncached_rate)
+        .saturating_add(u128::from(usage.cached_input_tokens).saturating_mul(cached_rate))
+        .saturating_add(u128::from(usage.output_tokens).saturating_mul(output_rate));
+    let rounded_up = numerator.saturating_add(999_999) / 1_000_000;
+    u64::try_from(rounded_up).ok()
 }
 
 #[derive(Clone)]
@@ -246,10 +256,13 @@ impl OpenAiClient {
             return Err(classify_upstream_error(status, upstream_request_id));
         }
 
-        let response = response
-            .json::<ProbeResponse>()
-            .await
-            .map_err(|_| OpenAiError::InvalidResponse)?;
+        let response =
+            response
+                .json::<ProbeResponse>()
+                .await
+                .map_err(|_| OpenAiError::InvalidResponse {
+                    upstream_request_id: upstream_request_id.clone(),
+                })?;
         let output_text = response
             .output
             .iter()
@@ -259,7 +272,9 @@ impl OpenAiClient {
             .collect::<String>();
 
         if output_text.trim().is_empty() {
-            return Err(OpenAiError::InvalidResponse);
+            return Err(OpenAiError::InvalidResponse {
+                upstream_request_id,
+            });
         }
 
         Ok(OpenAiProbeResult {
@@ -306,10 +321,13 @@ impl OpenAiClient {
             return Err(classify_upstream_error(status, upstream_request_id));
         }
 
-        let response = response
-            .json::<OpenAiResponse>()
-            .await
-            .map_err(|_| OpenAiError::InvalidResponse)?;
+        let response =
+            response
+                .json::<OpenAiResponse>()
+                .await
+                .map_err(|_| OpenAiError::InvalidResponse {
+                    upstream_request_id: upstream_request_id.clone(),
+                })?;
         Ok(OpenAiResponseCall {
             response,
             upstream_request_id,
@@ -342,7 +360,31 @@ pub enum OpenAiError {
     RateLimited { upstream_request_id: Option<String> },
     RequestRejected { upstream_request_id: Option<String> },
     UpstreamUnavailable { upstream_request_id: Option<String> },
-    InvalidResponse,
+    InvalidResponse { upstream_request_id: Option<String> },
+}
+
+impl OpenAiError {
+    #[must_use]
+    pub fn upstream_request_id(&self) -> Option<&str> {
+        match self {
+            Self::Authentication {
+                upstream_request_id,
+            }
+            | Self::RateLimited {
+                upstream_request_id,
+            }
+            | Self::RequestRejected {
+                upstream_request_id,
+            }
+            | Self::UpstreamUnavailable {
+                upstream_request_id,
+            }
+            | Self::InvalidResponse {
+                upstream_request_id,
+            } => upstream_request_id.as_deref(),
+            Self::NotConfigured | Self::InvalidConfiguration | Self::Transport => None,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -586,4 +628,35 @@ fn response_matches_probe(output: &[ProbeOutputItem]) -> bool {
         .collect::<String>()
         .trim()
         == PROBE_EXPECTED_TEXT
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProbeUsage, estimate_model_cost_microusd};
+
+    #[test]
+    fn nano_stock_digest_estimate_uses_pinned_standard_rates() {
+        let cost = estimate_model_cost_microusd(
+            "gpt-5.4-nano-2026-03-17",
+            &ProbeUsage {
+                input_tokens: 10_000,
+                cached_input_tokens: 0,
+                output_tokens: 1_200,
+                total_tokens: 11_200,
+            },
+        );
+        assert_eq!(cost, Some(3_500));
+        assert_eq!(
+            estimate_model_cost_microusd(
+                "unknown-model",
+                &ProbeUsage {
+                    input_tokens: 1,
+                    cached_input_tokens: 0,
+                    output_tokens: 1,
+                    total_tokens: 2,
+                },
+            ),
+            None
+        );
+    }
 }
