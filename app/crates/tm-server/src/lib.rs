@@ -375,6 +375,7 @@ impl AppState {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn with_controls_and_costs(
         core: TmCore,
         openai: OpenAiClient,

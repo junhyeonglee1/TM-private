@@ -810,18 +810,16 @@ fn parse_decimal_microusd(value: &str) -> Option<i64> {
     if value.starts_with('-') || value.starts_with('+') {
         return None;
     }
-    let (mantissa, exponent) = value
-        .find(|character| matches!(character, 'e' | 'E'))
-        .map_or((value, 0_i32), |index| {
-            let (mantissa, exponent) = value.split_at(index);
-            (
-                mantissa,
-                exponent
-                    .get(1..)
-                    .and_then(|value| value.parse::<i32>().ok())
-                    .unwrap_or(i32::MIN),
-            )
-        });
+    let (mantissa, exponent) = value.find(['e', 'E']).map_or((value, 0_i32), |index| {
+        let (mantissa, exponent) = value.split_at(index);
+        (
+            mantissa,
+            exponent
+                .get(1..)
+                .and_then(|value| value.parse::<i32>().ok())
+                .unwrap_or(i32::MIN),
+        )
+    });
     if exponent == i32::MIN || !(-12..=12).contains(&exponent) {
         return None;
     }
@@ -1181,7 +1179,7 @@ mod tests {
             {
                 return Err(StatusCode::BAD_REQUEST);
             }
-            let second = query.get("page_token").is_some();
+            let second = query.contains_key("page_token");
             let offset = if second { 11 } else { 0 };
             let dates = (0..11)
                 .map(|index| format!("2026-06-{:02}T20:00:00Z", offset + index + 1))
