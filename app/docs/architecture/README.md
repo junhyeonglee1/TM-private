@@ -34,7 +34,7 @@ STEP 17은 schema 10의 첫 전용 비서 기능으로 `오늘의 Task AI 리포
 
 개인 캘린더는 schema 11의 `calendar_events`를 Windows와 모바일이 함께 사용한다. 일회성, 매월 특정일, 매월 초일, 매월 말일 규칙은 원본 일정 한 건으로 저장하고 조회하는 달에 occurrence를 계산한다. 변경·삭제는 version precondition과 soft delete를 사용하며, 이 기능 자체는 OpenAI를 호출하거나 결제를 실행하지 않는다.
 
-조회 전용 주식 차트는 schema 12의 `stock_watchlist_items`에 시장·티커·표시 이름만 저장한다. Windows와 모바일이 최대 50개의 관심 종목을 같은 cloud 원본에서 읽고 쓰며, 시세와 차트는 TM origin과 분리된 opaque `data:` sandbox iframe 안의 TradingView 위젯이 직접 가져온다. TM은 가격 데이터를 저장하거나 OpenAI에 관심 종목을 전달하지 않고, 계좌 연결·주문·추천도 제공하지 않는다.
+조회 전용 주식 차트는 schema 12의 `stock_watchlist_items`에 시장·티커·표시 이름만 저장한다. Windows와 모바일이 최대 50개의 관심 종목을 같은 cloud 원본에서 읽고 쓰며, 시세와 차트는 TM origin과 분리된 `tradingview-widget.com` sandbox iframe이 직접 가져온다. iframe은 TradingView가 자기 출처에서 초기화할 수 있도록 `allow-same-origin`을 사용하지만 TM 쿠키·저장소·Tauri IPC에는 접근할 수 없다. TM은 가격 데이터를 저장하거나 OpenAI에 관심 종목을 전달하지 않고, 계좌 연결·주문·추천도 제공하지 않는다.
 
 schema 13의 비용 우선 S&P 500 일일 스크리닝은 기존 Railway service 안에서 DataHub PDDL 구성 종목과 Alpaca Basic 일봉으로 5/21 session 수익률을 결정론적으로 계산한다. 정량 결과가 primary artifact이며 선택적 `gpt-5.4-nano-2026-03-17` 요약은 월 `$2` 내부 원장 한도에서 신규 호출을 차단한다. 세 stock gate는 기본적으로 꺼져 있고 provider 사용 범위의 서면 확인 전에는 production network 호출을 하지 않는다.
 

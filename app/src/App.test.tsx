@@ -439,9 +439,9 @@ describe("TM 데스크톱 UI", () => {
     const frame = screen.getByTestId("tradingview-frame");
     const sandbox = frame.getAttribute("sandbox") ?? "";
     const source = frame.getAttribute("src") ?? "";
-    expect(sandbox).toBe("allow-scripts allow-popups");
-    expect(sandbox).not.toContain("allow-same-origin");
-    expect(sandbox).not.toContain("allow-popups-to-escape-sandbox");
+    expect(sandbox).toBe(
+      "allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox",
+    );
     expect(frame).toHaveAttribute("referrerpolicy", "no-referrer");
     expect(source).toMatch(/^https:\/\/www\.tradingview-widget\.com\/embed-widget\/advanced-chart\/\?locale=kr#/);
     const widgetSettings = JSON.parse(decodeURIComponent(new URL(source).hash.slice(1)));

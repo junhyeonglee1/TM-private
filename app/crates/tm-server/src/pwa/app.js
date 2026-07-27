@@ -704,7 +704,10 @@ function renderStockChart() {
   frame.className = "stock-chart-frame";
   frame.title = `${state.selectedStockSymbol} TradingView 조회 전용 차트`;
   frame.referrerPolicy = "no-referrer";
-  frame.setAttribute("sandbox", "allow-scripts allow-popups");
+  frame.setAttribute(
+    "sandbox",
+    "allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox"
+  );
   frame.src = stockWidgetUrl(
     state.selectedStockSymbol,
     state.stockWatchlist.map((item) => item.symbol)

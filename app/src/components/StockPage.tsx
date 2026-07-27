@@ -297,7 +297,7 @@ export function StockPage({
                   setFailedChartUrl(null);
                 }}
                 referrerPolicy="no-referrer"
-                sandbox="allow-scripts allow-popups"
+                sandbox="allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox"
                 src={chartUrl}
                 title={`${selectedSymbol} TradingView 조회 전용 차트`}
               />

@@ -5395,9 +5395,9 @@ mod tests {
         assert!(stock_script.contains(
             "https://www.tradingview-widget.com/embed-widget/advanced-chart/?locale=kr#"
         ));
-        assert!(stock_script.contains(r#"setAttribute("sandbox", "allow-scripts allow-popups")"#));
-        assert!(!stock_script.contains("allow-same-origin"));
-        assert!(!stock_script.contains("allow-popups-to-escape-sandbox"));
+        assert!(stock_script.contains(
+            "allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox"
+        ));
         assert!(!stock_script.contains("data:text/html;charset=utf-8"));
         assert!(!stock_script.contains("embed-widget-advanced-chart.js"));
         assert!(stock_script.contains("support_host"));

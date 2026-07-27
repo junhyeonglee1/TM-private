@@ -49,6 +49,10 @@
 - Windows Credential Locker와 HTTPS desktop command bridge를 사용하는 명시적 cloud mode를 추가했다.
 - schema 5 snapshot을 maintenance mode에서만 검증·import하고 실패 시 자동 rollback하는 STEP 10 cutover 경계를 추가했다.
 
+### Fixed
+
+- Windows와 모바일 TradingView iframe이 자기 출처에서 초기화되지 못해 흰 화면으로 남던 sandbox 회귀를 수정하고, 모바일 app shell 캐시를 갱신했다.
+
 ### Changed
 
 - schema 10 배포와 암호화 remote backup 지원 상한을 일치시키고, DB 현재 schema와 backup guard가 어긋나면 CI 정적 검사가 실패하도록 강화했다.
