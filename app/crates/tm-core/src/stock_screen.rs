@@ -541,15 +541,16 @@ impl TmCore {
         snapshot_id: &str,
     ) -> Result<Option<StockUniverseSnapshot>> {
         let snapshot_id = clean_text("stock universe snapshot ID", snapshot_id, 128)?;
-        query_universe_snapshot_optional(&self.database.connect()?, &snapshot_id)
+        let connection = self.database.connect()?;
+        query_universe_snapshot_optional(&connection, &snapshot_id)
     }
 
     pub fn stock_universe_members(
         &self,
         snapshot_id: &str,
     ) -> Result<Vec<StockUniverseMemberInput>> {
-        query_universe_snapshot(&self.database.connect()?, snapshot_id)?;
         let connection = self.database.connect()?;
+        query_universe_snapshot(&connection, snapshot_id)?;
         let mut statement = connection.prepare(
             "SELECT ticker, display_name, sector, sub_industry
              FROM stock_universe_members
@@ -832,7 +833,8 @@ impl TmCore {
 
     pub fn get_stock_screen_run(&self, run_id: &str) -> Result<Option<StockScreenRun>> {
         let run_id = clean_text("stock screen run ID", run_id, 128)?;
-        query_screen_run_optional(&self.database.connect()?, &run_id)
+        let connection = self.database.connect()?;
+        query_screen_run_optional(&connection, &run_id)
     }
 
     pub fn fail_stock_screen_run(
@@ -1225,13 +1227,15 @@ impl TmCore {
 
     pub fn get_stock_ai_report(&self, id: &str) -> Result<Option<StockAiReport>> {
         let id = clean_text("stock AI report ID", id, 128)?;
-        query_ai_report_optional(&self.database.connect()?, &id)
+        let connection = self.database.connect()?;
+        query_ai_report_optional(&connection, &id)
     }
 
     pub fn mark_stock_ai_report_calling(&self, id: &str) -> Result<StockAiReport> {
         let id = clean_text("stock AI report ID", id, 128)?;
         self.try_mark_stock_ai_report_calling(&id)?;
-        query_ai_report(&self.database.connect()?, &id)
+        let connection = self.database.connect()?;
+        query_ai_report(&connection, &id)
     }
 
     pub fn try_mark_stock_ai_report_calling(&self, id: &str) -> Result<bool> {
