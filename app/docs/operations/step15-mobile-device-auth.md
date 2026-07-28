@@ -19,6 +19,7 @@
 
 - 자기 기기 정보와 로그아웃
 - Project·Task·Checklist·Tag·Session·Worklog·Note의 승인된 기존 read/write API
+- Project 생성과 Task 생성·내용 편집·상태 변경
 - AI 비서 query
 - AI 제안 목록·상세·승인·거절·취소
 - AI memory read API
@@ -36,9 +37,11 @@
 3. Windows TM에서 `기기 관리`를 열고 표시된 이름을 확인한다.
 4. 모바일에 표시된 6자리 코드를 Windows TM에 입력해 승인한다.
 5. 모바일에서 `Windows에서 승인했어요`를 한 번 누른다.
-6. 브라우저가 두 개의 Secure cookie를 받은 뒤 Task·Note·비서 화면을 사용할 수 있다.
+6. 브라우저가 두 개의 Secure cookie를 받은 뒤 프로젝트·Task·Note·비서 화면을 사용할 수 있다.
 
 코드, polling secret, 기기 token, CSRF token은 운영 로그나 검증 결과 파일에 기록하지 않는다. 페어링 완료 POST, AI query, mutation과 승인은 네트워크 실패 시 자동 재시도하지 않는다.
+
+`할 일` 화면에서는 프로젝트 목록·생성, Task 생성·상세 편집·상태 변경·빠른 완료, 프로젝트·상태 필터와 페이지 추가 조회를 제공한다. Project와 Task 생성에는 `If-None-Match: *`, Task 변경에는 조회한 `version`의 `If-Match`를 사용하고, 모든 쓰기는 CSRF·idempotency key·정확한 mutation confirmation을 요구한다. 세부 계약과 배포 검증은 [모바일 프로젝트·Task 관리 운영 절차](mobile-project-task-management.md)를 따른다.
 
 ## 분실 기기 폐기
 
@@ -72,6 +75,8 @@
 - frontend typecheck·lint
 
 production 검증은 `scripts/verify-step15-production.ps1`로 수행한다. 스크립트는 Credential Locker에서 관리자 token을 읽고 임시 기기 하나를 등록한 뒤 scope를 확인하고 즉시 폐기한다. OpenAI와 Task·Note business mutation은 호출하지 않는다. 성공·실패와 관계없이 생성된 임시 활성 기기의 폐기를 시도하며 결과 파일에는 secret을 저장하지 않는다.
+
+프로젝트·Task 모바일 관리 배포 뒤에는 `scripts/verify-mobile-project-task-production.ps1`도 수행한다. 이 검증은 PWA v11 계약, 기기 권한, CSRF·confirmation 차단, 데이터 digest 불변, 폐기 후 `401`, DB·백업·AI 비용 불변을 확인하며 production 업무 데이터에 성공 mutation을 만들지 않는다.
 
 ## 2026-07-22 production 완료 기록
 

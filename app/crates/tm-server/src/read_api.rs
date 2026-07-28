@@ -155,7 +155,7 @@ enum NoteSort {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ProjectDto {
+pub(super) struct ProjectDto {
     id: String,
     name: String,
     description: String,

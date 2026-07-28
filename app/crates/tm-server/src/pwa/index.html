@@ -190,8 +190,91 @@
         </section>
 
         <section id="tab-tasks" class="tab-panel panel hidden">
-          <div class="section-heading"><div><p class="eyebrow">온라인 조회</p><h1>최근 할 일</h1></div><button class="secondary" data-refresh="tasks" type="button">새로고침</button></div>
+          <div class="section-heading task-heading">
+            <div><p class="eyebrow">모바일에서도 안전하게 관리</p><h1>프로젝트와 할 일</h1></div>
+            <button class="secondary" data-refresh="tasks" type="button">새로고침</button>
+          </div>
+
+          <div class="task-primary-actions">
+            <button id="project-add" class="secondary" type="button">프로젝트 추가</button>
+            <button id="task-add" class="primary" type="button">Task 추가</button>
+          </div>
+
+          <form id="project-form" class="mobile-editor hidden">
+            <div class="mobile-editor-heading">
+              <h2>프로젝트 추가</h2>
+              <button id="project-form-close" class="text-button" type="button">닫기</button>
+            </div>
+            <label for="project-name">이름</label>
+            <input id="project-name" maxlength="500" autocomplete="off" required>
+            <label for="project-description">설명 (선택)</label>
+            <textarea id="project-description" maxlength="20000" rows="3"></textarea>
+            <label for="project-color">표시 색상</label>
+            <input id="project-color" type="color" value="#7088ff">
+            <button id="project-save" class="primary" type="submit">프로젝트 저장</button>
+          </form>
+
+          <form id="task-form" class="mobile-editor hidden">
+            <div class="mobile-editor-heading">
+              <h2 id="task-form-title">Task 추가</h2>
+              <button id="task-form-close" class="text-button" type="button">닫기</button>
+            </div>
+            <label for="task-title">제목</label>
+            <input id="task-title" maxlength="500" autocomplete="off" required>
+            <label for="task-description">설명 (선택)</label>
+            <textarea id="task-description" maxlength="20000" rows="4"></textarea>
+            <label for="task-project">프로젝트</label>
+            <select id="task-project"><option value="">프로젝트 없음</option></select>
+            <div class="task-field-grid">
+              <div>
+                <label for="task-status">상태</label>
+                <select id="task-status"></select>
+              </div>
+              <div>
+                <label for="task-priority">우선순위</label>
+                <select id="task-priority">
+                  <option value="0">없음</option>
+                  <option value="1">1 · 매우 낮음</option>
+                  <option value="2">2 · 낮음</option>
+                  <option value="3">3 · 보통</option>
+                  <option value="4">4 · 높음</option>
+                </select>
+              </div>
+            </div>
+            <label for="task-due-date">기한 (선택)</label>
+            <input id="task-due-date" type="date">
+            <button id="task-save" class="primary" type="submit">Task 저장</button>
+          </form>
+
+          <section class="project-browser" aria-labelledby="projects-heading">
+            <div class="task-subheading">
+              <h2 id="projects-heading">프로젝트</h2>
+              <span id="projects-count">0개</span>
+            </div>
+            <div id="projects-list" class="project-list"></div>
+            <button id="projects-more" class="secondary pagination-more hidden" type="button">프로젝트 더 보기</button>
+          </section>
+
+          <form id="task-filters" class="task-filters">
+            <label for="task-filter-project">프로젝트</label>
+            <select id="task-filter-project"><option value="">전체 프로젝트</option></select>
+            <label for="task-filter-status">상태</label>
+            <select id="task-filter-status">
+              <option value="">전체 상태</option>
+              <option value="inbox">수신함</option>
+              <option value="todo">할 일</option>
+              <option value="in_progress">진행 중</option>
+              <option value="blocked">막힘</option>
+              <option value="done">완료</option>
+              <option value="cancelled">취소</option>
+            </select>
+          </form>
+          <div class="task-subheading">
+            <h2>Task</h2>
+            <span id="tasks-count">0개</span>
+          </div>
           <div id="tasks-list" class="card-list"></div>
+          <button id="tasks-more" class="secondary pagination-more hidden" type="button">Task 더 보기</button>
         </section>
 
         <section id="tab-notes" class="tab-panel panel hidden">

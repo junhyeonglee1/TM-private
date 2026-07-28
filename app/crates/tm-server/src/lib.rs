@@ -952,7 +952,10 @@ pub fn build_cloud_authenticated_router_with_feature_controls_costs_and_stock(
             "/api/v1/desktop/commands/{command}",
             post(desktop_api::invoke),
         )
-        .route("/api/v1/projects", get(read_api::projects))
+        .route(
+            "/api/v1/projects",
+            get(read_api::projects).post(write_api::create_project),
+        )
         .route(
             "/api/v1/tasks",
             get(read_api::tasks).post(write_api::create_task),
@@ -4642,6 +4645,121 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn project_create_http_contract_is_confirmed_idempotent_and_redacted() {
+        let (_temporary, core) = test_core();
+        let router = build_cloud_authenticated_router(core.clone(), test_auth_config());
+        let create_body =
+            r##"{"name":"Mobile project","description":"Cloud synced","color":"#7386ff"}"##;
+
+        let created = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/projects")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "http-project-create-0001")
+                    .header("if-none-match", "*")
+                    .header("x-tm-confirm-mutation", "project.create")
+                    .header("x-request-id", "http-project-create-request")
+                    .body(Body::from(create_body))
+                    .expect("build project create request"),
+            )
+            .await
+            .expect("call project create route");
+        assert_eq!(created.status(), StatusCode::CREATED);
+        assert_eq!(created.headers().get("etag").expect("create ETag"), "\"1\"");
+        let created_body = response_json(created).await;
+        let write_schema: Value = serde_json::from_str(include_str!(
+            "../../../docs/contracts/tm-write-api-v1.schema.json"
+        ))
+        .expect("parse write API JSON Schema");
+        let mut actual_project_fields = created_body["data"]["item"]
+            .as_object()
+            .expect("project response object")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        actual_project_fields.sort();
+        let mut schema_project_fields = write_schema["$defs"]["Project"]["required"]
+            .as_array()
+            .expect("project schema required fields")
+            .iter()
+            .map(|field| field.as_str().expect("schema field name").to_owned())
+            .collect::<Vec<_>>();
+        schema_project_fields.sort();
+        assert_eq!(actual_project_fields, schema_project_fields);
+        let project_id = created_body["data"]["resourceId"]
+            .as_str()
+            .expect("project resource ID")
+            .to_owned();
+        assert_eq!(created_body["data"]["operation"], "project_create");
+        assert_eq!(created_body["data"]["resourceType"], "project");
+        assert_eq!(created_body["data"]["version"], 1);
+        assert_eq!(created_body["data"]["replayed"], false);
+        assert_eq!(
+            created_body["data"]["item"]["id"].as_str(),
+            Some(project_id.as_str())
+        );
+        assert_eq!(created_body["data"]["item"]["color"], "#7386ff");
+        assert!(created_body["data"]["item"].get("deletedAt").is_none());
+        assert!(created_body["data"]["item"].get("version").is_none());
+
+        let replayed = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/projects")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "http-project-create-0001")
+                    .header("if-none-match", "*")
+                    .header("x-tm-confirm-mutation", "project.create")
+                    .header("x-request-id", "http-project-create-retry")
+                    .body(Body::from(create_body))
+                    .expect("build project create replay"),
+            )
+            .await
+            .expect("call project create replay");
+        assert_eq!(replayed.status(), StatusCode::CREATED);
+        assert_eq!(
+            replayed
+                .headers()
+                .get("x-tm-idempotency-replayed")
+                .expect("idempotency replay header"),
+            "true"
+        );
+        assert_eq!(response_json(replayed).await["data"]["replayed"], true);
+        assert_eq!(core.list_projects(false).expect("list projects").len(), 1);
+        assert_eq!(
+            core.list_mutation_audit_events()
+                .expect("list mutation audit")
+                .len(),
+            1
+        );
+
+        let rejected = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/projects")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "http-project-create-0002")
+                    .header("if-none-match", "*")
+                    .header("x-tm-confirm-mutation", "task.create")
+                    .body(Body::from(r#"{"name":"Unconfirmed"}"#))
+                    .expect("build unconfirmed project create"),
+            )
+            .await
+            .expect("call unconfirmed project create");
+        assert_eq!(rejected.status(), StatusCode::PRECONDITION_REQUIRED);
+        assert_eq!(core.list_projects(false).expect("list projects").len(), 1);
+    }
+
+    #[tokio::test]
     async fn task_mutation_http_contract_is_idempotent_versioned_and_redacted() {
         let (_temporary, core) = test_core();
         let router = build_cloud_authenticated_router(core.clone(), test_auth_config());
@@ -5371,6 +5489,12 @@ mod tests {
         .expect("PWA shell is UTF-8");
         assert!(shell_body.contains(r#"id="tab-stocks""#));
         assert!(shell_body.contains("TradingView 외부 차트에서 확인"));
+        assert!(shell_body.contains(r#"id="project-form""#));
+        assert!(shell_body.contains(r#"id="task-form""#));
+        assert!(shell_body.contains(r#"id="task-filter-project""#));
+        assert!(shell_body.contains(r#"id="task-filter-status""#));
+        assert!(shell_body.contains(r#"id="projects-more""#));
+        assert!(shell_body.contains(r#"id="tasks-more""#));
         assert!(!shell_body.contains("s3.tradingview.com"));
 
         let stock_script = router
@@ -5406,6 +5530,36 @@ mod tests {
         assert!(!stock_script.contains("__TAURI"));
         assert!(stock_script.contains("차트를 보려면 인터넷 연결이 필요합니다."));
         assert!(stock_script.contains("selectedStockCandidate"));
+        assert!(stock_script.contains(r#""x-tm-confirm-mutation": operation"#));
+        assert!(stock_script.contains(r#""idempotency-key": crypto.randomUUID()"#));
+        assert!(stock_script.contains(r#"mutationHeaders("project.create")"#));
+        assert!(stock_script.contains(r#"mutationHeaders("task.create")"#));
+        assert!(stock_script.contains(r#"mutationHeaders("task.update", editing.version)"#));
+        assert!(stock_script.contains(r#"headers["if-none-match"] = "*""#));
+        assert!(stock_script.contains(r#"headers["if-match"] = `"${version}"`"#));
+        assert!(stock_script.contains("if (method !== \"GET\") throw error;"));
+        assert!(stock_script.contains("window.confirm"));
+
+        let service_worker = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/mobile/sw.js")
+                    .body(Body::empty())
+                    .expect("build service worker request"),
+            )
+            .await
+            .expect("load service worker");
+        assert_eq!(service_worker.status(), StatusCode::OK);
+        let service_worker = String::from_utf8(
+            to_bytes(service_worker.into_body(), 1024 * 1024)
+                .await
+                .expect("read service worker")
+                .to_vec(),
+        )
+        .expect("service worker is UTF-8");
+        assert!(service_worker.contains(r#"tm-mobile-shell-v11"#));
+        assert!(service_worker.contains(r#"request.method !== "GET""#));
 
         let stock_catalog = router
             .clone()
@@ -5637,6 +5791,124 @@ mod tests {
             .await
             .expect("call confirmed CSRF route");
         assert_ne!(csrf_passed.status(), StatusCode::FORBIDDEN);
+
+        let project_created = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/projects")
+                    .header("host", "tm.example.test")
+                    .header("origin", "https://tm.example.test")
+                    .header("cookie", &cookie_header)
+                    .header("x-tm-csrf", &csrf)
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "device-project-create-0001")
+                    .header("if-none-match", "*")
+                    .header("x-tm-confirm-mutation", "project.create")
+                    .body(Body::from(
+                        r#"{"name":"Phone project","description":"Created on mobile"}"#,
+                    ))
+                    .expect("build device project create request"),
+            )
+            .await
+            .expect("call device project create request");
+        assert_eq!(project_created.status(), StatusCode::CREATED);
+        let project_created = response_json(project_created).await;
+        assert_eq!(project_created["data"]["operation"], "project_create");
+        assert_eq!(project_created["data"]["item"]["name"], "Phone project");
+        assert!(project_created["data"]["item"].get("deletedAt").is_none());
+        let project_id = project_created["data"]["resourceId"]
+            .as_str()
+            .expect("device project ID")
+            .to_owned();
+
+        let task_created = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/tasks")
+                    .header("host", "tm.example.test")
+                    .header("origin", "https://tm.example.test")
+                    .header("cookie", &cookie_header)
+                    .header("x-tm-csrf", &csrf)
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "device-task-create-00001")
+                    .header("if-none-match", "*")
+                    .header("x-tm-confirm-mutation", "task.create")
+                    .body(Body::from(
+                        json!({
+                            "projectId": project_id.clone(),
+                            "title": "Phone task",
+                            "status": "todo"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build device task create request"),
+            )
+            .await
+            .expect("call device task create request");
+        assert_eq!(task_created.status(), StatusCode::CREATED);
+        let task_created = response_json(task_created).await;
+        assert_eq!(
+            task_created["data"]["item"]["projectId"].as_str(),
+            Some(project_id.as_str())
+        );
+        assert_eq!(task_created["data"]["item"]["version"], 1);
+        let task_id = task_created["data"]["resourceId"]
+            .as_str()
+            .expect("device task ID")
+            .to_owned();
+
+        let task_completed = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/api/v1/tasks/{task_id}"))
+                    .header("host", "tm.example.test")
+                    .header("origin", "https://tm.example.test")
+                    .header("cookie", &cookie_header)
+                    .header("x-tm-csrf", &csrf)
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "device-task-update-00001")
+                    .header("if-match", "\"1\"")
+                    .header("x-tm-confirm-mutation", "task.update")
+                    .body(Body::from(r#"{"status":"done"}"#))
+                    .expect("build device task completion request"),
+            )
+            .await
+            .expect("call device task completion request");
+        assert_eq!(task_completed.status(), StatusCode::OK);
+        let task_completed = response_json(task_completed).await;
+        assert_eq!(task_completed["data"]["item"]["status"], "done");
+        assert_eq!(task_completed["data"]["item"]["version"], 2);
+
+        let stale_task_update = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/api/v1/tasks/{task_id}"))
+                    .header("host", "tm.example.test")
+                    .header("origin", "https://tm.example.test")
+                    .header("cookie", &cookie_header)
+                    .header("x-tm-csrf", &csrf)
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "device-task-update-00002")
+                    .header("if-match", "\"1\"")
+                    .header("x-tm-confirm-mutation", "task.update")
+                    .body(Body::from(r#"{"status":"in_progress"}"#))
+                    .expect("build stale device task update request"),
+            )
+            .await
+            .expect("call stale device task update request");
+        assert_eq!(stale_task_update.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response_json(stale_task_update).await["error"]["code"],
+            "MUTATION_CONFLICT"
+        );
 
         let stock_without_confirmation = router
             .clone()

@@ -229,6 +229,47 @@ button { border: 0; border-radius: 13px; font-weight: 800; }
 .stock-selection { align-items: center; display: flex; justify-content: space-between; gap: 8px; padding: 9px 10px; border: 1px solid #5265aa; border-radius: 9px; background: #252e4d; font-size: 12px; }
 .stock-selection strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .stock-selection span { flex: 0 0 auto; color: var(--muted); font-size: 10px; }
+.task-heading h1 { margin-bottom: 8px; }
+.task-heading .secondary { min-height: 42px; white-space: nowrap; }
+.task-primary-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 12px 0 16px; }
+.task-primary-actions .primary, .task-primary-actions .secondary { width: 100%; margin: 0; }
+.mobile-editor { margin: 14px 0; padding: 16px; border: 1px solid #44527d; border-radius: 17px; background: #151c2e; }
+.mobile-editor-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.mobile-editor-heading h2 { margin: 0; font-size: 18px; }
+.mobile-editor-heading .text-button { width: auto; padding: 8px; }
+.mobile-editor label { margin-top: 14px; }
+.mobile-editor input, .mobile-editor textarea, .mobile-editor select { width: 100%; }
+.mobile-editor input[type="color"] { min-height: 46px; padding: 6px; }
+.task-field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+.project-browser { margin: 18px 0; padding: 14px; border: 1px solid var(--line); border-radius: 15px; background: #121720; }
+.task-subheading { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 12px 0 10px; }
+.task-subheading h2 { margin: 0; font-size: 17px; }
+.task-subheading span { color: var(--muted); font-size: 11px; }
+.project-list { display: grid; gap: 7px; }
+.project-card { display: grid; grid-template-columns: 6px minmax(0,1fr) auto; gap: 10px; align-items: center; padding: 11px; border: 1px solid var(--line); border-radius: 12px; background: #151b25; }
+.project-color { align-self: stretch; min-height: 34px; border-radius: 999px; background: var(--project-color, var(--accent)); }
+.project-card div { display: grid; gap: 3px; min-width: 0; }
+.project-card strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-card small { overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.project-card button { min-height: 34px; padding: 6px 9px; background: var(--surface-2); color: #dce2f4; border: 1px solid var(--line); font-size: 11px; }
+.task-filters { display: grid; grid-template-columns: auto minmax(0,1fr); gap: 8px 10px; margin: 16px 0; padding: 13px; border: 1px solid var(--line); border-radius: 14px; background: #121720; }
+.task-filters label { align-self: center; margin: 0; color: var(--muted); font-size: 11px; }
+.task-filters select { min-height: 38px; padding: 7px 9px; border-radius: 10px; font-size: 12px; }
+.task-card { display: grid; gap: 10px; }
+.task-card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.task-card-heading > button { min-width: 0; padding: 0; background: transparent; color: inherit; text-align: left; }
+.task-card-heading h2 { margin-bottom: 4px; overflow-wrap: anywhere; }
+.task-project-name { color: var(--accent); font-size: 10px; font-weight: 800; }
+.task-status { padding: 4px 7px; border-radius: 999px; background: #293a69; color: #dce5ff; font-size: 10px; white-space: nowrap; }
+.task-status.done { background: #244535; color: #8ce1b0; }
+.task-status.blocked, .task-status.cancelled { background: #4a3023; color: #ffc28d; }
+.task-card-description { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow-wrap: anywhere; }
+.task-card-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.task-card-actions.single { grid-template-columns: 1fr; }
+.task-card-actions button { min-height: 38px; padding: 7px 10px; }
+.task-complete { background: #294b3c; color: #9ee6bd; }
+.task-edit { background: var(--surface-2); color: #dce2f4; border: 1px solid var(--line); }
+.pagination-more { display: block; min-height: 40px; margin: 12px auto 0; padding: 8px 12px; }
 .card-list { display: grid; gap: 10px; }
 .item-card { padding: 15px; border: 1px solid var(--line); border-radius: 15px; background: #121720; }
 .item-card h2 { margin: 0 0 8px; font-size: 17px; }

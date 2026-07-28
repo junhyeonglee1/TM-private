@@ -6,6 +6,19 @@ const state = {
   activeTab: "assistant",
   taskReport: null,
   taskReportTasks: new Map(),
+  projects: [],
+  projectsNextOffset: null,
+  projectsTotal: 0,
+  projectLoadGeneration: 0,
+  tasks: [],
+  tasksNextOffset: null,
+  tasksTotal: 0,
+  taskLoadGeneration: 0,
+  taskFilters: {
+    projectId: "",
+    status: ""
+  },
+  editingTask: null,
   calendar: null,
   calendarMonth: null,
   selectedCalendarDate: null,
@@ -313,7 +326,7 @@ function selectTab(tab) {
     void loadStockWatchlist();
     void loadStockScreen();
   }
-  if (tab === "tasks") void loadTasks();
+  if (tab === "tasks") void loadTaskWorkspace();
   if (tab === "notes") void loadNotes();
   if (tab === "approvals") void loadApprovals();
   if (tab === "device" && state.device) renderDevice(state.device);
@@ -1387,26 +1400,438 @@ byId("calendar-delete").addEventListener("click", async (event) => {
   }
 });
 
-async function loadTasks() {
-  const list = byId("tasks-list");
-  loadingList(list);
-  try {
-    const data = await api("/api/v1/tasks?limit=30&offset=0&sort=updated_desc");
-    clear(list);
-    if (!data.items.length) return list.append(text("p", "등록된 할 일이 없습니다.", "empty"));
-    data.items.forEach((task) => {
-      const card = text("article", "", "item-card");
-      card.append(text("h2", task.title));
-      if (task.description) card.append(text("p", task.description));
-      const meta = text("div", "", "item-meta");
-      meta.append(text("span", task.status));
-      meta.append(text("span", `우선순위 ${task.priority}`));
-      if (task.dueDate) meta.append(text("span", `기한 ${task.dueDate}`));
-      card.append(meta);
-      list.append(card);
-    });
-  } catch (error) { listError(list, error); }
+const taskStatusLabels = {
+  inbox: "수신함",
+  todo: "할 일",
+  in_progress: "진행 중",
+  blocked: "막힘",
+  done: "완료",
+  cancelled: "취소"
+};
+
+const taskStatusTransitions = {
+  inbox: ["todo", "in_progress", "cancelled"],
+  todo: ["inbox", "in_progress", "blocked", "done", "cancelled"],
+  in_progress: ["todo", "blocked", "done", "cancelled"],
+  blocked: ["todo", "in_progress", "cancelled"],
+  done: ["todo", "in_progress"],
+  cancelled: ["inbox", "todo"]
+};
+
+function mutationHeaders(operation, version = null) {
+  const headers = {
+    "idempotency-key": crypto.randomUUID(),
+    "x-tm-confirm-mutation": operation
+  };
+  if (version === null) headers["if-none-match"] = "*";
+  else headers["if-match"] = `"${version}"`;
+  return headers;
 }
+
+function activeProject(projectId) {
+  return state.projects.find((project) => project.id === projectId);
+}
+
+function projectLabel(projectId) {
+  if (!projectId) return "프로젝트 없음";
+  return activeProject(projectId)?.name || "현재 목록 밖의 프로젝트";
+}
+
+function taskStatusLabel(status) {
+  return taskStatusLabels[status] || status;
+}
+
+function populateProjectSelect(select, blankLabel, selectedValue) {
+  clear(select);
+  const blank = text("option", blankLabel);
+  blank.value = "";
+  select.append(blank);
+  state.projects.forEach((project) => {
+    const option = text("option", project.name);
+    option.value = project.id;
+    select.append(option);
+  });
+  if (selectedValue && !state.projects.some((project) => project.id === selectedValue)) {
+    const unknown = text("option", `현재 프로젝트 · ${selectedValue.slice(0, 8)}`);
+    unknown.value = selectedValue;
+    select.append(unknown);
+  }
+  select.value = selectedValue || "";
+}
+
+function refreshProjectSelects() {
+  populateProjectSelect(
+    byId("task-filter-project"),
+    "전체 프로젝트",
+    state.taskFilters.projectId
+  );
+  populateProjectSelect(
+    byId("task-project"),
+    "프로젝트 없음",
+    state.editingTask?.projectId || byId("task-project").value
+  );
+}
+
+async function loadTaskWorkspace() {
+  await loadProjects(false);
+  await loadTasks(false);
+}
+
+async function loadProjects(append = false) {
+  const list = byId("projects-list");
+  const more = byId("projects-more");
+  const offset = append ? state.projectsNextOffset : 0;
+  if (append && offset === null) return;
+  const generation = append ? state.projectLoadGeneration : ++state.projectLoadGeneration;
+  if (!append) loadingList(list);
+  more.disabled = true;
+  try {
+    const params = new URLSearchParams({
+      archived: "false",
+      limit: "50",
+      offset: String(offset),
+      sort: "name"
+    });
+    const data = await api(`/api/v1/projects?${params}`);
+    if (generation !== state.projectLoadGeneration) return;
+    state.projects = append ? [...state.projects, ...data.items] : data.items;
+    state.projectsNextOffset = data.page.nextOffset;
+    state.projectsTotal = data.page.total;
+    renderProjects();
+    refreshProjectSelects();
+    renderTasks();
+  } catch (error) {
+    if (generation !== state.projectLoadGeneration) return;
+    if (append) toast(`프로젝트를 더 불러오지 못했습니다. ${error.message}`);
+    else listError(list, error);
+  } finally {
+    if (generation === state.projectLoadGeneration) more.disabled = false;
+  }
+}
+
+function renderProjects() {
+  const list = byId("projects-list");
+  clear(list);
+  byId("projects-count").textContent = state.projectsTotal > state.projects.length
+    ? `${state.projects.length}/${state.projectsTotal}개`
+    : `${state.projectsTotal}개`;
+  show("projects-more", state.projectsNextOffset !== null);
+  if (!state.projects.length) {
+    list.append(text("p", "등록된 프로젝트가 없습니다.", "empty"));
+    return;
+  }
+  state.projects.forEach((project) => {
+    const card = text("article", "", "project-card");
+    const color = text("span", "", "project-color");
+    if (/^#[0-9a-f]{6}$/i.test(project.color || "")) {
+      color.style.setProperty("--project-color", project.color);
+    }
+    const details = text("div");
+    details.append(text("strong", project.name));
+    if (project.description) details.append(text("small", project.description));
+    const open = text("button", "Task 보기");
+    open.type = "button";
+    open.addEventListener("click", () => {
+      state.taskFilters.projectId = project.id;
+      byId("task-filter-project").value = project.id;
+      void loadTasks(false);
+    });
+    card.append(color, details, open);
+    list.append(card);
+  });
+}
+
+function taskQuery(offset) {
+  const params = new URLSearchParams({
+    limit: "30",
+    offset: String(offset),
+    sort: "updated_desc"
+  });
+  if (state.taskFilters.projectId) params.set("projectId", state.taskFilters.projectId);
+  if (state.taskFilters.status) params.set("status", state.taskFilters.status);
+  return params;
+}
+
+async function loadTasks(append = false) {
+  const list = byId("tasks-list");
+  const more = byId("tasks-more");
+  const offset = append ? state.tasksNextOffset : 0;
+  if (append && offset === null) return;
+  const generation = append ? state.taskLoadGeneration : ++state.taskLoadGeneration;
+  if (!append) loadingList(list);
+  more.disabled = true;
+  try {
+    const data = await api(`/api/v1/tasks?${taskQuery(offset)}`);
+    if (generation !== state.taskLoadGeneration) return;
+    state.tasks = append ? [...state.tasks, ...data.items] : data.items;
+    state.tasksNextOffset = data.page.nextOffset;
+    state.tasksTotal = data.page.total;
+    renderTasks();
+  } catch (error) {
+    if (generation !== state.taskLoadGeneration) return;
+    if (append) toast(`Task를 더 불러오지 못했습니다. ${error.message}`);
+    else listError(list, error);
+  } finally {
+    if (generation === state.taskLoadGeneration) more.disabled = false;
+  }
+}
+
+function renderTasks() {
+  const list = byId("tasks-list");
+  clear(list);
+  byId("tasks-count").textContent = state.tasksTotal > state.tasks.length
+    ? `${state.tasks.length}/${state.tasksTotal}개`
+    : `${state.tasksTotal}개`;
+  show("tasks-more", state.tasksNextOffset !== null);
+  if (!state.tasks.length) {
+    list.append(text("p", "조건에 맞는 Task가 없습니다.", "empty"));
+    return;
+  }
+  state.tasks.forEach((task) => list.append(taskCard(task)));
+}
+
+function taskCard(task) {
+  const card = text("article", "", "item-card task-card");
+  const heading = text("div", "", "task-card-heading");
+  const open = text("button");
+  open.type = "button";
+  open.setAttribute("aria-label", `${task.title} 상세 편집`);
+  open.append(text("h2", task.title));
+  open.append(text("span", projectLabel(task.projectId), "task-project-name"));
+  open.addEventListener("click", () => openTaskForm(task));
+  const status = text("span", taskStatusLabel(task.status), `task-status ${task.status}`);
+  heading.append(open, status);
+  card.append(heading);
+  if (task.description) card.append(text("p", task.description, "task-card-description"));
+  const meta = text("div", "", "item-meta");
+  meta.append(text("span", `우선순위 ${task.priority}`));
+  if (task.dueDate) meta.append(text("span", `기한 ${task.dueDate}`));
+  if (task.completedAt) {
+    meta.append(text("span", `완료 ${new Date(task.completedAt).toLocaleDateString("ko-KR")}`));
+  }
+  card.append(meta);
+  const actions = text("div", "", "task-card-actions");
+  const edit = text("button", "상세 편집", "task-edit");
+  edit.type = "button";
+  edit.addEventListener("click", () => openTaskForm(task));
+  actions.append(edit);
+  if (task.status === "todo" || task.status === "in_progress") {
+    const complete = text("button", "빠른 완료", "task-complete");
+    complete.type = "button";
+    complete.addEventListener("click", () => void completeTask(task, complete));
+    actions.append(complete);
+  } else {
+    actions.classList.add("single");
+  }
+  card.append(actions);
+  return card;
+}
+
+function setTaskStatusOptions(currentStatus = null) {
+  const select = byId("task-status");
+  const statuses = currentStatus
+    ? [currentStatus, ...(taskStatusTransitions[currentStatus] || [])]
+    : ["inbox", "todo", "in_progress", "blocked"];
+  clear(select);
+  [...new Set(statuses)].forEach((status) => {
+    const option = text("option", taskStatusLabel(status));
+    option.value = status;
+    select.append(option);
+  });
+  select.value = currentStatus || "todo";
+}
+
+function openTaskForm(task = null, projectId = "") {
+  state.editingTask = task ? { ...task } : null;
+  const selectedProjectId = task?.projectId || projectId || state.taskFilters.projectId;
+  show("project-form", false);
+  show("task-form", true);
+  byId("task-form-title").textContent = task ? "Task 상세 편집" : "Task 추가";
+  byId("task-save").textContent = task ? "변경 저장" : "Task 저장";
+  byId("task-title").value = task?.title || "";
+  byId("task-description").value = task?.description || "";
+  populateProjectSelect(
+    byId("task-project"),
+    "프로젝트 없음",
+    selectedProjectId
+  );
+  setTaskStatusOptions(task?.status || null);
+  if (!task) byId("task-status").value = selectedProjectId ? "todo" : "inbox";
+  byId("task-priority").value = String(task?.priority ?? 0);
+  byId("task-due-date").value = task?.dueDate || "";
+  byId("task-form").scrollIntoView({ behavior: "smooth", block: "start" });
+  byId("task-title").focus({ preventScroll: true });
+}
+
+function closeTaskForm() {
+  state.editingTask = null;
+  byId("task-form").reset();
+  show("task-form", false);
+}
+
+function taskPatch(editing) {
+  const patch = {};
+  const title = byId("task-title").value.trim();
+  const description = byId("task-description").value.trim();
+  const projectId = byId("task-project").value || null;
+  const status = byId("task-status").value;
+  const priority = Number(byId("task-priority").value);
+  const dueDate = byId("task-due-date").value || null;
+  if (title !== editing.title) patch.title = title;
+  if (description !== editing.description) patch.description = description;
+  if (projectId !== (editing.projectId || null)) {
+    if (projectId) patch.projectId = projectId;
+    else patch.clearProject = true;
+  }
+  if (status !== editing.status) patch.status = status;
+  if (priority !== editing.priority) patch.priority = priority;
+  if (dueDate !== (editing.dueDate || null)) {
+    if (dueDate) patch.dueDate = dueDate;
+    else patch.clearDueDate = true;
+  }
+  return patch;
+}
+
+async function completeTask(task, button) {
+  if (!window.confirm(`‘${task.title}’ Task를 완료할까요?`)) return;
+  setBusy(button, true, "빠른 완료");
+  try {
+    await api(`/api/v1/tasks/${encodeURIComponent(task.id)}`, {
+      method: "PATCH",
+      headers: mutationHeaders("task.update", task.version),
+      body: { status: "done" }
+    });
+    toast(`‘${task.title}’ Task를 완료했습니다.`);
+    await loadTasks(false);
+  } catch (error) {
+    toast(`${error.message} 자동으로 다시 시도하지 않았습니다.`);
+  } finally {
+    setBusy(button, false, "빠른 완료");
+  }
+}
+
+byId("project-add").addEventListener("click", () => {
+  closeTaskForm();
+  show("project-form", true);
+  byId("project-form").scrollIntoView({ behavior: "smooth", block: "start" });
+  byId("project-name").focus({ preventScroll: true });
+});
+
+byId("project-form-close").addEventListener("click", () => {
+  byId("project-form").reset();
+  show("project-form", false);
+});
+
+byId("project-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = byId("project-save");
+  const body = {
+    name: byId("project-name").value.trim(),
+    description: byId("project-description").value.trim(),
+    color: byId("project-color").value
+  };
+  setBusy(button, true, "프로젝트 저장");
+  try {
+    const result = await api("/api/v1/projects", {
+      method: "POST",
+      headers: mutationHeaders("project.create"),
+      body
+    });
+    const projectId = result.item?.id || result.resourceId || "";
+    byId("project-form").reset();
+    show("project-form", false);
+    await loadProjects(false);
+    if (projectId) {
+      state.taskFilters.projectId = projectId;
+      refreshProjectSelects();
+      await loadTasks(false);
+    }
+    toast(`‘${body.name}’ 프로젝트를 추가했습니다.`);
+  } catch (error) {
+    toast(`${error.message} 자동으로 다시 시도하지 않았습니다.`);
+  } finally {
+    setBusy(button, false, "프로젝트 저장");
+  }
+});
+
+byId("task-add").addEventListener("click", () => openTaskForm());
+byId("task-form-close").addEventListener("click", closeTaskForm);
+
+byId("task-project").addEventListener("change", (event) => {
+  if (state.editingTask) return;
+  const status = byId("task-status");
+  if (status.value === "inbox" || status.value === "todo") {
+    status.value = event.currentTarget.value ? "todo" : "inbox";
+  }
+});
+
+byId("task-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const editing = state.editingTask;
+  const button = byId("task-save");
+  const title = byId("task-title").value.trim();
+  const projectId = byId("task-project").value || null;
+  const status = byId("task-status").value;
+  setBusy(button, true, editing ? "변경 저장" : "Task 저장");
+  try {
+    if (editing) {
+      const patch = taskPatch(editing);
+      if (!Object.keys(patch).length) {
+        toast("변경된 내용이 없습니다.");
+        return;
+      }
+      if (
+        patch.status
+        && !window.confirm(
+          `‘${editing.title}’ 상태를 ${taskStatusLabel(editing.status)} → ${taskStatusLabel(patch.status)}(으)로 변경하고 저장할까요?`
+        )
+      ) {
+        return;
+      }
+      await api(`/api/v1/tasks/${encodeURIComponent(editing.id)}`, {
+        method: "PATCH",
+        headers: mutationHeaders("task.update", editing.version),
+        body: patch
+      });
+      toast(`‘${title}’ Task 변경을 저장했습니다.`);
+    } else {
+      await api("/api/v1/tasks", {
+        method: "POST",
+        headers: mutationHeaders("task.create"),
+        body: {
+          projectId,
+          title,
+          description: byId("task-description").value.trim(),
+          status,
+          priority: Number(byId("task-priority").value),
+          dueDate: byId("task-due-date").value || null
+        }
+      });
+      toast(`‘${title}’ Task를 추가했습니다.`);
+    }
+    closeTaskForm();
+    await loadTasks(false);
+  } catch (error) {
+    const suffix = error.status === 409
+      ? " 다른 기기에서 변경되었을 수 있습니다. 새로고침 후 다시 확인하세요."
+      : " 자동으로 다시 시도하지 않았습니다.";
+    toast(`${error.message}${suffix}`);
+  } finally {
+    setBusy(button, false, editing ? "변경 저장" : "Task 저장");
+  }
+});
+
+byId("task-filters").addEventListener("submit", (event) => event.preventDefault());
+byId("task-filter-project").addEventListener("change", (event) => {
+  state.taskFilters.projectId = event.currentTarget.value;
+  void loadTasks(false);
+});
+byId("task-filter-status").addEventListener("change", (event) => {
+  state.taskFilters.status = event.currentTarget.value;
+  void loadTasks(false);
+});
+byId("projects-more").addEventListener("click", () => void loadProjects(true));
+byId("tasks-more").addEventListener("click", () => void loadTasks(true));
 
 async function loadNotes() {
   const list = byId("notes-list");
@@ -1510,7 +1935,7 @@ byId("logout").addEventListener("click", async (event) => {
 
 document.querySelectorAll("[data-refresh]").forEach((button) => {
   button.addEventListener("click", () => {
-    if (button.dataset.refresh === "tasks") void loadTasks();
+    if (button.dataset.refresh === "tasks") void loadTaskWorkspace();
     if (button.dataset.refresh === "notes") void loadNotes();
     if (button.dataset.refresh === "approvals") void loadApprovals();
   });

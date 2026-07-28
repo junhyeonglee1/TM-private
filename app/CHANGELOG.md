@@ -6,6 +6,8 @@
 
 ### Added
 
+- 모바일 `할 일` 화면에 프로젝트 목록·생성, Task 생성·상세 편집·상태 변경·빠른 완료, 프로젝트·상태 필터와 페이지 추가 조회를 추가했다.
+- `project.create`를 기존 controlled mutation의 CSRF·confirmation·idempotency·감사 원장에 연결하고, 등록 기기에서만 `POST /api/v1/projects`를 사용할 수 있게 했다.
 - schema 13에 S&P 500 universe snapshot, split-adjusted 일봉 session, 5·21거래일 정량 screen 결과와 선택적 AI 요약 이력을 추가했다.
 - 무료 Alpaca Basic·DataHub 자료만 사용하고 기존 Railway service를 재사용하는 비용 우선 주식 screen을 Windows·모바일에 추가했다.
 - 주식 AI는 pinned `gpt-5.4-nano-2026-03-17`, 요청당 USD 0.01 reservation과 월 USD 2 기능별 내부 원장 한도에서 신규 호출을 차단하고, 모델에는 최대 40개 ticker·수익률만 전달한다.

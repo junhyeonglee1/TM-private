@@ -5,12 +5,13 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    AssistantMemory, CreateMemoryInput, CreateNoteInput, CreateTaskInput, Error, MemoryPatch, Note,
-    NotePatch, Result, Task, TaskPatch, TaskStatus, TmCore,
+    AssistantMemory, CreateMemoryInput, CreateNoteInput, CreateProjectInput, CreateTaskInput,
+    Error, MemoryPatch, Note, NotePatch, Result, Task, TaskPatch, TaskStatus, TmCore,
     core::{
-        create_note_in_transaction, create_task_in_transaction, query_checklist_item, query_note,
-        query_project, query_task, update_checklist_item_in_transaction,
-        update_note_in_transaction, update_task_in_transaction,
+        create_note_in_transaction, create_project_in_transaction, create_task_in_transaction,
+        query_checklist_item, query_note, query_project, query_task,
+        update_checklist_item_in_transaction, update_note_in_transaction,
+        update_task_in_transaction,
     },
     database::{new_id, now_utc},
     error::invalid,
@@ -23,6 +24,7 @@ use crate::{
 const MAX_TITLE_CHARS: usize = 500;
 const MAX_TASK_DESCRIPTION_CHARS: usize = 20_000;
 const MAX_NOTE_BODY_CHARS: usize = 50_000;
+const INITIAL_PROJECT_VERSION: u64 = 1;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -59,6 +61,7 @@ impl MutationApprovalPolicy {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MutationOperation {
+    ProjectCreate,
     TaskCreate,
     TaskUpdate,
     NoteCreate,
@@ -73,6 +76,7 @@ impl MutationOperation {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::ProjectCreate => "project.create",
             Self::TaskCreate => "task.create",
             Self::TaskUpdate => "task.update",
             Self::NoteCreate => "note.create",
@@ -86,6 +90,7 @@ impl MutationOperation {
 
     const fn resource_type(self) -> &'static str {
         match self {
+            Self::ProjectCreate => "project",
             Self::TaskCreate | Self::TaskUpdate => "task",
             Self::NoteCreate | Self::NoteUpdate => "note",
             Self::ChecklistSetDone => "checklist",
@@ -97,6 +102,9 @@ impl MutationOperation {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "operation", rename_all = "snake_case")]
 pub enum MutationCommand {
+    ProjectCreate {
+        input: CreateProjectInput,
+    },
     TaskCreate {
         input: CreateTaskInput,
     },
@@ -131,6 +139,7 @@ impl MutationCommand {
     #[must_use]
     pub const fn operation(&self) -> MutationOperation {
         match self {
+            Self::ProjectCreate { .. } => MutationOperation::ProjectCreate,
             Self::TaskCreate { .. } => MutationOperation::TaskCreate,
             Self::TaskUpdate { .. } => MutationOperation::TaskUpdate,
             Self::NoteCreate { .. } => MutationOperation::NoteCreate,
@@ -316,6 +325,12 @@ fn execute_command(
     request_id: &str,
 ) -> Result<MutationExecution> {
     match command {
+        MutationCommand::ProjectCreate { input } => {
+            require_absent(expected_version)?;
+            let project = create_project_in_transaction(transaction, input)?;
+            // Projects have no mutable version column; the create-only remote contract starts at 1.
+            completed_execution(None, &project, &project.id, INITIAL_PROJECT_VERSION)
+        }
         MutationCommand::TaskCreate { input } => {
             require_absent(expected_version)?;
             validate_task_create(input)?;
@@ -709,6 +724,7 @@ fn map_audit_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<MutationAuditEve
 
 fn parse_operation(index: usize, value: &str) -> rusqlite::Result<MutationOperation> {
     match value {
+        "project.create" => Ok(MutationOperation::ProjectCreate),
         "task.create" => Ok(MutationOperation::TaskCreate),
         "task.update" => Ok(MutationOperation::TaskUpdate),
         "note.create" => Ok(MutationOperation::NoteCreate),

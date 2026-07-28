@@ -25,6 +25,9 @@ use crate::{
     export, migration, task_report,
 };
 
+const MAX_PROJECT_NAME_CHARS: usize = 500;
+const MAX_PROJECT_DESCRIPTION_CHARS: usize = 20_000;
+
 #[derive(Debug, Clone)]
 pub struct TmCore {
     pub(crate) database: Database,
@@ -47,17 +50,10 @@ impl TmCore {
     }
 
     pub fn create_project(&self, input: CreateProjectInput) -> Result<Project> {
-        let name = required_text("project name", &input.name)?;
-        let now = now_utc();
-        let id = new_id();
-        let connection = self.database.connect()?;
-        connection.execute(
-            "INSERT INTO projects(
-                id, name, description, color, sort_order, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, 0, ?5, ?5)",
-            params![id, name, input.description.trim(), input.color, now],
-        )?;
-        query_project(&connection, &id)
+        self.database
+            .transaction(TransactionBehavior::Immediate, |transaction| {
+                create_project_in_transaction(transaction, &input)
+            })
     }
 
     pub fn list_projects(&self, include_deleted: bool) -> Result<Vec<Project>> {
@@ -1432,6 +1428,47 @@ fn required_text(field: &str, value: &str) -> Result<String> {
         return Err(invalid(format!("{field} cannot be empty")));
     }
     Ok(value.to_owned())
+}
+
+pub(crate) fn create_project_in_transaction(
+    transaction: &Transaction<'_>,
+    input: &CreateProjectInput,
+) -> Result<Project> {
+    let name = required_text("project name", &input.name)?;
+    if name.chars().count() > MAX_PROJECT_NAME_CHARS {
+        return Err(invalid(format!(
+            "project name cannot exceed {MAX_PROJECT_NAME_CHARS} characters"
+        )));
+    }
+    if input.description.chars().count() > MAX_PROJECT_DESCRIPTION_CHARS {
+        return Err(invalid(format!(
+            "project description cannot exceed {MAX_PROJECT_DESCRIPTION_CHARS} characters"
+        )));
+    }
+    if input
+        .color
+        .as_deref()
+        .is_some_and(|color| !valid_project_color(color))
+    {
+        return Err(invalid(
+            "project color must be a six-digit CSS hex color such as #7386ff",
+        ));
+    }
+    let now = now_utc();
+    let id = new_id();
+    transaction.execute(
+        "INSERT INTO projects(
+            id, name, description, color, sort_order, created_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, 0, ?5, ?5)",
+        params![id, name, input.description.trim(), input.color, now],
+    )?;
+    query_project(transaction, &id)
+}
+
+fn valid_project_color(color: &str) -> bool {
+    color
+        .strip_prefix('#')
+        .is_some_and(|hex| hex.len() == 6 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
 pub(crate) fn update_task_in_transaction(

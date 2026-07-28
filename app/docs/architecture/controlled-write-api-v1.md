@@ -2,10 +2,11 @@
 
 ## 경계와 허용 범위
 
-STEP 8의 write API는 Railway `cloud-authenticated` profile에서만 활성화한다. 단일 사용자 bearer 인증을 통과해도 아래 다섯 동작 외에는 실행할 수 없다.
+STEP 8의 write API는 Railway `cloud-authenticated` profile에서만 활성화한다. 단일 사용자 bearer 인증을 통과해도 아래 여섯 동작 외에는 실행할 수 없다.
 
 | Operation | Endpoint | 허용 동작 |
 |---|---|---|
+| `project.create` | `POST /api/v1/projects` | Project 생성 |
 | `task.create` | `POST /api/v1/tasks` | Task 생성 |
 | `task.update` | `PATCH /api/v1/tasks/{id}` | Task 허용 필드 수정 |
 | `note.create` | `POST /api/v1/notes` | Note 생성 |
@@ -29,7 +30,7 @@ STEP 8의 write API는 Railway `cloud-authenticated` profile에서만 활성화�
 
 하나라도 없으면 mutation을 실행하기 전에 `428`을 반환한다. `If-Match` 형식이 잘못되면 `400`, 현재 version과 다르면 `409 MUTATION_CONFLICT`다. 생성 응답은 `201`, 수정 응답은 `200`이며 결과 resource version을 strong `ETag: "<version>"`으로 반환한다.
 
-`X-TM-Confirm-Mutation` 검사는 현재의 승인 정책 hook이다. 지금은 다섯 operation 모두 `explicit_user_confirmation` 정책이며, 향후 AI가 제안한 실행을 승인·보류하는 정책은 이 hook을 STEP 12에서 확장한다.
+`X-TM-Confirm-Mutation` 검사는 현재의 승인 정책 hook이다. 지금은 여섯 operation 모두 `explicit_user_confirmation` 정책이며, 향후 AI가 제안한 실행을 승인·보류하는 정책은 이 hook을 STEP 12에서 확장한다.
 
 ## idempotency와 transaction
 
@@ -44,6 +45,8 @@ STEP 8의 write API는 Railway `cloud-authenticated` profile에서만 활성화�
 ## version과 상태 전이
 
 Task, Note, Checklist는 schema 4부터 1에서 시작하는 정수 `version`을 가진다. 내용이 변경될 때마다 같은 transaction에서 1씩 증가한다. timestamp가 같은 밀리초에 겹쳐도 version 충돌 검사가 유지된다.
+
+Project는 수정 route가 없는 create-only resource라 별도 version 열이 없다. `project.create`는 생성 precondition인 `If-None-Match: *`를 요구하고 생성 결과와 감사 원장에는 논리적 version `1`을 기록한다.
 
 원격 Task 상태 전이는 다음만 허용한다.
 
@@ -61,6 +64,9 @@ Task, Note, Checklist는 schema 4부터 1에서 시작하는 정수 `version`을
 ## 입력·응답 제한
 
 - JSON body 상한: 64KiB
+- Project 이름: 공백 제거 후 1–500자
+- Project description: 최대 20,000자
+- Project color: 생략·`null` 또는 `#RRGGBB`
 - Task·Note 제목: 공백 제거 후 1–500자
 - Task description: 최대 20,000자
 - Note body: 최대 50,000자

@@ -140,9 +140,8 @@ pub(super) fn device_route_allowed(method: &Method, path: &str) -> bool {
         return method == Method::POST;
     }
     match path {
-        "/api/v1/projects" | "/api/v1/tags" | "/api/v1/sessions" | "/api/v1/worklogs" => {
-            method == Method::GET
-        }
+        "/api/v1/projects" => method == Method::GET || method == Method::POST,
+        "/api/v1/tags" | "/api/v1/sessions" | "/api/v1/worklogs" => method == Method::GET,
         "/api/v1/tasks" | "/api/v1/notes" => method == Method::GET || method == Method::POST,
         "/api/v1/checklist" => method == Method::GET,
         _ if path.starts_with("/api/v1/tasks/")
@@ -602,6 +601,21 @@ mod tests {
     fn registered_devices_can_read_cost_status_but_cannot_write_it() {
         assert!(device_route_allowed(&Method::GET, "/api/v1/costs/status"));
         assert!(!device_route_allowed(&Method::POST, "/api/v1/costs/status"));
+    }
+
+    #[test]
+    fn registered_devices_can_list_and_create_projects_only() {
+        assert!(device_route_allowed(&Method::GET, "/api/v1/projects"));
+        assert!(device_route_allowed(&Method::POST, "/api/v1/projects"));
+        assert!(!device_route_allowed(&Method::PATCH, "/api/v1/projects"));
+        assert!(!device_route_allowed(
+            &Method::PATCH,
+            "/api/v1/projects/project-id"
+        ));
+        assert!(!device_route_allowed(
+            &Method::DELETE,
+            "/api/v1/projects/project-id"
+        ));
     }
 
     #[test]
