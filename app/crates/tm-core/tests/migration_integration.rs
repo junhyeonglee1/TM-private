@@ -366,6 +366,12 @@ fn schema_fourteen_semantics_reject_missing_triggers_and_index_everywhere() -> R
         let corrupted = temporary.path().join(format!("{suffix}.sqlite3"));
         std::fs::copy(&valid_backup.path, &corrupted)?;
         let connection = Connection::open(&corrupted)?;
+        connection.create_scalar_function("tm_uuid_v7", 0, FunctionFlags::SQLITE_UTF8, |_| {
+            Ok(Uuid::now_v7().to_string())
+        })?;
+        connection.create_scalar_function("tm_now_utc", 0, FunctionFlags::SQLITE_UTF8, |_| {
+            Ok("2026-07-30T00:00:00.000Z".to_owned())
+        })?;
         connection.execute_batch(corruption_statement)?;
         connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
         drop(connection);
