@@ -49,7 +49,7 @@ case "$schema_version" in
         exit 1
         ;;
 esac
-if [ "$schema_version" -lt 1 ] || [ "$schema_version" -gt 13 ]; then
+if [ "$schema_version" -lt 1 ] || [ "$schema_version" -gt 14 ]; then
     echo "event=tm_backup_failed reason=unsupported_schema_version" >&2
     exit 1
 fi
@@ -64,7 +64,7 @@ if [ "$migration_summary" != "$expected_migration_summary" ]; then
     echo "event=tm_backup_failed reason=incomplete_migration_ledger" >&2
     exit 1
 fi
-if [ "$schema_version" -eq 13 ]; then
+if [ "$schema_version" -ge 13 ]; then
     required_tables='schema_migrations
 projects
 tasks
@@ -122,6 +122,90 @@ app_state'
         fi
     done
 fi
+schema_semantics_validated=null
+if [ "$schema_version" -ge 14 ]; then
+    schema_semantic_summary="$(
+        sqlite3 -readonly "$snapshot" "
+            WITH objects AS (
+                SELECT type,
+                       name,
+                       lower(
+                           replace(replace(replace(replace(sql, ' ', ''), char(9), ''), char(10), ''), char(13), '')
+                       ) AS normalized_sql
+                FROM sqlite_schema
+                WHERE sql IS NOT NULL
+            )
+            SELECT
+                (SELECT COUNT(*) FROM projects WHERE system_key = 'uncategorized') || '|' ||
+                (SELECT COUNT(*) FROM projects
+                 WHERE system_key = 'uncategorized'
+                   AND name = '기타'
+                   AND archived_at IS NULL
+                   AND deleted_at IS NULL) || '|' ||
+                (SELECT COUNT(*) FROM projects
+                 WHERE system_key IS NOT NULL AND system_key <> 'uncategorized') || '|' ||
+                (SELECT COUNT(*)
+                 FROM tasks
+                 LEFT JOIN projects ON projects.id = tasks.project_id
+                 WHERE tasks.project_id IS NULL OR projects.id IS NULL) || '|' ||
+                (SELECT COUNT(*) FROM objects
+                 WHERE type = 'table'
+                   AND name = 'projects'
+                   AND normalized_sql LIKE '%system_keytext%'
+                   AND normalized_sql LIKE '%check(system_keyisnullorsystem_key=''uncategorized'')%') || '|' ||
+                (SELECT COUNT(*) FROM objects
+                 WHERE type = 'index'
+                   AND name = 'idx_projects_system_key'
+                   AND normalized_sql LIKE '%createuniqueindexidx_projects_system_key%'
+                   AND normalized_sql LIKE '%onprojects(system_key)%'
+                   AND normalized_sql LIKE '%wheresystem_keyisnotnull%') || '|' ||
+                (SELECT COUNT(*) FROM objects
+                 WHERE type = 'trigger'
+                   AND (
+                       (name = 'tasks_project_required_insert'
+                        AND normalized_sql LIKE '%beforeinsertontasks%'
+                        AND normalized_sql LIKE '%new.project_idisnull%'
+                        AND normalized_sql LIKE '%raise(abort,''taskprojectisrequired'')%')
+                       OR
+                       (name = 'tasks_project_required_update'
+                        AND normalized_sql LIKE '%beforeupdateofproject_idontasks%'
+                        AND normalized_sql LIKE '%new.project_idisnull%'
+                        AND normalized_sql LIKE '%raise(abort,''taskprojectisrequired'')%')
+                       OR
+                       (name = 'projects_uncategorized_protect_update'
+                        AND normalized_sql LIKE '%beforeupdateonprojects%'
+                        AND normalized_sql LIKE '%old.system_key=''uncategorized''%'
+                        AND normalized_sql LIKE '%new.system_keyisnotold.system_key%'
+                        AND normalized_sql LIKE '%new.nameisnotold.name%'
+                        AND normalized_sql LIKE '%new.archived_atisnotold.archived_at%'
+                        AND normalized_sql LIKE '%new.deleted_atisnotold.deleted_at%'
+                        AND normalized_sql LIKE '%raise(abort,''uncategorizedprojectidentityandactivestateareimmutable'')%')
+                       OR
+                       (name = 'projects_uncategorized_protect_delete'
+                        AND normalized_sql LIKE '%beforedeleteonprojects%'
+                        AND normalized_sql LIKE '%old.system_key=''uncategorized''%'
+                        AND normalized_sql LIKE '%raise(abort,''uncategorizedprojectcannotbedeleted'')%')
+                       OR
+                       (name = 'projects_uncategorized_name_reserved_insert'
+                        AND normalized_sql LIKE '%beforeinsertonprojects%'
+                        AND normalized_sql LIKE '%new.system_keyisnull%'
+                        AND normalized_sql LIKE '%trim(new.name)=''기타''%'
+                        AND normalized_sql LIKE '%raise(abort,''projectname기타isreserved'')%')
+                       OR
+                       (name = 'projects_uncategorized_name_reserved_update'
+                        AND normalized_sql LIKE '%beforeupdateofname,system_keyonprojects%'
+                        AND normalized_sql LIKE '%new.system_keyisnull%'
+                        AND normalized_sql LIKE '%trim(new.name)=''기타''%'
+                        AND normalized_sql LIKE '%trim(old.name)<>''기타''%'
+                        AND normalized_sql LIKE '%raise(abort,''projectname기타isreserved'')%')
+                   ));"
+    )"
+    if [ "$schema_semantic_summary" != "1|1|0|0|1|1|6" ]; then
+        echo "event=tm_backup_failed reason=schema_semantics summary=$schema_semantic_summary" >&2
+        exit 1
+    fi
+    schema_semantics_validated=true
+fi
 
 created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 database_sha256="$(sha256sum "$snapshot" | awk '{print $1}')"
@@ -133,7 +217,8 @@ jq -n \
     --argjson schemaVersion "$schema_version" \
     --argjson migrationLedgerComplete true \
     --argjson requiredTablesComplete true \
-    '{createdAt:$createdAt,sha256:$sha256,byteSize:$byteSize,schemaVersion:$schemaVersion,migrationLedgerComplete:$migrationLedgerComplete,requiredTablesComplete:$requiredTablesComplete}' \
+    --argjson schemaSemanticsValidated "$schema_semantics_validated" \
+    '{createdAt:$createdAt,sha256:$sha256,byteSize:$byteSize,schemaVersion:$schemaVersion,migrationLedgerComplete:$migrationLedgerComplete,requiredTablesComplete:$requiredTablesComplete,schemaSemanticsValidated:$schemaSemanticsValidated}' \
     > "$manifest"
 
 endpoint="${TM_BACKUP_S3_ENDPOINT%/}"
@@ -181,7 +266,8 @@ jq -n \
     --argjson schemaVersion "$schema_version" \
     --argjson migrationLedgerComplete true \
     --argjson requiredTablesComplete true \
-    '{status:"succeeded",checkedAt:$checkedAt,snapshotId:$snapshotId,databaseSha256:$sha256,databaseByteSize:$byteSize,schemaVersion:$schemaVersion,retention:{daily:7,weekly:4,monthly:12},integrityCheck:"ok",migrationLedgerComplete:$migrationLedgerComplete,requiredTablesComplete:$requiredTablesComplete}' \
+    --argjson schemaSemanticsValidated "$schema_semantics_validated" \
+    '{status:"succeeded",checkedAt:$checkedAt,snapshotId:$snapshotId,databaseSha256:$sha256,databaseByteSize:$byteSize,schemaVersion:$schemaVersion,retention:{daily:7,weekly:4,monthly:12},integrityCheck:"ok",migrationLedgerComplete:$migrationLedgerComplete,requiredTablesComplete:$requiredTablesComplete,schemaSemanticsValidated:$schemaSemanticsValidated}' \
     > "$status_tmp"
 chmod 0600 "$status_tmp"
 mv "$status_tmp" "$status_directory/status.json"

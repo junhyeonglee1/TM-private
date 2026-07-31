@@ -9,7 +9,7 @@ use crate::{
     Error, MemoryPatch, Note, NotePatch, Result, Task, TaskPatch, TaskStatus, TmCore,
     core::{
         create_note_in_transaction, create_project_in_transaction, create_task_in_transaction,
-        query_checklist_item, query_note, query_project, query_task,
+        normalize_task_project_id, query_checklist_item, query_note, query_task,
         update_checklist_item_in_transaction, update_note_in_transaction,
         update_task_in_transaction,
     },
@@ -336,7 +336,6 @@ fn execute_command(
             validate_task_create(input)?;
             if let Some(project_id) = input.project_id.as_deref() {
                 validate_id("projectId", project_id)?;
-                validate_project_target(transaction, project_id)?;
             }
             let task = create_task_in_transaction(transaction, input)?;
             completed_execution(None, &task, &task.id, task.version)
@@ -350,9 +349,14 @@ fn execute_command(
             validate_task_transition(current.status, patch.status)?;
             if let Some(project_id) = patch.project_id.as_deref() {
                 validate_id("projectId", project_id)?;
-                validate_project_target(transaction, project_id)?;
             }
-            if !task_patch_changes(&current, patch) {
+            let resolved_project_id = normalize_task_project_id(
+                transaction,
+                current.project_id.as_deref(),
+                patch.project_id.as_deref(),
+                patch.clear_project,
+            )?;
+            if !task_patch_changes(&current, patch, &resolved_project_id) {
                 return Err(invalid("task update must change at least one field"));
             }
             let before = serde_json::to_value(&current)?;
@@ -527,16 +531,6 @@ fn validate_id(field: &str, value: &str) -> Result<()> {
         .map_err(|_| invalid(format!("{field} must be a UUID")))
 }
 
-fn validate_project_target(transaction: &Transaction<'_>, project_id: &str) -> Result<()> {
-    let project = query_project(transaction, project_id)?;
-    if project.deleted_at.is_some() || project.archived_at.is_some() {
-        return Err(Error::Conflict(
-            "task project must be active before it can receive remote changes".to_owned(),
-        ));
-    }
-    Ok(())
-}
-
 pub(crate) fn validate_task_create(input: &CreateTaskInput) -> Result<()> {
     validate_required_text("task title", &input.title, MAX_TITLE_CHARS)?;
     validate_optional_text(
@@ -613,7 +607,7 @@ fn validate_task_transition(current: TaskStatus, requested: Option<TaskStatus>) 
     Ok(())
 }
 
-fn task_patch_changes(current: &Task, patch: &TaskPatch) -> bool {
+fn task_patch_changes(current: &Task, patch: &TaskPatch, resolved_project_id: &str) -> bool {
     patch
         .title
         .as_ref()
@@ -626,11 +620,7 @@ fn task_patch_changes(current: &Task, patch: &TaskPatch) -> bool {
         || patch
             .priority
             .is_some_and(|value| value != current.priority)
-        || patch
-            .project_id
-            .as_ref()
-            .is_some_and(|value| Some(value) != current.project_id.as_ref())
-        || (patch.clear_project && current.project_id.is_some())
+        || current.project_id.as_deref() != Some(resolved_project_id)
         || patch
             .due_date
             .is_some_and(|value| Some(value) != current.due_date)

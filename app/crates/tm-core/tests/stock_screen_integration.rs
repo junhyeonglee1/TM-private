@@ -407,6 +407,15 @@ fn schema_twelve_migration_preserves_scheduler_rows_and_foreign_keys() -> Result
                 '2026-06-01T02:00:00.000Z', '2026-06-01T02:05:00.000Z',
                 '2026-06-01T02:05:00.000Z', NULL
          FROM scheduler_jobs WHERE job_key = 'scheduler.canary';
+         DROP TRIGGER tasks_project_required_insert;
+         DROP TRIGGER tasks_project_required_update;
+         DROP TRIGGER projects_uncategorized_protect_update;
+         DROP TRIGGER projects_uncategorized_protect_delete;
+         DROP TRIGGER projects_uncategorized_name_reserved_insert;
+         DROP TRIGGER projects_uncategorized_name_reserved_update;
+         DROP INDEX idx_projects_system_key;
+         DELETE FROM projects WHERE system_key = 'uncategorized';
+         ALTER TABLE projects DROP COLUMN system_key;
          DROP TRIGGER stock_ai_reports_no_delete;
          DROP TRIGGER stock_ai_reports_identity_immutable;
          DROP TRIGGER stock_screen_results_no_delete;
@@ -427,6 +436,7 @@ fn schema_twelve_migration_preserves_scheduler_rows_and_foreign_keys() -> Result
          DROP TABLE stock_market_data_batches;
          DROP TABLE stock_universe_members;
          DROP TABLE stock_universe_snapshots;
+         DELETE FROM schema_migrations WHERE version = 14;
          DELETE FROM schema_migrations WHERE version = 13;
          PRAGMA user_version = 12;",
     )?;
@@ -437,7 +447,7 @@ fn schema_twelve_migration_preserves_scheduler_rows_and_foreign_keys() -> Result
     drop(connection);
 
     let migrated = TmCore::open(TmHome::new(temporary.path()))?;
-    assert_eq!(migrated.health()?.schema_version, 13);
+    assert_eq!(migrated.health()?.schema_version, 14);
     let connection = Connection::open(migrated.home().database_path())?;
     connection.execute_batch("PRAGMA foreign_keys = ON;")?;
     let after: i64 =

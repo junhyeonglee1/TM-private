@@ -19,7 +19,7 @@ use crate::{
     TaskDayStatus, TaskEvent, TaskPatch, TaskReportCompletion, TaskReportRun, TaskReportStart,
     TaskStatus, TmHome, TrashEntityType, TrashItem, UpdateChangeRequestInput,
     UpdateTaskAggregateInput, WorkLog, WorkSession, ai_budget, backup, change_request,
-    database::{Database, SCHEMA_VERSION, new_id, now_utc, today_seoul},
+    database::{Database, SCHEMA_VERSION, new_id, now_utc, today_seoul, validate_schema_semantics},
     digest,
     error::{invalid, not_found},
     export, migration, task_report,
@@ -27,6 +27,8 @@ use crate::{
 
 const MAX_PROJECT_NAME_CHARS: usize = 500;
 const MAX_PROJECT_DESCRIPTION_CHARS: usize = 20_000;
+const UNCATEGORIZED_PROJECT_NAME: &str = "기타";
+const UNCATEGORIZED_PROJECT_SYSTEM_KEY: &str = "uncategorized";
 
 #[derive(Debug, Clone)]
 pub struct TmCore {
@@ -60,7 +62,7 @@ impl TmCore {
         let connection = self.database.connect()?;
         let mut statement = connection.prepare(
             "SELECT id, name, description, color, sort_order, created_at, updated_at,
-                    archived_at, deleted_at
+                    archived_at, deleted_at, system_key
              FROM projects
              WHERE (?1 = 1 OR deleted_at IS NULL)
              ORDER BY sort_order ASC, name COLLATE NOCASE ASC",
@@ -949,6 +951,14 @@ impl TmCore {
             TrashEntityType::Session => ("work_sessions", "goal", ""),
         };
         let connection = self.database.connect()?;
+        if matches!(entity_type, TrashEntityType::Project) && deleted_at.is_some() {
+            let project = query_project(&connection, id)?;
+            if project.system_key.as_deref() == Some(UNCATEGORIZED_PROJECT_SYSTEM_KEY) {
+                return Err(Error::Conflict(
+                    "the uncategorized system project cannot be moved to the trash".to_owned(),
+                ));
+            }
+        }
         let sql = format!(
             "UPDATE {table} SET deleted_at = ?2, updated_at = ?3{version_update} WHERE id = ?1 AND {title_column} IS NOT NULL"
         );
@@ -1406,10 +1416,12 @@ impl TmCore {
             connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
         let sqlite_version: String =
             connection.query_row("SELECT sqlite_version()", [], |row| row.get(0))?;
+        let schema_semantics_ok = validate_schema_semantics(&connection, schema_version).is_ok();
         Ok(HealthReport {
             ok: schema_version == SCHEMA_VERSION
                 && foreign_keys == 1
                 && integrity_check == "ok"
+                && schema_semantics_ok
                 && journal_mode.eq_ignore_ascii_case("wal"),
             database_path: self.home().database_path().to_string_lossy().into_owned(),
             schema_version,
@@ -1439,6 +1451,11 @@ pub(crate) fn create_project_in_transaction(
         return Err(invalid(format!(
             "project name cannot exceed {MAX_PROJECT_NAME_CHARS} characters"
         )));
+    }
+    if name == UNCATEGORIZED_PROJECT_NAME {
+        return Err(invalid(
+            "project name 기타 is reserved for TM's uncategorized system project",
+        ));
     }
     if input.description.chars().count() > MAX_PROJECT_DESCRIPTION_CHARS {
         return Err(invalid(format!(
@@ -1499,11 +1516,12 @@ pub(crate) fn update_task_in_transaction(
         .transpose()?
         .unwrap_or(current.title);
     let description = patch.description.unwrap_or(current.description);
-    let project_id = if patch.clear_project {
-        None
-    } else {
-        patch.project_id.or(current.project_id)
-    };
+    let project_id = normalize_task_project_id(
+        transaction,
+        current.project_id.as_deref(),
+        patch.project_id.as_deref(),
+        patch.clear_project,
+    )?;
     let due_date = if patch.clear_due_date {
         None
     } else {
@@ -1825,6 +1843,8 @@ pub(crate) fn create_task_in_transaction(
     let id = new_id();
     let now = now_utc();
     let completed_at = (input.status == TaskStatus::Done).then(|| now.clone());
+    let project_id =
+        normalize_task_project_id(transaction, None, input.project_id.as_deref(), false)?;
     transaction.execute(
         "INSERT INTO tasks(
             id, project_id, title, description, status, priority, due_date,
@@ -1832,7 +1852,7 @@ pub(crate) fn create_task_in_transaction(
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
         params![
             id,
-            input.project_id,
+            project_id,
             title,
             input.description.trim(),
             input.status.as_str(),
@@ -1849,7 +1869,7 @@ pub(crate) fn query_project(connection: &Connection, id: &str) -> Result<Project
     connection
         .query_row(
             "SELECT id, name, description, color, sort_order, created_at, updated_at,
-                    archived_at, deleted_at
+                    archived_at, deleted_at, system_key
              FROM projects WHERE id = ?1",
             [id],
             map_project,
@@ -1861,6 +1881,7 @@ pub(crate) fn query_project(connection: &Connection, id: &str) -> Result<Project
 fn map_project(row: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
     Ok(Project {
         id: row.get(0)?,
+        system_key: row.get(9)?,
         name: row.get(1)?,
         description: row.get(2)?,
         color: row.get(3)?,
@@ -1870,6 +1891,51 @@ fn map_project(row: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
         archived_at: row.get(7)?,
         deleted_at: row.get(8)?,
     })
+}
+
+pub(crate) fn normalize_task_project_id(
+    connection: &Connection,
+    current_project_id: Option<&str>,
+    requested_project_id: Option<&str>,
+    clear_project: bool,
+) -> Result<String> {
+    if clear_project && requested_project_id.is_some() {
+        return Err(invalid("project cannot be both set and cleared"));
+    }
+    if clear_project {
+        return uncategorized_project_id(connection);
+    }
+    if let Some(project_id) = requested_project_id {
+        let project = query_project(connection, project_id)?;
+        if current_project_id == Some(project_id) {
+            return Ok(project_id.to_owned());
+        }
+        if project.deleted_at.is_some() || project.archived_at.is_some() {
+            return Err(Error::Conflict(
+                "task project must be active before it can receive changes".to_owned(),
+            ));
+        }
+        return Ok(project_id.to_owned());
+    }
+    if let Some(project_id) = current_project_id {
+        return Ok(project_id.to_owned());
+    }
+    uncategorized_project_id(connection)
+}
+
+fn uncategorized_project_id(connection: &Connection) -> Result<String> {
+    connection
+        .query_row(
+            "SELECT id
+             FROM projects
+             WHERE system_key = ?1 AND archived_at IS NULL AND deleted_at IS NULL",
+            [UNCATEGORIZED_PROJECT_SYSTEM_KEY],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| {
+            Error::Invariant("uncategorized system project is missing or inactive".to_owned())
+        })
 }
 
 pub(crate) fn query_task(connection: &Connection, id: &str, include_deleted: bool) -> Result<Task> {

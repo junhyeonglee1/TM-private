@@ -64,11 +64,18 @@ fn project_create_mutation_is_atomic_idempotent_and_audited() -> Result<()> {
     assert_eq!(created.version, 1);
     assert!(!created.replayed);
     let projects = core.list_projects(false)?;
-    assert_eq!(projects.len(), 1);
-    assert_eq!(projects[0].id, created.resource_id);
-    assert_eq!(projects[0].name, "Mobile project");
-    assert_eq!(projects[0].description, "Created from a registered device");
-    assert_eq!(projects[0].color.as_deref(), Some("#7386ff"));
+    assert_eq!(projects.len(), 2);
+    let created_project = projects
+        .iter()
+        .find(|project| project.id == created.resource_id)
+        .ok_or_else(|| Error::Invariant("created project missing".to_owned()))?;
+    assert_eq!(created_project.name, "Mobile project");
+    assert_eq!(
+        created_project.description,
+        "Created from a registered device"
+    );
+    assert_eq!(created_project.color.as_deref(), Some("#7386ff"));
+    assert!(created_project.system_key.is_none());
 
     let replayed = core.execute_remote_mutation(MutationRequest {
         request_id: "request-project-create-retry".to_owned(),
@@ -76,7 +83,7 @@ fn project_create_mutation_is_atomic_idempotent_and_audited() -> Result<()> {
     })?;
     assert!(replayed.replayed);
     assert_eq!(replayed.resource_id, created.resource_id);
-    assert_eq!(core.list_projects(false)?.len(), 1);
+    assert_eq!(core.list_projects(false)?.len(), 2);
 
     let conflict = core.execute_remote_mutation(MutationRequest {
         command: MutationCommand::ProjectCreate {
@@ -115,6 +122,15 @@ fn controlled_mutations_are_versioned_idempotent_and_audited() -> Result<()> {
     assert_eq!(created.operation, MutationOperation::TaskCreate);
     assert_eq!(created.version, 1);
     assert!(!created.replayed);
+    let uncategorized = core
+        .list_projects(false)?
+        .into_iter()
+        .find(|project| project.system_key.as_deref() == Some("uncategorized"))
+        .ok_or_else(|| Error::Invariant("uncategorized project missing".to_owned()))?;
+    assert_eq!(
+        core.get_task(&created.resource_id)?.project_id.as_deref(),
+        Some(uncategorized.id.as_str())
+    );
 
     let replay = core.execute_remote_mutation(MutationRequest {
         request_id: "request-task-create-retry".to_owned(),
@@ -123,6 +139,22 @@ fn controlled_mutations_are_versioned_idempotent_and_audited() -> Result<()> {
     assert!(replay.replayed);
     assert_eq!(replay.resource_id, created.resource_id);
     assert_eq!(core.list_tasks(false)?.len(), 1);
+    assert_eq!(core.list_mutation_audit_events()?.len(), 1);
+
+    let no_op_clear = core.execute_remote_mutation(request(
+        "task-clear-key-00001",
+        "request-task-clear-no-op",
+        MutationExpectedVersion::Exact(1),
+        MutationCommand::TaskUpdate {
+            task_id: created.resource_id.clone(),
+            patch: TaskPatch {
+                clear_project: true,
+                ..TaskPatch::default()
+            },
+        },
+    ));
+    assert!(matches!(no_op_clear, Err(Error::InvalidInput(_))));
+    assert_eq!(core.get_task(&created.resource_id)?.version, 1);
     assert_eq!(core.list_mutation_audit_events()?.len(), 1);
 
     let mismatched = core.execute_remote_mutation(MutationRequest {
@@ -367,6 +399,15 @@ fn project_create_mutation_enforces_bounded_input_and_absent_version() -> Result
                 color: None,
             },
         ),
+        (
+            "project-reserved-name-001",
+            MutationExpectedVersion::Absent,
+            CreateProjectInput {
+                name: "기타".to_owned(),
+                description: String::new(),
+                color: None,
+            },
+        ),
     ];
 
     for (index, (key, expected_version, input)) in cases.into_iter().enumerate() {
@@ -378,7 +419,9 @@ fn project_create_mutation_enforces_bounded_input_and_absent_version() -> Result
         ));
         assert!(matches!(result, Err(Error::InvalidInput(_))));
     }
-    assert!(core.list_projects(false)?.is_empty());
+    let projects = core.list_projects(false)?;
+    assert_eq!(projects.len(), 1);
+    assert_eq!(projects[0].system_key.as_deref(), Some("uncategorized"));
     assert!(core.list_mutation_audit_events()?.is_empty());
     Ok(())
 }

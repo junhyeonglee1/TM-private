@@ -1,7 +1,132 @@
 import { createApi, type CommandTransport } from "./api";
 import { createMemoryTransport } from "./mock-transport";
+import type { AppSnapshot } from "../types";
+
+const archiveMockProject = (
+  transport: ReturnType<typeof createMemoryTransport>,
+  projectId: string,
+) => {
+  const snapshot = Reflect.get(transport, "snapshot") as AppSnapshot;
+  const project = snapshot.projects.find((candidate) => candidate.id === projectId);
+  if (!project) throw new Error("보관할 mock 프로젝트 fixture가 없습니다.");
+  project.archived = true;
+};
 
 describe("Tauri invoke payload 계약", () => {
+  it("mock snapshot과 null·undefined 프로젝트 Task를 시스템 기타 프로젝트로 정규화한다", async () => {
+    const api = createApi(createMemoryTransport());
+    const initial = await api.getSnapshot();
+    const uncategorized = initial.projects.find(
+      (project) => project.systemKey === "uncategorized",
+    );
+    expect(uncategorized).toMatchObject({ name: "기타", archived: false });
+
+    await api.createTask({ title: "분류 전 Task", projectId: null, status: "todo" });
+    let snapshot = await api.getSnapshot();
+    expect(snapshot.tasks.find((task) => task.title === "분류 전 Task")).toMatchObject({
+      projectId: uncategorized?.id,
+      projectName: "기타",
+    });
+    await api.createTask({ title: "프로젝트 생략 Task", status: "todo" });
+    snapshot = await api.getSnapshot();
+    expect(snapshot.tasks.find((task) => task.title === "프로젝트 생략 Task")).toMatchObject({
+      projectId: uncategorized?.id,
+      projectName: "기타",
+    });
+
+    const existing = snapshot.tasks.find((task) => task.id === "task-schema");
+    if (!existing) throw new Error("mock Task fixture가 없습니다.");
+    await api.updateTask({
+      taskId: existing.id,
+      title: existing.title,
+      description: existing.description,
+      status: existing.status,
+      priority: existing.priority,
+      dueDate: existing.dueDate,
+      projectId: null,
+      tags: existing.tags,
+      checklist: existing.checklist,
+    });
+    snapshot = await api.getSnapshot();
+    expect(snapshot.tasks.find((task) => task.id === existing.id)).toMatchObject({
+      projectId: uncategorized?.id,
+      projectName: "기타",
+    });
+  });
+
+  it("mock Task 생성은 명시된 프로젝트가 없거나 비활성이면 거부한다", async () => {
+    const transport = createMemoryTransport();
+    archiveMockProject(transport, "project-personal");
+    const api = createApi(transport);
+    const before = await api.getSnapshot();
+
+    await expect(api.createTask({
+      title: "존재하지 않는 프로젝트 Task",
+      projectId: "project-missing",
+      status: "todo",
+    })).rejects.toThrow("프로젝트를 찾지 못했습니다");
+    await expect(api.createTask({
+      title: "보관 프로젝트 Task",
+      projectId: "project-personal",
+      status: "todo",
+    })).rejects.toThrow("보관된 프로젝트에는 Task를 배정할 수 없습니다");
+
+    expect((await api.getSnapshot()).tasks).toHaveLength(before.tasks.length);
+  });
+
+  it("mock Task 변경은 명시된 프로젝트가 없거나 비활성이면 원본을 보존한다", async () => {
+    const transport = createMemoryTransport();
+    archiveMockProject(transport, "project-personal");
+    const api = createApi(transport);
+    const existing = (await api.getSnapshot()).tasks.find((task) => task.id === "task-schema");
+    if (!existing) throw new Error("mock Task fixture가 없습니다.");
+    const update = (projectId: string) => api.updateTask({
+      taskId: existing.id,
+      title: "저장되면 안 되는 제목",
+      description: existing.description,
+      status: existing.status,
+      priority: existing.priority,
+      dueDate: existing.dueDate,
+      projectId,
+      tags: existing.tags,
+      checklist: existing.checklist,
+    });
+
+    await expect(update("project-missing")).rejects.toThrow("프로젝트를 찾지 못했습니다");
+    await expect(update("project-personal")).rejects.toThrow(
+      "보관된 프로젝트에는 Task를 배정할 수 없습니다",
+    );
+
+    expect((await api.getSnapshot()).tasks.find((task) => task.id === existing.id)).toEqual(existing);
+  });
+
+  it("이미 보관된 프로젝트에 속한 mock Task는 소속을 유지한 편집을 허용한다", async () => {
+    const transport = createMemoryTransport();
+    archiveMockProject(transport, "project-personal");
+    const api = createApi(transport);
+    const existing = (await api.getSnapshot()).tasks.find(
+      (task) => task.projectId === "project-personal",
+    );
+    if (!existing) throw new Error("보관 프로젝트의 기존 mock Task fixture가 없습니다.");
+
+    await api.updateTask({
+      taskId: existing.id,
+      title: "보관 프로젝트 소속 유지 편집",
+      description: existing.description,
+      status: existing.status,
+      priority: existing.priority,
+      dueDate: existing.dueDate,
+      projectId: existing.projectId,
+      tags: existing.tags,
+      checklist: existing.checklist,
+    });
+
+    expect((await api.getSnapshot()).tasks.find((task) => task.id === existing.id)).toMatchObject({
+      title: "보관 프로젝트 소속 유지 편집",
+      projectId: "project-personal",
+    });
+  });
+
   it("생성된 프로젝트 ID를 반환하고 Task 상태를 그대로 전달한다", async () => {
     const calls: Array<{ command: string; args?: Record<string, unknown> }> = [];
     const transport: CommandTransport = {

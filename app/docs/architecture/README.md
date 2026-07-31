@@ -28,7 +28,9 @@ STEP 14는 schema 8에 durable job·run·attempt·effect 원장을 추가한다.
 
 STEP 15는 schema 9에 10분짜리 기기 페어링, 90일 기기 세션, 개별·전체 폐기와 append-only 인증 감사를 추가한다. primary bearer token만 기기 승인·폐기를 수행하고 모바일 PWA는 `HttpOnly + Secure + SameSite=Strict` 기기 쿠키, same-origin 검증과 CSRF token으로 제한된 Task·Note·AI 비서·승인 route만 사용한다. PWA는 같은 Railway 서비스에 내장되어 별도 서버가 없으며 service worker는 app shell만 캐시하고 TM 데이터·AI 응답·mutation을 저장하거나 재전송하지 않는다. 백업 복원은 현재 기기 인증 원장을 병합해 폐기된 기기가 되살아나지 않게 한다.
 
-모바일 프로젝트·Task 관리는 기존 schema 13과 controlled mutation 원장을 그대로 사용한다. 등록 기기는 프로젝트 목록·생성, Task 생성·상세 편집·상태 변경·빠른 완료, 프로젝트·상태 필터와 페이지 추가 조회를 사용할 수 있다. 새 `project.create`만 create-only mutation으로 추가하며 Project 편집·보관·삭제와 Task 삭제는 노출하지 않는다. 모든 쓰기는 CSRF, idempotency, operation confirmation, 생성·수정 precondition을 거치며 OpenAI 도구에는 추가하지 않는다.
+모바일 프로젝트·Task 관리는 controlled mutation 원장을 그대로 사용한다. 등록 기기는 프로젝트 목록·생성, Task 생성·상세 편집·상태 변경·빠른 완료, 프로젝트·상태 필터와 페이지 추가 조회를 사용할 수 있다. 새 `project.create`만 create-only mutation으로 추가하며 Project 편집·보관·삭제와 Task 삭제는 노출하지 않는다. 모든 쓰기는 CSRF, idempotency, operation confirmation, 생성·수정 precondition을 거치며 OpenAI 도구에는 추가하지 않는다.
+
+schema 14는 기존 활성 `기타` 프로젝트 하나를 `uncategorized` 시스템 프로젝트로 지정한다. 기존의 `project_id IS NULL` Task는 pre-migration backup 뒤 같은 프로젝트로 이관하고, 이후 Windows·모바일·승인된 AI·직접 core 경로에서 프로젝트를 생략하거나 지우면 중앙 저장 계층이 `기타` ID로 정규화한다. 시스템 프로젝트와 Task 소속 불변 조건은 DB trigger로도 보호하며 API의 nullable 입력 형태는 구버전 클라이언트 호환을 위해 유지한다.
 
 STEP 16은 schema 변경 없이 `normal`·`read-only`·`lockdown` 사고 모드와 독립 AI kill switch를 추가한다. 운영 status는 RPO/RTO, backup freshness/integrity, scheduler, AI 비용 원장과 process lifetime 보안 거절 수를 함께 평가한다. request target/header 제한과 browser security header를 강화하고 private CI에서 SHA-pinned Action, RustSec, Trivy filesystem/image, secret policy scan을 수행한다.
 

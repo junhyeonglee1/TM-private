@@ -24,6 +24,8 @@ export type CalendarRecurrence =
   | "monthly_first_day"
   | "monthly_last_day";
 
+export const UNCATEGORIZED_PROJECT_SYSTEM_KEY = "uncategorized" as const;
+
 export interface CalendarEvent {
   id: string;
   title: string;
@@ -233,6 +235,7 @@ export interface Project {
   name: string;
   description: string;
   color: string;
+  systemKey: typeof UNCATEGORIZED_PROJECT_SYSTEM_KEY | null;
   openTaskCount: number;
   completedTaskCount: number;
   archived: boolean;

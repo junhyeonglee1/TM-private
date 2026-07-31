@@ -16,7 +16,10 @@ use zip::{ZipWriter, write::SimpleFileOptions};
 
 use crate::{
     Error, Result,
-    database::{Database, SCHEMA_VERSION, database_lock, now_utc, register_runtime_functions},
+    database::{
+        Database, SCHEMA_VERSION, database_lock, now_utc, register_runtime_functions,
+        validate_schema_semantics,
+    },
     export::EXPORTED_TABLES,
 };
 
@@ -296,6 +299,8 @@ fn validate_database(path: &Path, require_tm_schema: bool) -> Result<()> {
     } else {
         true
     };
+    let has_valid_schema_semantics =
+        version < 14 || validate_schema_semantics(&connection, version).is_ok();
     let has_foreign_key_violation = {
         let mut statement = connection
             .prepare("PRAGMA foreign_key_check")
@@ -311,6 +316,7 @@ fn validate_database(path: &Path, require_tm_schema: bool) -> Result<()> {
         || (require_tm_schema && !(1..=SCHEMA_VERSION).contains(&version))
         || !has_core_tables
         || !has_complete_manifest
+        || !has_valid_schema_semantics
         || has_foreign_key_violation
     {
         return Err(Error::InvalidBackup(path.to_path_buf()));

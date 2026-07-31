@@ -11,7 +11,7 @@ Set-StrictMode -Version Latest
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 Add-Type -AssemblyName System.Net.Http
 
-$expectedSchemaVersion = 13
+$expectedSchemaVersion = 14
 $expectedFeatureHardLimitMicrousd = 2000000
 $resource = 'TM Cloud Production'
 $userName = 'single-user'
@@ -128,7 +128,8 @@ try {
         [int]$opsBefore.remoteBackup.schemaVersion -ne $expectedSchemaVersion -or
         [string]$opsBefore.remoteBackup.integrityCheck -ne 'ok' -or
         [bool]$opsBefore.remoteBackup.migrationLedgerComplete -ne $true -or
-        [bool]$opsBefore.remoteBackup.requiredTablesComplete -ne $true) {
+        [bool]$opsBefore.remoteBackup.requiredTablesComplete -ne $true -or
+        [bool]$opsBefore.remoteBackup.schemaSemanticsValidated -ne $true) {
         throw "Production DB and remote backup must both be healthy schema $expectedSchemaVersion."
     }
 
@@ -224,6 +225,7 @@ try {
         remoteBackupIntegrity = [string]$opsAfter.remoteBackup.integrityCheck
         remoteBackupMigrationLedgerComplete = [bool]$opsAfter.remoteBackup.migrationLedgerComplete
         remoteBackupRequiredTablesComplete = [bool]$opsAfter.remoteBackup.requiredTablesComplete
+        remoteBackupSchemaSemanticsValidated = [bool]$opsAfter.remoteBackup.schemaSemanticsValidated
         licenseGate = $false
         screenEnabled = $false
         aiEnabled = $false

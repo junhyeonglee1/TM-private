@@ -3,7 +3,11 @@ param(
     [ValidatePattern('^https://')]
     [string]$BaseUri = 'https://tm-server-production-5573.up.railway.app',
 
-    [string]$OutputPath
+    [string]$OutputPath,
+
+    [Parameter(Mandatory = $true)]
+    [ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })]
+    [string]$MigrationBaselinePath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -20,6 +24,7 @@ if ([string]::IsNullOrWhiteSpace($OutputPath)) {
     )
 }
 $OutputPath = [System.IO.Path]::GetFullPath($OutputPath)
+$MigrationBaselinePath = [System.IO.Path]::GetFullPath($MigrationBaselinePath)
 
 function Invoke-TmRequest {
     param(
@@ -106,7 +111,11 @@ function Assert-ErrorCode {
 }
 
 function Get-Sha256Hex {
-    param([Parameter(Mandatory = $true)][string]$Text)
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Text
+    )
 
     $sha256 = [System.Security.Cryptography.SHA256]::Create()
     try {
@@ -170,6 +179,7 @@ function Get-DeviceCollectionSnapshot {
     [pscustomobject]@{
         Digest = Get-Sha256Hex -Text $canonicalJson
         Total = $total
+        Items = $canonicalItems
     }
 }
 
@@ -184,10 +194,81 @@ function Get-BusinessSnapshot {
         -Client $Client -Base $Base -CookieHeader $CookieHeader -ResourceName 'projects'
     $tasks = Get-DeviceCollectionSnapshot `
         -Client $Client -Base $Base -CookieHeader $CookieHeader -ResourceName 'tasks'
+    $uncategorizedProjects = @(
+        $projects.Items | Where-Object { [string]$_.systemKey -eq 'uncategorized' }
+    )
+    if ($uncategorizedProjects.Count -ne 1) {
+        throw 'The production project snapshot must contain exactly one uncategorized system project.'
+    }
+    $uncategorizedProjectId = [string]$uncategorizedProjects[0].id
+    $unassignedTasks = @($tasks.Items | Where-Object { $null -eq $_.projectId })
+    if ($unassignedTasks.Count -ne 0) {
+        throw 'The production Task snapshot still contains project-less items after schema 14.'
+    }
     [pscustomobject]@{
         Digest = Get-Sha256Hex -Text "projects:$($projects.Digest)`ntasks:$($tasks.Digest)"
         ProjectsRead = $true
         TasksRead = $true
+        ProjectTotal = $projects.Total
+        UncategorizedProjectId = $uncategorizedProjectId
+        TaskItems = $tasks.Items
+        UncategorizedProjectPresent = -not [string]::IsNullOrWhiteSpace($uncategorizedProjectId)
+        AllTasksAssigned = $true
+    }
+}
+
+function Assert-MigrationBaseline {
+    param(
+        [Parameter(Mandatory = $true)]$Baseline,
+        [Parameter(Mandatory = $true)]$BusinessSnapshot,
+        [Parameter(Mandatory = $true)][string]$Base
+    )
+
+    if ([int]$Baseline.formatVersion -ne 1 -or
+        [int]$Baseline.sourceSchemaVersion -ne 13 -or
+        [string]$Baseline.baseUri -ne $Base) {
+        throw 'The schema 13 migration baseline metadata is invalid for this production origin.'
+    }
+    if ([int]$Baseline.projectTotal -ne [int]$BusinessSnapshot.ProjectTotal) {
+        throw 'The active project count changed during the schema 13 to 14 migration.'
+    }
+    if ([string]$Baseline.uncategorizedProject.id -ne
+        [string]$BusinessSnapshot.UncategorizedProjectId) {
+        throw 'Schema 14 did not adopt the existing production uncategorized project ID.'
+    }
+
+    $expectedTasks = @($Baseline.unassignedTasks)
+    if ($expectedTasks.Count -lt 1 -or
+        [int]$Baseline.unassignedTaskCount -ne $expectedTasks.Count) {
+        throw 'The schema 13 migration baseline has no complete unassigned Task set.'
+    }
+    $actualById = @{}
+    foreach ($task in @($BusinessSnapshot.TaskItems)) {
+        $id = [string]$task.id
+        if ($actualById.ContainsKey($id)) {
+            throw 'The production Task snapshot contains a duplicate ID.'
+        }
+        $actualById[$id] = $task
+    }
+
+    foreach ($expected in $expectedTasks) {
+        $taskId = [string]$expected.id
+        if (-not $actualById.ContainsKey($taskId)) {
+            throw 'A Task recorded in the schema 13 baseline is missing after migration.'
+        }
+        $actual = $actualById[$taskId]
+        if ([string]$actual.projectId -ne [string]$BusinessSnapshot.UncategorizedProjectId -or
+            [int64]$actual.version -ne ([int64]$expected.version + 1) -or
+            (Get-Sha256Hex -Text ([string]$actual.title)) -ne [string]$expected.titleSha256 -or
+            (Get-Sha256Hex -Text ([string]$actual.description)) -ne [string]$expected.descriptionSha256 -or
+            [string]$actual.status -ne [string]$expected.status -or
+            [int]$actual.priority -ne [int]$expected.priority -or
+            [string]$actual.dueDate -ne [string]$expected.dueDate -or
+            [string]$actual.completedAt -ne [string]$expected.completedAt -or
+            [string]$actual.createdAt -ne [string]$expected.createdAt -or
+            [string]$actual.updatedAt -ne [string]$expected.updatedAt) {
+            throw 'A schema 13 unassigned Task was not preserved exactly during migration.'
+        }
     }
 }
 
@@ -200,6 +281,8 @@ function Get-OperationsInvariant {
         BackupStatus = [string]$OperationsData.remoteBackup.status
         BackupSchemaVersion = [int]$OperationsData.remoteBackup.schemaVersion
         BackupIntegrity = [string]$OperationsData.remoteBackup.integrityCheck
+        BackupSchemaSemanticsValidated =
+            [bool]$OperationsData.remoteBackup.schemaSemanticsValidated
     }
 }
 
@@ -210,10 +293,11 @@ function Assert-HealthyOperations {
     )
 
     if (-not $Invariant.DatabaseOk -or
-        $Invariant.SchemaVersion -lt 13 -or
+        $Invariant.SchemaVersion -ne 14 -or
         $Invariant.BackupStatus -ne 'succeeded' -or
         $Invariant.BackupSchemaVersion -ne $Invariant.SchemaVersion -or
-        $Invariant.BackupIntegrity -ne 'ok') {
+        $Invariant.BackupIntegrity -ne 'ok' -or
+        -not $Invariant.BackupSchemaSemanticsValidated) {
         throw "$Stage did not report a healthy database and matching verified remote backup."
     }
 }
@@ -229,7 +313,8 @@ function Test-OperationsInvariant {
         $Before.SchemaVersion -eq $After.SchemaVersion -and
         $Before.BackupStatus -eq $After.BackupStatus -and
         $Before.BackupSchemaVersion -eq $After.BackupSchemaVersion -and
-        $Before.BackupIntegrity -eq $After.BackupIntegrity
+        $Before.BackupIntegrity -eq $After.BackupIntegrity -and
+        $Before.BackupSchemaSemanticsValidated -eq $After.BackupSchemaSemanticsValidated
     )
 }
 
@@ -262,6 +347,7 @@ $failedStage = $null
 $failure = $null
 $cleanupFailure = $null
 $successResult = $null
+$migrationBaseline = $null
 
 try {
     $uri = [System.Uri]$BaseUri
@@ -272,6 +358,7 @@ try {
         throw 'BaseUri must be a credential-free HTTPS origin.'
     }
     $base = $uri.GetLeftPart([System.UriPartial]::Authority)
+    $migrationBaseline = Get-Content -Raw -Encoding UTF8 $MigrationBaselinePath | ConvertFrom-Json
 
     $vault =
         [Windows.Security.Credentials.PasswordVault,Windows.Security.Credentials,ContentType=WindowsRuntime]::new()
@@ -352,6 +439,7 @@ try {
         'loadTaskWorkspace',
         'loadProjects',
         'loadTasks',
+        'uncategorized',
         'completeTask',
         'window.confirm'
     )
@@ -365,15 +453,15 @@ try {
         throw 'The production PWA mutation version contract is incomplete.'
     }
 
-    $stage = 'pwa-cache-v11'
+    $stage = 'pwa-cache-v12'
     $serviceWorker = Invoke-TmRequest `
         -Client $client -Method ([System.Net.Http.HttpMethod]::Get) -Uri "$base/mobile/sw.js"
     Assert-Status -Response $serviceWorker -Expected 200 -Stage $stage
-    if ($serviceWorker.Body -notmatch 'tm-mobile-shell-v11' -or
+    if ($serviceWorker.Body -notmatch 'tm-mobile-shell-v12' -or
         $serviceWorker.Body -notmatch 'url\.pathname\.startsWith\("/api/"\)' -or
         $serviceWorker.Body -notmatch 'request\.method !== "GET"' -or
         $serviceWorker.Body -notmatch 'keys\.filter\(\(key\) => key !== CACHE_NAME\)') {
-        throw 'The production PWA v11 app-shell-only cache contract is invalid.'
+        throw 'The production PWA v12 app-shell-only cache contract is invalid.'
     }
 
     $stage = 'temporary-device-pairing-start'
@@ -431,6 +519,8 @@ try {
     $stage = 'mobile-business-snapshot-before'
     $businessBefore = Get-BusinessSnapshot `
         -Client $client -Base $base -CookieHeader $cookieHeader
+    Assert-MigrationBaseline `
+        -Baseline $migrationBaseline -BusinessSnapshot $businessBefore -Base $base
 
     $stage = 'project-create-missing-confirmation'
     $unconfirmedProject = Invoke-TmRequest `
@@ -543,24 +633,31 @@ try {
         pwa = [ordered]@{
             projectTaskUi = $true
             controlledMutationClient = $true
-            cacheContract = 'tm-mobile-shell-v11'
+            cacheContract = 'tm-mobile-shell-v12'
             apiResponsesCached = $false
         }
         mobileApi = [ordered]@{
             projectsRead = [bool]$businessBefore.ProjectsRead
             tasksRead = [bool]$businessBefore.TasksRead
+            uncategorizedProjectPresent = [bool]$businessBefore.UncategorizedProjectPresent
+            allTasksAssigned = [bool]$businessBefore.AllTasksAssigned
             projectCreateWithoutConfirmationStatus = 428
             missingTaskPatchStatus = 404
             csrfRejectionStatus = 403
             postRevokeStatus = 401
         }
         invariants = [ordered]@{
+            schema13BaselineCompared = $true
+            existingUncategorizedProjectAdopted = $true
+            migratedTaskFieldsPreserved = $true
+            migratedTaskVersionIncrementedOnce = $true
             productionBusinessDataDigestUnchanged = $true
             databaseSchemaVersion = $opsAfter.SchemaVersion
             databaseAndBackupUnchanged = $true
             remoteBackupStatus = $opsAfter.BackupStatus
             remoteBackupSchemaVersion = $opsAfter.BackupSchemaVersion
             remoteBackupIntegrityCheck = $opsAfter.BackupIntegrity
+            remoteBackupSchemaSemanticsValidated = $opsAfter.BackupSchemaSemanticsValidated
             aiCostLedgerUnchanged = $true
         }
         productionBusinessMutationPerformed = $false
@@ -611,6 +708,7 @@ finally {
     $token = $null
     $credential = $null
     $vault = $null
+    $migrationBaseline = $null
 }
 
 if ($null -ne $cleanupFailure) {
@@ -642,5 +740,5 @@ if ($null -ne $failure) {
 
 Write-ResultFile -Value $successResult
 Write-Host 'TM mobile project/Task management production verification passed.' -ForegroundColor Green
-Write-Host 'PWA cache: v11; mobile reads: passed; business-data change: none; AI cost change: none'
+Write-Host 'PWA cache: v12; schema 13 baseline: matched; business-data change: none; AI cost change: none'
 Write-Host "Result: $OutputPath"

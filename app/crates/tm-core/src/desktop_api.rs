@@ -1040,6 +1040,7 @@ fn build_snapshot(core: &TmCore) -> Result<Value> {
                 .collect();
             json!({
                 "id": project.id,
+                "systemKey": project.system_key,
                 "name": project.name,
                 "description": project.description,
                 "color": project.color.as_deref().unwrap_or("#7386ff"),
@@ -1329,6 +1330,13 @@ mod tests {
 
         assert_eq!(snapshot["databasePath"], "TM Cloud");
         assert_eq!(snapshot["projects"][0]["name"], "Cloud project");
+        assert!(
+            snapshot["projects"]
+                .as_array()
+                .is_some_and(|projects| projects.iter().any(|project| {
+                    project["systemKey"] == "uncategorized" && project["name"] == "기타"
+                }))
+        );
         assert_eq!(snapshot["tasks"][0]["id"], task.id);
         assert_eq!(snapshot["tasks"][0]["priority"], "high");
         Ok(())

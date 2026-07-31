@@ -6,6 +6,8 @@
 
 ### Added
 
+- schema 14에서 기존 활성 `기타` 프로젝트를 시스템 기본 프로젝트로 지정하고, 프로젝트가 없던 Task를 모두 그 프로젝트로 이관했다.
+- Windows·모바일·승인된 AI 경로에서 프로젝트를 생략하거나 비우면 실제 `기타` 프로젝트로 저장되도록 중앙 저장 규칙과 DB 불변 조건을 추가했다.
 - 모바일 `할 일` 화면에 프로젝트 목록·생성, Task 생성·상세 편집·상태 변경·빠른 완료, 프로젝트·상태 필터와 페이지 추가 조회를 추가했다.
 - `project.create`를 기존 controlled mutation의 CSRF·confirmation·idempotency·감사 원장에 연결하고, 등록 기기에서만 `POST /api/v1/projects`를 사용할 수 있게 했다.
 - schema 13에 S&P 500 universe snapshot, split-adjusted 일봉 session, 5·21거래일 정량 screen 결과와 선택적 AI 요약 이력을 추가했다.
@@ -53,6 +55,7 @@
 
 ### Fixed
 
+- 프로젝트가 없는 기존 Task가 모바일에서 `전체 프로젝트`를 선택해야만 보이던 문제를 수정했다.
 - Windows와 모바일 TradingView iframe이 자기 출처에서 초기화되지 못해 흰 화면으로 남던 sandbox 회귀를 수정하고, 모바일 app shell 캐시를 갱신했다.
 
 ### Changed

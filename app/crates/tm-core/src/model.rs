@@ -203,6 +203,7 @@ pub struct ChangeRequestClaim {
 #[serde(rename_all = "camelCase")]
 pub struct Project {
     pub id: String,
+    pub system_key: Option<String>,
     pub name: String,
     pub description: String,
     pub color: Option<String>,

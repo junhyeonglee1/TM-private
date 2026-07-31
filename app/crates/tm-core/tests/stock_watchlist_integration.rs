@@ -107,7 +107,16 @@ fn migrates_schema_eleven_with_a_pre_migration_backup() -> Result<()> {
 
     let connection = Connection::open(&database_path)?;
     connection.execute_batch(
-        "DROP TRIGGER stock_ai_reports_no_delete;
+        "DROP TRIGGER tasks_project_required_insert;
+         DROP TRIGGER tasks_project_required_update;
+         DROP TRIGGER projects_uncategorized_protect_update;
+         DROP TRIGGER projects_uncategorized_protect_delete;
+         DROP TRIGGER projects_uncategorized_name_reserved_insert;
+         DROP TRIGGER projects_uncategorized_name_reserved_update;
+         DROP INDEX idx_projects_system_key;
+         DELETE FROM projects WHERE system_key = 'uncategorized';
+         ALTER TABLE projects DROP COLUMN system_key;
+         DROP TRIGGER stock_ai_reports_no_delete;
          DROP TRIGGER stock_ai_reports_identity_immutable;
          DROP TRIGGER stock_screen_results_no_delete;
          DROP TRIGGER stock_screen_results_no_update;
@@ -128,6 +137,7 @@ fn migrates_schema_eleven_with_a_pre_migration_backup() -> Result<()> {
          DROP TABLE stock_universe_members;
          DROP TABLE stock_universe_snapshots;
          DROP TABLE stock_watchlist_items;
+         DELETE FROM schema_migrations WHERE version = 14;
          DELETE FROM schema_migrations WHERE version = 13;
          DELETE FROM schema_migrations WHERE version = 12;
          PRAGMA user_version = 11;",
@@ -135,7 +145,7 @@ fn migrates_schema_eleven_with_a_pre_migration_backup() -> Result<()> {
     drop(connection);
 
     let migrated = TmCore::open(TmHome::new(temporary.path()))?;
-    assert_eq!(migrated.health()?.schema_version, 13);
+    assert_eq!(migrated.health()?.schema_version, 14);
     assert!(migrated.stock_watchlist()?.is_empty());
     assert!(
         migrated

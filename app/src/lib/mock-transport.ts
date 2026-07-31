@@ -1,4 +1,5 @@
 import type { CommandTransport, TaskReportResult } from "./api";
+import { UNCATEGORIZED_PROJECT_SYSTEM_KEY } from "../types";
 import type {
   AppSnapshot,
   BackupInfo,
@@ -74,6 +75,7 @@ const buildSample = (): AppSnapshot => {
       name: "TM 데스크톱",
       description: "로컬 퍼스트 개인 업무 관리 앱",
       color: "#5b6cf9",
+      systemKey: null,
       openTaskCount: 4,
       completedTaskCount: 8,
       archived: false,
@@ -83,6 +85,7 @@ const buildSample = (): AppSnapshot => {
       name: "기록 정리",
       description: "업무 지식과 회고를 정리합니다",
       color: "#d77849",
+      systemKey: null,
       openTaskCount: 2,
       completedTaskCount: 3,
       archived: false,
@@ -92,8 +95,19 @@ const buildSample = (): AppSnapshot => {
       name: "개인 루틴",
       description: "꾸준히 유지할 생활 루틴",
       color: "#2f9b75",
+      systemKey: null,
       openTaskCount: 2,
       completedTaskCount: 12,
+      archived: false,
+    },
+    {
+      id: "project-uncategorized",
+      name: "기타",
+      description: "프로젝트를 선택하지 않은 Task",
+      color: "#7386ff",
+      systemKey: UNCATEGORIZED_PROJECT_SYSTEM_KEY,
+      openTaskCount: 0,
+      completedTaskCount: 0,
       archived: false,
     },
   ];
@@ -1033,6 +1047,7 @@ export class MemoryTransport implements CommandTransport {
       name: trimmed,
       description: description.trim(),
       color: "#7386ff",
+      systemKey: null,
       openTaskCount: 0,
       completedTaskCount: 0,
       archived: false,
@@ -1062,7 +1077,7 @@ export class MemoryTransport implements CommandTransport {
   }
 
   private createTask(input: CreateTaskInput): null {
-    const project = this.snapshot.projects.find((item) => item.id === input.projectId);
+    const project = this.taskProject(input.projectId);
     const timestamp = now();
     const status = input.status ?? "inbox";
     if (!["inbox", "todo", "in_progress", "blocked", "done", "cancelled"].includes(status)) {
@@ -1075,8 +1090,8 @@ export class MemoryTransport implements CommandTransport {
       status,
       priority: input.priority ?? "none",
       dueDate: input.dueDate ?? null,
-      projectId: project?.id ?? null,
-      projectName: project?.name ?? null,
+      projectId: project.id,
+      projectName: project.name,
       tags: input.tags ?? [],
       checklist: [],
       workLogs: [],
@@ -1113,9 +1128,10 @@ export class MemoryTransport implements CommandTransport {
       tags: task.tags,
       checklist: task.checklist,
     };
-    const project = this.snapshot.projects.find((item) => item.id === input.projectId);
+    const project = this.taskProject(input.projectId, task.projectId);
     Object.assign(task, input, {
-      projectName: project?.name ?? null,
+      projectId: project.id,
+      projectName: project.name,
       updatedAt: now(),
     });
     task.events.unshift({
@@ -1128,6 +1144,25 @@ export class MemoryTransport implements CommandTransport {
       createdAt: now(),
     });
     return null;
+  }
+
+  private taskProject(
+    projectId: string | null | undefined,
+    currentProjectId: string | null = null,
+  ): Project {
+    const normalizedProjectId = projectId ?? this.snapshot.projects.find(
+      (project) => project.systemKey === UNCATEGORIZED_PROJECT_SYSTEM_KEY,
+    )?.id;
+    const project = this.snapshot.projects.find(
+      (candidate) => candidate.id === normalizedProjectId,
+    );
+    if (!project) {
+      throw new Error("프로젝트를 찾지 못했습니다.");
+    }
+    if (project.archived && project.id !== currentProjectId) {
+      throw new Error("보관된 프로젝트에는 Task를 배정할 수 없습니다.");
+    }
+    return project;
   }
 
   private planTask(taskId: string, date: string): null {

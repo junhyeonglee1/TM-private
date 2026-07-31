@@ -1432,8 +1432,12 @@ function activeProject(projectId) {
   return state.projects.find((project) => project.id === projectId);
 }
 
+function uncategorizedProject() {
+  return state.projects.find((project) => project.systemKey === "uncategorized") || null;
+}
+
 function projectLabel(projectId) {
-  if (!projectId) return "프로젝트 없음";
+  if (!projectId) return "기타";
   return activeProject(projectId)?.name || "현재 목록 밖의 프로젝트";
 }
 
@@ -1467,8 +1471,10 @@ function refreshProjectSelects() {
   );
   populateProjectSelect(
     byId("task-project"),
-    "프로젝트 없음",
-    state.editingTask?.projectId || byId("task-project").value
+    "기타에 자동 배정",
+    state.editingTask
+      ? (state.editingTask.projectId || "")
+      : (byId("task-project").value || uncategorizedProject()?.id || "")
   );
 }
 
@@ -1643,7 +1649,9 @@ function setTaskStatusOptions(currentStatus = null) {
 
 function openTaskForm(task = null, projectId = "") {
   state.editingTask = task ? { ...task } : null;
-  const selectedProjectId = task?.projectId || projectId || state.taskFilters.projectId;
+  const selectedProjectId = task
+    ? (task.projectId || "")
+    : (projectId || state.taskFilters.projectId || uncategorizedProject()?.id || "");
   show("project-form", false);
   show("task-form", true);
   byId("task-form-title").textContent = task ? "Task 상세 편집" : "Task 추가";
@@ -1652,11 +1660,11 @@ function openTaskForm(task = null, projectId = "") {
   byId("task-description").value = task?.description || "";
   populateProjectSelect(
     byId("task-project"),
-    "프로젝트 없음",
+    "기타에 자동 배정",
     selectedProjectId
   );
   setTaskStatusOptions(task?.status || null);
-  if (!task) byId("task-status").value = selectedProjectId ? "todo" : "inbox";
+  if (!task) byId("task-status").value = "todo";
   byId("task-priority").value = String(task?.priority ?? 0);
   byId("task-due-date").value = task?.dueDate || "";
   byId("task-form").scrollIntoView({ behavior: "smooth", block: "start" });
@@ -1757,11 +1765,11 @@ byId("project-form").addEventListener("submit", async (event) => {
 byId("task-add").addEventListener("click", () => openTaskForm());
 byId("task-form-close").addEventListener("click", closeTaskForm);
 
-byId("task-project").addEventListener("change", (event) => {
+byId("task-project").addEventListener("change", () => {
   if (state.editingTask) return;
   const status = byId("task-status");
   if (status.value === "inbox" || status.value === "todo") {
-    status.value = event.currentTarget.value ? "todo" : "inbox";
+    status.value = "todo";
   }
 });
 

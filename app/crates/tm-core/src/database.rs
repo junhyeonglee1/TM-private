@@ -8,12 +8,15 @@ use std::{
 use chrono::{DateTime, LocalResult, NaiveDate, NaiveTime, SecondsFormat, TimeZone, Utc};
 use chrono_tz::Asia::Seoul;
 use fs2::FileExt;
-use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior, functions::FunctionFlags};
+use rusqlite::{
+    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
+    functions::FunctionFlags, params,
+};
 use uuid::Uuid;
 
 use crate::{Error, Result, TmHome};
 
-pub(crate) const SCHEMA_VERSION: i64 = 13;
+pub(crate) const SCHEMA_VERSION: i64 = 14;
 const INITIAL_MIGRATION: &str = include_str!("../migrations/0001_initial.sql");
 const CHANGE_REQUESTS_MIGRATION: &str = include_str!("../migrations/0002_change_requests.sql");
 const CHANGE_REQUESTS_STRICT_CAS_MIGRATION: &str =
@@ -31,6 +34,8 @@ const CALENDAR_EVENTS_MIGRATION: &str = include_str!("../migrations/0011_calenda
 const STOCK_WATCHLIST_MIGRATION: &str = include_str!("../migrations/0012_stock_watchlist.sql");
 const STOCK_DAILY_SCREEN_MIGRATION: &str =
     include_str!("../migrations/0013_stock_daily_screen.sql");
+const UNCATEGORIZED_PROJECT_MIGRATION: &str =
+    include_str!("../migrations/0014_uncategorized_project.sql");
 const BUSY_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone)]
@@ -87,6 +92,10 @@ impl Database {
             }
             Self::migrate(&mut connection, current_version)?;
         }
+
+        let final_version: i64 =
+            connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        validate_schema_semantics(&connection, final_version)?;
 
         Ok(Self { home })
     }
@@ -266,6 +275,18 @@ impl Database {
             transaction.pragma_update(None, "user_version", 13_i64)?;
             transaction.commit()?;
         }
+        if current_version < 14 {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(UNCATEGORIZED_PROJECT_MIGRATION)?;
+            transaction.execute(
+                "INSERT INTO schema_migrations(version, name, applied_at)
+                 VALUES (14, 'uncategorized-system-project', ?1)",
+                [now_utc()],
+            )?;
+            transaction.pragma_update(None, "user_version", 14_i64)?;
+            transaction.commit()?;
+        }
         Ok(())
     }
 
@@ -301,6 +322,170 @@ impl Database {
     pub(crate) fn home(&self) -> &TmHome {
         &self.home
     }
+}
+
+pub(crate) fn validate_schema_semantics(connection: &Connection, version: i64) -> Result<()> {
+    if version < 14 {
+        return Ok(());
+    }
+    if !(14..=SCHEMA_VERSION).contains(&version) {
+        return Err(Error::Invariant(format!(
+            "schema semantic validation does not support version {version}"
+        )));
+    }
+
+    let (system_count, valid_system_count, invalid_system_key_count): (i64, i64, i64) = connection
+        .query_row(
+            "SELECT
+                coalesce(sum(CASE WHEN system_key = 'uncategorized' THEN 1 ELSE 0 END), 0),
+                coalesce(sum(CASE
+                    WHEN system_key = 'uncategorized'
+                     AND name = '기타'
+                     AND archived_at IS NULL
+                     AND deleted_at IS NULL
+                    THEN 1 ELSE 0 END), 0),
+                coalesce(sum(CASE
+                    WHEN system_key IS NOT NULL AND system_key <> 'uncategorized'
+                    THEN 1 ELSE 0 END), 0)
+             FROM projects",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+    if system_count != 1 || valid_system_count != 1 || invalid_system_key_count != 0 {
+        return Err(Error::Invariant(format!(
+            "schema 14 requires exactly one active project named 기타 with system_key uncategorized; found system={system_count}, valid={valid_system_count}, invalid_keys={invalid_system_key_count}"
+        )));
+    }
+
+    let invalid_task_projects: i64 = connection.query_row(
+        "SELECT count(*)
+         FROM tasks
+         LEFT JOIN projects ON projects.id = tasks.project_id
+         WHERE tasks.project_id IS NULL OR projects.id IS NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    if invalid_task_projects != 0 {
+        return Err(Error::Invariant(format!(
+            "schema 14 requires every task to reference a project; found {invalid_task_projects} missing project references"
+        )));
+    }
+
+    require_schema_object(
+        connection,
+        "table",
+        "projects",
+        &[
+            "system_keytext",
+            "check(system_keyisnullorsystem_key='uncategorized')",
+        ],
+    )?;
+    require_schema_object(
+        connection,
+        "index",
+        "idx_projects_system_key",
+        &[
+            "createuniqueindexidx_projects_system_key",
+            "onprojects(system_key)",
+            "wheresystem_keyisnotnull",
+        ],
+    )?;
+
+    for (name, fragments) in [
+        (
+            "tasks_project_required_insert",
+            &[
+                "beforeinsertontasks",
+                "new.project_idisnull",
+                "raise(abort,'taskprojectisrequired')",
+            ][..],
+        ),
+        (
+            "tasks_project_required_update",
+            &[
+                "beforeupdateofproject_idontasks",
+                "new.project_idisnull",
+                "raise(abort,'taskprojectisrequired')",
+            ][..],
+        ),
+        (
+            "projects_uncategorized_protect_update",
+            &[
+                "beforeupdateonprojects",
+                "old.system_key='uncategorized'",
+                "new.system_keyisnotold.system_key",
+                "new.nameisnotold.name",
+                "new.archived_atisnotold.archived_at",
+                "new.deleted_atisnotold.deleted_at",
+                "raise(abort,'uncategorizedprojectidentityandactivestateareimmutable')",
+            ][..],
+        ),
+        (
+            "projects_uncategorized_protect_delete",
+            &[
+                "beforedeleteonprojects",
+                "old.system_key='uncategorized'",
+                "raise(abort,'uncategorizedprojectcannotbedeleted')",
+            ][..],
+        ),
+        (
+            "projects_uncategorized_name_reserved_insert",
+            &[
+                "beforeinsertonprojects",
+                "new.system_keyisnull",
+                "trim(new.name)='기타'",
+                "raise(abort,'projectname기타isreserved')",
+            ][..],
+        ),
+        (
+            "projects_uncategorized_name_reserved_update",
+            &[
+                "beforeupdateofname,system_keyonprojects",
+                "new.system_keyisnull",
+                "trim(new.name)='기타'",
+                "trim(old.name)<>'기타'",
+                "raise(abort,'projectname기타isreserved')",
+            ][..],
+        ),
+    ] {
+        require_schema_object(connection, "trigger", name, fragments)?;
+    }
+
+    Ok(())
+}
+
+fn require_schema_object(
+    connection: &Connection,
+    object_type: &str,
+    name: &str,
+    required_fragments: &[&str],
+) -> Result<()> {
+    let sql = connection
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE type = ?1 AND name = ?2",
+            params![object_type, name],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten()
+        .ok_or_else(|| {
+            Error::Invariant(format!(
+                "schema 14 required {object_type} is missing: {name}"
+            ))
+        })?;
+    let normalized = sql
+        .split_whitespace()
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if let Some(fragment) = required_fragments
+        .iter()
+        .find(|fragment| !normalized.contains(*fragment))
+    {
+        return Err(Error::Invariant(format!(
+            "schema 14 {object_type} {name} is missing required SQL fragment: {fragment}"
+        )));
+    }
+    Ok(())
 }
 
 pub(crate) fn register_runtime_functions(connection: &Connection) -> Result<()> {

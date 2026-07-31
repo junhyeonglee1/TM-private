@@ -48,6 +48,10 @@ Task, Note, Checklist는 schema 4부터 1에서 시작하는 정수 `version`을
 
 Project는 수정 route가 없는 create-only resource라 별도 version 열이 없다. `project.create`는 생성 precondition인 `If-None-Match: *`를 요구하고 생성 결과와 감사 원장에는 논리적 version `1`을 기록한다.
 
+schema 14부터 Task 생성의 `projectId`를 생략하거나 `null`로 보내면 시스템 `기타` 프로젝트 ID로 저장한다. Task 변경에서 `clearProject: true`도 소속을 없애지 않고 `기타`로 이동한다. 구버전 요청 형식은 그대로 받되 저장된 Task에는 항상 실제 프로젝트 ID가 있으며, 예약 이름 `기타`로 일반 프로젝트를 추가할 수 없다.
+
+schema 14 이전에 완료돼 append-only idempotency·assistant 원장에 고정된 과거 응답 JSON은 당시의 `projectId: null`과 이전 version을 역사 증거로 유지할 수 있다. 현재 조회와 schema 14 이후 새 mutation 응답은 실제 `기타` ID를 반환하며, 오래된 idempotency key replay를 현재 row snapshot으로 해석하지 않는다.
+
 원격 Task 상태 전이는 다음만 허용한다.
 
 | 현재 | 허용 다음 상태 |

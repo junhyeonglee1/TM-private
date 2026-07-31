@@ -113,10 +113,11 @@ try {
     $ops = Invoke-TmRequest -Client $client -Method ([System.Net.Http.HttpMethod]::Get) -Uri "$base/api/v1/ops/status" -Token $token
     Require-Status $ops 200 $stage
     $opsJson = $ops.Body | ConvertFrom-Json
-    if ([int]$opsJson.data.database.schemaVersion -ne 13 -or
+    if ([int]$opsJson.data.database.schemaVersion -ne 14 -or
         [string]$opsJson.data.remoteBackup.status -ne 'succeeded' -or
-        [int]$opsJson.data.remoteBackup.schemaVersion -ne 13 -or
+        [int]$opsJson.data.remoteBackup.schemaVersion -ne 14 -or
         [string]$opsJson.data.remoteBackup.integrityCheck -ne 'ok' -or
+        [bool]$opsJson.data.remoteBackup.schemaSemanticsValidated -ne $true -or
         [bool]$opsJson.data.controls.taskReportEnabled -ne $true -or
         [bool]$opsJson.data.controls.aiEnabled -ne $true -or
         [string]$opsJson.data.controls.incidentMode -ne 'normal') {
@@ -209,7 +210,7 @@ try {
     $result = [ordered]@{
         verifiedAtUtc = [DateTime]::UtcNow.ToString('o')
         baseUri = $base
-        schemaVersion = 13
+        schemaVersion = 14
         runId = [string]$report.runId
         status = [string]$report.status
         headline = [string]$report.report.headline

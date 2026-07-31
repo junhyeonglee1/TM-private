@@ -87,7 +87,7 @@ fn file_sha256(path: &std::path::Path) -> Result<String> {
 #[test]
 fn current_schema_exports_queue_and_validates_required_content() -> Result<()> {
     let (_temporary, core) = fixture()?;
-    assert_eq!(core.health()?.schema_version, 13);
+    assert_eq!(core.health()?.schema_version, 14);
 
     let mut invalid = create_input("필수 검증", 1);
     invalid.description.clear();
@@ -124,7 +124,7 @@ fn opening_v1_database_creates_pre_migration_backup_and_applies_all_migrations()
     drop(connection);
 
     let core = TmCore::open(TmHome::new(temporary.path()))?;
-    assert_eq!(core.health()?.schema_version, 13);
+    assert_eq!(core.health()?.schema_version, 14);
     assert!(
         core.list_backups()?
             .iter()
@@ -155,7 +155,7 @@ fn opening_v2_database_creates_pre_migration_backup_and_applies_current_schema()
     drop(connection);
 
     let core = TmCore::open(TmHome::new(temporary.path()))?;
-    assert_eq!(core.health()?.schema_version, 13);
+    assert_eq!(core.health()?.schema_version, 14);
     let backups = core.list_backups()?;
     let pre_migration = backups
         .iter()
@@ -405,7 +405,16 @@ fn restoring_v1_backup_migrates_and_preserves_non_rewindable_ledger() -> Result<
     let backup_path = std::path::Path::new(&backup.path);
     let v1 = Connection::open(backup_path)?;
     v1.execute_batch(
-        "DROP TRIGGER stock_ai_reports_no_delete;
+        "DROP TRIGGER tasks_project_required_insert;
+         DROP TRIGGER tasks_project_required_update;
+         DROP TRIGGER projects_uncategorized_protect_update;
+         DROP TRIGGER projects_uncategorized_protect_delete;
+         DROP TRIGGER projects_uncategorized_name_reserved_insert;
+         DROP TRIGGER projects_uncategorized_name_reserved_update;
+         DROP INDEX idx_projects_system_key;
+         DELETE FROM projects WHERE system_key = 'uncategorized';
+         ALTER TABLE projects DROP COLUMN system_key;
+         DROP TRIGGER stock_ai_reports_no_delete;
          DROP TRIGGER stock_ai_reports_identity_immutable;
          DROP TRIGGER stock_screen_results_no_delete;
          DROP TRIGGER stock_screen_results_no_update;
@@ -481,7 +490,7 @@ fn restoring_v1_backup_migrates_and_preserves_non_rewindable_ledger() -> Result<
     let protected_ids = [claimed.id, completed.id, failed.id, cancelled.id];
 
     core.restore_backup(backup_path)?;
-    assert_eq!(core.health()?.schema_version, 13);
+    assert_eq!(core.health()?.schema_version, 14);
     let restored = core.list_change_requests()?;
     for id in &protected_ids {
         assert!(restored.iter().any(|request| &request.id == id));

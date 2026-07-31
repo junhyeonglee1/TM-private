@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     BackupArtifact, Error, Result, backup,
-    database::{Database, SCHEMA_VERSION, now_utc},
+    database::{Database, SCHEMA_VERSION, now_utc, validate_schema_semantics},
     export::EXPORTED_TABLES,
 };
 
@@ -117,6 +117,7 @@ fn validate_connection(connection: &Connection) -> Result<()> {
             "migration requires schema {SCHEMA_VERSION}, found {schema_version}"
         )));
     }
+    validate_schema_semantics(connection, schema_version)?;
     let integrity: String = connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
     if integrity != "ok" {
         return Err(Error::Invariant(format!(

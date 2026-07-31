@@ -157,6 +157,7 @@ enum NoteSort {
 #[serde(rename_all = "camelCase")]
 pub(super) struct ProjectDto {
     id: String,
+    system_key: Option<String>,
     name: String,
     description: String,
     color: Option<String>,
@@ -170,6 +171,7 @@ impl From<Project> for ProjectDto {
     fn from(value: Project) -> Self {
         Self {
             id: value.id,
+            system_key: value.system_key,
             name: value.name,
             description: value.description,
             color: value.color,
@@ -370,15 +372,15 @@ pub(super) async fn projects(
     items.retain(|item| item.archived_at.is_some() == archived);
     match query.sort.unwrap_or_default() {
         ProjectSort::Name => items.sort_by(|left, right| {
-            left.name
-                .to_lowercase()
-                .cmp(&right.name.to_lowercase())
+            project_system_rank(left)
+                .cmp(&project_system_rank(right))
+                .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
                 .then_with(|| left.id.cmp(&right.id))
         }),
         ProjectSort::UpdatedDesc => items.sort_by(|left, right| {
-            right
-                .updated_at
-                .cmp(&left.updated_at)
+            project_system_rank(left)
+                .cmp(&project_system_rank(right))
+                .then_with(|| right.updated_at.cmp(&left.updated_at))
                 .then_with(|| left.id.cmp(&right.id))
         }),
     }
@@ -389,6 +391,10 @@ pub(super) async fn projects(
         items.into_iter().map(ProjectDto::from).collect(),
         page,
     )
+}
+
+fn project_system_rank(project: &Project) -> u8 {
+    u8::from(project.system_key.as_deref() != Some("uncategorized"))
 }
 
 pub(super) async fn tasks(

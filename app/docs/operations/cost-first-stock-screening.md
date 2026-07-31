@@ -106,7 +106,7 @@ schema 12의 `stock_watchlist_items`는 유지하고 다음 테이블을 추가�
 
 각 수집 batch는 source hash·feed·adjustment·session/bar 수·최초/최종 session·수집 시각을 immutable provenance로 남기고 screen run이 해당 hash를 참조한다. 최신 session/bar 행은 용량을 아끼기 위한 재구성 가능한 mutable cache다. 발행된 screen result에는 실제 기준 가격·날짜·수익률과 source hash를 동결하므로 cache가 갱신돼도 결과가 바뀌지 않는다.
 
-universe snapshot, market-data batch, 발행된 screen run/result, AI report는 export·backup·restore·migration manifest에 포함한다. 복구 원본은 `user_version`뿐 아니라 migration 1..13의 연속 ledger와 schema 13 필수 테이블 manifest를 모두 만족해야 한다. anti-rewind 검증은 현재 운영 원장의 발행 결과·AI 비용·감사 기록을 더 오래된 백업으로 되감지 않게 한다.
+universe snapshot, market-data batch, 발행된 screen run/result, AI report는 export·backup·restore·migration manifest에 포함한다. 현재 복구 원본은 `user_version`뿐 아니라 migration 1..14의 연속 ledger와 schema 14 필수 테이블 manifest를 모두 만족해야 한다. anti-rewind 검증은 현재 운영 원장의 발행 결과·AI 비용·감사 기록을 더 오래된 백업으로 되감지 않게 한다.
 
 ## OpenAI 계약과 비용 차단
 
@@ -201,7 +201,7 @@ provider key·응답 body·AI prompt payload는 status와 log에 넣지 않는�
 - AI 생략: 후보 0건, coverage 실패, license off, screen off, AI off, budget blocked에서 OpenAI mock 호출이 0회인지 검증
 - API: desktop allowlist, 승인 모바일 기기, same-origin·CSRF, read command에 confirmation 불필요, limit 50·엄격한 args
 - UI: Windows와 실제 PWA DOM에서 filter, pagination, stale/error/0건, Today top 3, 행 선택 후 기존 chart 변경, 현재 세션 offline 유지
-- 복구: export·remote backup·restore에서 migration 1..13 ledger와 schema 13 필수 table manifest, anti-rewind를 확인하고 재구성 가능한 bar cache와 보존 대상 결과를 구분
+- 복구: export·remote backup·restore에서 migration 1..14 ledger와 schema 14 필수 table manifest, anti-rewind를 확인하고 재구성 가능한 bar cache와 보존 대상 결과를 구분
 
 ## 구현·검증 순서
 
@@ -210,7 +210,7 @@ provider key·응답 body·AI prompt payload는 status와 log에 넣지 않는�
 3. command와 Windows·모바일 UI를 구현한다.
 4. export·backup·restore·operations status와 production verifier를 갱신한다.
 5. 세 stock gate가 모두 꺼진 commit을 GitHub Actions에서 검증하고 production에 배포한다.
-6. 운영 DB와 remote backup이 schema 13, integrity `ok`이고 stock flags가 모두 꺼져 있음을 확인한다.
+6. 운영 DB와 remote backup이 현재 schema 14, integrity `ok`, `schemaSemanticsValidated=true`이고 stock flags가 모두 꺼져 있음을 확인한다.
 7. Alpaca paper account key를 Railway sealed variables로 입력하고 서면 사용 범위 확인 자료를 보관한다.
 8. `TM_STOCK_LICENSE_ACK=true`, `TM_STOCK_SCREEN_ENABLED=true`, `TM_STOCK_AI_ENABLED=false`로 7일간 정량 결과만 관찰한다.
 9. 98% coverage, 기준일, split 사례, 비용 `$0`을 확인한 뒤 `TM_STOCK_AI_ENABLED=true`로 전환한다.

@@ -76,7 +76,7 @@
 
 production 검증은 `scripts/verify-step15-production.ps1`로 수행한다. 스크립트는 Credential Locker에서 관리자 token을 읽고 임시 기기 하나를 등록한 뒤 scope를 확인하고 즉시 폐기한다. OpenAI와 Task·Note business mutation은 호출하지 않는다. 성공·실패와 관계없이 생성된 임시 활성 기기의 폐기를 시도하며 결과 파일에는 secret을 저장하지 않는다.
 
-프로젝트·Task 모바일 관리 배포 뒤에는 `scripts/verify-mobile-project-task-production.ps1`도 수행한다. 이 검증은 PWA v11 계약, 기기 권한, CSRF·confirmation 차단, 데이터 digest 불변, 폐기 후 `401`, DB·백업·AI 비용 불변을 확인하며 production 업무 데이터에 성공 mutation을 만들지 않는다.
+프로젝트·Task 모바일 관리 배포 뒤에는 schema 13 baseline을 전달해 `scripts/verify-mobile-project-task-production.ps1`도 수행한다. 이 검증은 PWA v12 계약, 기존 `기타`·미지정 Task 이관, 기기 권한, CSRF·confirmation 차단, 데이터 digest 불변, 폐기 후 `401`, DB·백업·AI 비용 불변을 확인하며 production 업무 데이터에 성공 mutation을 만들지 않는다.
 
 ## 2026-07-22 production 완료 기록
 

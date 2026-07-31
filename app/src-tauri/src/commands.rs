@@ -990,6 +990,7 @@ fn build_snapshot(core: &TmCore) -> tm_core::Result<Value> {
                 .collect();
             json!({
                 "id": project.id,
+                "systemKey": project.system_key,
                 "name": project.name,
                 "description": project.description,
                 "color": project.color.as_deref().unwrap_or("#7386ff"),
@@ -1251,6 +1252,13 @@ mod tests {
         let snapshot = build_snapshot(&core)?;
 
         assert_eq!(snapshot["projects"][0]["name"], "TM 구현");
+        assert!(
+            snapshot["projects"]
+                .as_array()
+                .is_some_and(|projects| projects.iter().any(|project| {
+                    project["systemKey"] == "uncategorized" && project["name"] == "기타"
+                }))
+        );
         assert_eq!(snapshot["tasks"][0]["priority"], "high");
         assert_eq!(snapshot["todayView"]["inProgress"][0]["id"], task.id);
         assert_eq!(snapshot["todayView"]["planned"][0]["taskId"], task.id);

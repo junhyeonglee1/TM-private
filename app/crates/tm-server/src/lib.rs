@@ -737,6 +737,7 @@ struct RemoteBackupStatus {
     integrity_check: Option<String>,
     migration_ledger_complete: Option<bool>,
     required_tables_complete: Option<bool>,
+    schema_semantics_validated: Option<bool>,
     reason: Option<String>,
     retry_after_seconds: Option<u64>,
 }
@@ -1990,6 +1991,7 @@ async fn operations_status(
                 integrity_check: None,
                 migration_ledger_complete: None,
                 required_tables_complete: None,
+                schema_semantics_validated: None,
                 reason: None,
                 retry_after_seconds: None,
             }
@@ -2159,6 +2161,13 @@ fn operations_alerts(
             severity: "critical",
             code: "REMOTE_BACKUP_REQUIRED_TABLES_INCOMPLETE",
             message: "The latest remote backup did not verify all required tables",
+        });
+    }
+    if health.schema_version >= 14 && remote_backup.schema_semantics_validated != Some(true) {
+        alerts.push(OperationsAlert {
+            severity: "critical",
+            code: "REMOTE_BACKUP_SCHEMA_SEMANTICS_INVALID",
+            message: "The latest remote backup did not verify schema semantic safeguards",
         });
     }
     let backup_stale = remote_backup.checked_at.as_deref().is_none_or(|value| {
@@ -3315,7 +3324,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
         assert_eq!(body["data"]["status"], "ready");
-        assert_eq!(body["data"]["schemaVersion"], 13);
+        assert_eq!(body["data"]["schemaVersion"], 14);
         assert_eq!(body["data"]["journalMode"], "wal");
     }
 
@@ -4336,7 +4345,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
         assert_eq!(body["data"]["database"]["ok"], true);
-        assert_eq!(body["data"]["database"]["schemaVersion"], 13);
+        assert_eq!(body["data"]["database"]["schemaVersion"], 14);
         assert_eq!(body["data"]["scheduler"]["status"], "healthy");
         assert_eq!(body["data"]["scheduler"]["openaiCallsEnabled"], false);
         assert_eq!(body["data"]["scheduler"]["effectCount"], 0);
@@ -4571,6 +4580,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn project_pagination_keeps_the_uncategorized_system_project_first() {
+        let (_temporary, core, project_id, _task_id) = populated_test_core();
+        let router = build_cloud_authenticated_router(core, test_auth_config());
+
+        for sort in ["name", "updated_desc"] {
+            let first = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/api/v1/projects?archived=false&limit=1&offset=0&sort={sort}"
+                        ))
+                        .header("authorization", format!("Bearer {}", test_auth_token()))
+                        .body(Body::empty())
+                        .expect("build first project page request"),
+                )
+                .await
+                .expect("call first project page");
+            assert_eq!(first.status(), StatusCode::OK);
+            let first = response_json(first).await;
+            assert_eq!(first["data"]["items"][0]["systemKey"], "uncategorized");
+            assert_eq!(first["data"]["items"][0]["name"], "기타");
+            assert_eq!(first["data"]["page"]["total"], 2);
+            assert_eq!(first["data"]["page"]["nextOffset"], 1);
+
+            let second = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/api/v1/projects?archived=false&limit=1&offset=1&sort={sort}"
+                        ))
+                        .header("authorization", format!("Bearer {}", test_auth_token()))
+                        .body(Body::empty())
+                        .expect("build second project page request"),
+                )
+                .await
+                .expect("call second project page");
+            assert_eq!(second.status(), StatusCode::OK);
+            let second = response_json(second).await;
+            assert_eq!(
+                second["data"]["items"][0]["id"].as_str(),
+                Some(project_id.as_str())
+            );
+            assert!(second["data"]["items"][0]["systemKey"].is_null());
+        }
+    }
+
+    #[tokio::test]
     async fn read_api_etag_is_content_based_and_supports_not_modified() {
         let (_temporary, core, _project_id, _task_id) = populated_test_core();
         let router = build_cloud_authenticated_router(core, test_auth_config());
@@ -4703,6 +4761,7 @@ mod tests {
             Some(project_id.as_str())
         );
         assert_eq!(created_body["data"]["item"]["color"], "#7386ff");
+        assert!(created_body["data"]["item"]["systemKey"].is_null());
         assert!(created_body["data"]["item"].get("deletedAt").is_none());
         assert!(created_body["data"]["item"].get("version").is_none());
 
@@ -4732,7 +4791,7 @@ mod tests {
             "true"
         );
         assert_eq!(response_json(replayed).await["data"]["replayed"], true);
-        assert_eq!(core.list_projects(false).expect("list projects").len(), 1);
+        assert_eq!(core.list_projects(false).expect("list projects").len(), 2);
         assert_eq!(
             core.list_mutation_audit_events()
                 .expect("list mutation audit")
@@ -4756,7 +4815,7 @@ mod tests {
             .await
             .expect("call unconfirmed project create");
         assert_eq!(rejected.status(), StatusCode::PRECONDITION_REQUIRED);
-        assert_eq!(core.list_projects(false).expect("list projects").len(), 1);
+        assert_eq!(core.list_projects(false).expect("list projects").len(), 2);
     }
 
     #[tokio::test]
@@ -4788,6 +4847,17 @@ mod tests {
             .as_str()
             .expect("task resource ID")
             .to_owned();
+        let uncategorized_id = core
+            .list_projects(false)
+            .expect("list projects")
+            .into_iter()
+            .find(|project| project.system_key.as_deref() == Some("uncategorized"))
+            .expect("uncategorized project")
+            .id;
+        assert_eq!(
+            created_body["data"]["item"]["projectId"].as_str(),
+            Some(uncategorized_id.as_str())
+        );
         assert_eq!(created_body["data"]["version"], 1);
         assert_eq!(created_body["data"]["replayed"], false);
         assert!(created_body["data"]["item"].get("deletedAt").is_none());
@@ -5558,7 +5628,7 @@ mod tests {
                 .to_vec(),
         )
         .expect("service worker is UTF-8");
-        assert!(service_worker.contains(r#"tm-mobile-shell-v11"#));
+        assert!(service_worker.contains(r#"tm-mobile-shell-v12"#));
         assert!(service_worker.contains(r#"request.method !== "GET""#));
 
         let stock_catalog = router

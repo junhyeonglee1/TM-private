@@ -40,7 +40,7 @@ schema 11에서 12로 열기 전에 pre-migration backup을 자동 생성한다.
 
 배포 전 GitHub Actions에서 frontend lint/typecheck/UI test, Rust workspace test/clippy, Windows release build, STEP 16 보안 검사를 통과시킨다. Production에서는 다음을 확인한다.
 
-1. `/readyz`가 ready이고 운영 DB와 원격 백업이 현재 schema 13, integrity `ok`다.
+1. `/readyz`가 ready이고 운영 DB와 원격 백업이 현재 schema 14, integrity `ok`, `schemaSemanticsValidated=true`다.
 2. `NASDAQ:AAPL`과 `KRX:005930` 관심 종목을 임시 저장하고 Windows bearer command와 임시 승인 모바일 기기 command에서 같은 목록을 읽는다.
 3. AAPL과 삼성전자 차트 iframe 또는 외부 TradingView 링크를 확인한다.
 4. 테스트 중 추가한 관심 종목과 임시 기기를 정리한다.
