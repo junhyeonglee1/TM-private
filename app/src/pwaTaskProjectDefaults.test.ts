@@ -3,7 +3,8 @@ import { join } from "node:path";
 import process from "node:process";
 
 const pwaSource = (name: string) =>
-  readFileSync(join(process.cwd(), "crates", "tm-server", "src", "pwa", name), "utf8");
+  readFileSync(join(process.cwd(), "crates", "tm-server", "src", "pwa", name), "utf8")
+    .replaceAll("\r\n", "\n");
 
 describe("모바일 PWA Task 프로젝트 기본값", () => {
   const app = pwaSource("app.js");

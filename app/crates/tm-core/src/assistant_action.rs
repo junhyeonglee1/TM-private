@@ -386,7 +386,10 @@ impl TmCore {
                 .database
                 .transaction(TransactionBehavior::Immediate, |transaction| {
                     let current = query_action(transaction, action_id)?;
-                    if current.status == AssistantActionStatus::Executing {
+                    if matches!(
+                        current.status,
+                        AssistantActionStatus::Executing | AssistantActionStatus::Completed
+                    ) {
                         require_replay_identity(
                             &current,
                             payload_sha256,
@@ -411,6 +414,13 @@ impl TmCore {
                         &now,
                     )
                 })?;
+        }
+
+        if action.status == AssistantActionStatus::Completed {
+            return Ok(AssistantActionExecution {
+                action,
+                mutation_replayed: true,
+            });
         }
 
         let request = MutationRequest {
