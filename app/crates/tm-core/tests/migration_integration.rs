@@ -372,6 +372,7 @@ fn schema_fourteen_semantics_reject_missing_triggers_and_index_everywhere() -> R
         connection.create_scalar_function("tm_now_utc", 0, FunctionFlags::SQLITE_UTF8, |_| {
             Ok("2026-07-30T00:00:00.000Z".to_owned())
         })?;
+        connection.execute_batch("PRAGMA foreign_keys = OFF;")?;
         connection.execute_batch(corruption_statement)?;
         connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
         drop(connection);
