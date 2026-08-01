@@ -70,6 +70,26 @@ fn schema_thirteen_fixture(prefix: &str) -> Result<(TempDir, PathBuf)> {
     Ok((temporary, database_path))
 }
 
+fn schema_fourteen_fixture(prefix: &str) -> Result<(TempDir, PathBuf)> {
+    let (temporary, database_path) = schema_thirteen_fixture(prefix)?;
+    let connection = Connection::open(&database_path)?;
+    connection.create_scalar_function("tm_uuid_v7", 0, FunctionFlags::SQLITE_UTF8, |_| {
+        Ok(Uuid::now_v7().to_string())
+    })?;
+    connection.create_scalar_function("tm_now_utc", 0, FunctionFlags::SQLITE_UTF8, |_| {
+        Ok("2026-07-30T00:00:00.000Z".to_owned())
+    })?;
+    connection.execute_batch(include_str!("../migrations/0014_uncategorized_project.sql"))?;
+    connection.execute(
+        "INSERT INTO schema_migrations(version, name, applied_at)
+         VALUES (14, 'schema-14-fixture', '2026-07-30T00:00:00.000Z')",
+        [],
+    )?;
+    connection.pragma_update(None, "user_version", 14_i64)?;
+    drop(connection);
+    Ok((temporary, database_path))
+}
+
 fn task_input(title: &str, description: &str) -> CreateTaskInput {
     CreateTaskInput {
         project_id: None,
@@ -79,6 +99,88 @@ fn task_input(title: &str, description: &str) -> CreateTaskInput {
         priority: 0,
         due_date: None,
     }
+}
+
+#[test]
+fn schema_fifteen_migrates_schema_fourteen_without_losing_existing_work() -> Result<()> {
+    let (temporary, database_path) = schema_fourteen_fixture("tm-schema15-expenses-")?;
+    let project_id = Uuid::now_v7().to_string();
+    let task_id = Uuid::now_v7().to_string();
+    let connection = Connection::open(&database_path)?;
+    connection.execute(
+        "INSERT INTO projects(
+            id, name, description, color, sort_order, created_at, updated_at,
+            archived_at, deleted_at, system_key
+         ) VALUES (
+            ?1, 'schema 14 preserved project', 'preserved description', '#123456', 7,
+            '2026-07-01T00:00:00.000Z', '2026-07-02T00:00:00.000Z',
+            NULL, NULL, NULL
+         )",
+        [&project_id],
+    )?;
+    connection.execute(
+        "INSERT INTO tasks(
+            id, project_id, title, description, status, priority, due_date,
+            completed_at, created_at, updated_at, deleted_at, version
+         ) VALUES (
+            ?1, ?2, 'schema 14 preserved task', 'preserved task description',
+            'in_progress', 3, '2026-08-31', NULL,
+            '2026-07-03T00:00:00.000Z', '2026-07-04T00:00:00.000Z', NULL, 9
+         )",
+        params![task_id, project_id],
+    )?;
+    drop(connection);
+
+    let core = TmCore::open(TmHome::new(temporary.path()))?;
+    assert_eq!(core.health()?.schema_version, 15);
+    assert!(core.health()?.ok);
+    let task = core.get_task(&task_id)?;
+    assert_eq!(task.project_id.as_deref(), Some(project_id.as_str()));
+    assert_eq!(task.title, "schema 14 preserved task");
+    assert_eq!(task.description, "preserved task description");
+    assert_eq!(task.status, TaskStatus::InProgress);
+    assert_eq!(task.priority, 3);
+    assert_eq!(task.version, 9);
+    assert!(
+        core.list_projects(true)?.iter().any(
+            |project| project.id == project_id && project.name == "schema 14 preserved project"
+        )
+    );
+
+    let manifest = core.migration_manifest()?;
+    assert_eq!(manifest.schema_version, 15);
+    for table in [
+        "expense_crypto_metadata",
+        "expense_sources",
+        "expense_import_batches",
+        "expense_import_preview_sessions",
+        "expense_raw_rows",
+        "expense_postings",
+        "expense_events",
+        "expense_event_postings",
+        "expense_allocations",
+        "expense_reviews",
+        "expense_rules",
+        "recurring_expense_items",
+        "recurring_expense_versions",
+        "recurring_expense_occurrences",
+        "expense_month_reports",
+        "expense_ai_reports",
+        "expense_ai_feedback",
+        "expense_ai_request_bindings",
+        "expense_ai_attempts",
+        "expense_mutation_receipts",
+    ] {
+        assert!(manifest.tables.contains_key(table), "missing {table}");
+    }
+    assert!(
+        core.list_backups()?
+            .iter()
+            .any(|backup| backup.file_name.contains("pre-migration"))
+    );
+    let inspected = TmCore::inspect_migration_database(&database_path)?;
+    assert!(manifest.logically_matches(&inspected));
+    Ok(())
 }
 
 #[test]
@@ -149,7 +251,7 @@ fn schema_fourteen_adopts_one_active_uncategorized_project_and_backfills_tasks()
     drop(connection);
 
     let core = TmCore::open(TmHome::new(temporary.path()))?;
-    assert_eq!(core.health()?.schema_version, 14);
+    assert_eq!(core.health()?.schema_version, 15);
     let projects = core.list_projects(true)?;
     let system_projects = projects
         .iter()
@@ -287,10 +389,10 @@ fn manifest_is_deterministic_and_does_not_expose_row_contents() -> Result<()> {
     let first = core.migration_manifest()?;
     let second = core.migration_manifest()?;
     assert!(first.logically_matches(&second));
-    assert_eq!(first.schema_version, 14);
+    assert_eq!(first.schema_version, 15);
     assert_eq!(
         first.migration_versions,
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     );
     assert_eq!(first.logical_sha256.len(), 64);
     assert_eq!(first.tables["tasks"].row_count, 1);

@@ -4,6 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use chrono::NaiveDate;
 use rusqlite::{Transaction, TransactionBehavior, types::ValueRef};
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
@@ -12,6 +13,7 @@ use crate::{
     ExportArtifact, Result,
     backup::sha256_file,
     database::{Database, SCHEMA_VERSION, now_utc},
+    expense::expense_month_summary_in_connection,
 };
 
 pub(crate) const EXPORTED_TABLES: &[&str] = &[
@@ -114,7 +116,38 @@ fn snapshot_in_transaction(transaction: &Transaction<'_>) -> Result<Value> {
         "exportedAt": exported_at,
         "timezone": "Asia/Seoul",
         "tables": tables,
+        "expenseMonthlyAggregates": export_expense_monthly_aggregates(transaction)?,
     }))
+}
+
+fn export_expense_monthly_aggregates(transaction: &Transaction<'_>) -> Result<Value> {
+    let months = {
+        let mut statement = transaction.prepare(
+            "SELECT DISTINCT substr(posted_date, 1, 7) || '-01'
+             FROM expense_events ORDER BY 1",
+        )?;
+        statement
+            .query_map([], |row| row.get::<_, NaiveDate>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    let mut output = Vec::new();
+    for month in months {
+        let summary = expense_month_summary_in_connection(transaction, month)?;
+        for currency in summary.currencies {
+            output.push(json!({
+                "month": summary.month,
+                "currency": currency.currency,
+                "netPersonalSpendMinor": currency.net_personal_spend_minor,
+                "grossPurchaseMinor": currency.gross_purchase_minor,
+                "refundsMinor": currency.refunds_minor,
+                "settlementReceivedMinor": currency.settlement_received_minor,
+                "settlementSentMinor": currency.settlement_sent_minor,
+                "feesMinor": currency.fees_minor,
+                "unconfirmedOutflowMinor": currency.unconfirmed_outflow_minor,
+            }));
+        }
+    }
+    Ok(Value::Array(output))
 }
 
 fn export_table(transaction: &Transaction<'_>, table: &str) -> Result<Value> {
@@ -176,6 +209,14 @@ fn render_markdown(snapshot: &Value) -> Result<String> {
             ));
         }
     }
+    let expense_aggregates = snapshot
+        .get("expenseMonthlyAggregates")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    markdown.push_str(&format!(
+        "## `expenseMonthlyAggregates`\n\n````json\n{}\n````\n\n",
+        serde_json::to_string_pretty(&expense_aggregates)?
+    ));
     Ok(markdown)
 }
 

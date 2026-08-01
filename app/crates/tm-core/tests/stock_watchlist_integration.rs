@@ -145,7 +145,7 @@ fn migrates_schema_eleven_with_a_pre_migration_backup() -> Result<()> {
     drop(connection);
 
     let migrated = TmCore::open(TmHome::new(temporary.path()))?;
-    assert_eq!(migrated.health()?.schema_version, 14);
+    assert_eq!(migrated.health()?.schema_version, 15);
     assert!(migrated.stock_watchlist()?.is_empty());
     assert!(
         migrated

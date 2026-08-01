@@ -12,13 +12,30 @@ import type {
   CreateTaskInput,
   CreateWorkLogInput,
   DayEntryStatus,
+  ExpenseEventKind,
+  ExpenseImportCommitResult,
+  ExpenseImportPreview,
+  ExpenseMonthSummary,
+  ExpenseSourceStatus,
+  ExpenseReportResult,
+  ExpenseReview,
+  ExpenseReviewPage,
+  ExpenseTransaction,
+  ExpenseTransactionPage,
+  OverrideExpenseTransactionInput,
   ExportResult,
   FinishSessionInput,
   LatestStockScreen,
+  ListExpenseReviewsInput,
+  ListExpenseTransactionsInput,
   ListStockScreenResultsInput,
   Note,
   NoteType,
+  PreviewExpenseImportInput,
   Project,
+  RecurringExpenseItem,
+  RecurringExpenseOccurrence,
+  ResolveExpenseReviewInput,
   SearchResult,
   StartSessionInput,
   StockWatchlistItem,
@@ -30,7 +47,10 @@ import type {
   UpdateTaskInput,
   UpdateCalendarEventInput,
   UpdateChangeRequestInput,
+  UpdateRecurringExpenseInput,
+  UpdateExpenseSourceStatusInput,
   UpsertStockWatchlistItemInput,
+  CreateRecurringExpenseInput,
   WorkLog,
   WorkSession,
 } from "../types";
@@ -556,6 +576,240 @@ const sampleCalendarEvents = (today: string): CalendarEvent[] => {
   ];
 };
 
+const sampleExpenses = (today: string): {
+  sources: ExpenseSourceStatus[];
+  transactions: ExpenseTransaction[];
+  reviews: ExpenseReview[];
+  recurring: RecurringExpenseItem[];
+} => {
+  const month = today.slice(0, 7);
+  const occurredAt = (day: number, hour = 12) =>
+    `${month}-${String(day).padStart(2, "0")}T${String(hour).padStart(2, "0")}:00:00+09:00`;
+  const sources: ExpenseSourceStatus[] = [
+    { id: "expense-source-card", adapter: "kb_card_usage_v1", sourceKind: "card", requiredForCompleteReport: true, isActive: true, coverageStart: `${month}-01`, coverageEnd: today, version: 1 },
+    { id: "expense-source-account", adapter: "kb_account_history_v1", sourceKind: "account", requiredForCompleteReport: true, isActive: true, coverageStart: `${month}-01`, coverageEnd: today, version: 1 },
+    { id: "expense-source-wallet", adapter: "kakaopay_money_v1", sourceKind: "wallet", requiredForCompleteReport: false, isActive: true, coverageStart: `${month}-01`, coverageEnd: today, version: 1 },
+  ];
+  const transactions: ExpenseTransaction[] = [
+    {
+      id: "expense-lunch",
+      kind: "purchase",
+      category: "food",
+      status: "confirmed",
+      amountMinor: 12_000,
+      currency: "KRW",
+      occurredAt: occurredAt(2),
+      postedDate: `${month}-02`,
+      sourceKind: "card",
+      merchant: "동네식당",
+      counterparty: null,
+      memo: null,
+      paymentMethodFingerprint: "kb-card-sample",
+      exclusionReason: null,
+      duplicateOfEventId: null,
+      personalAmountMinor: null,
+      relatedEventId: null,
+      isProvisional: false,
+      pendingReviewId: null,
+      version: 1,
+    },
+    {
+      id: "expense-coffee",
+      kind: "purchase",
+      category: "cafe",
+      status: "confirmed",
+      amountMinor: 5_500,
+      currency: "KRW",
+      occurredAt: occurredAt(3, 9),
+      postedDate: `${month}-03`,
+      sourceKind: "wallet",
+      merchant: "작은카페",
+      counterparty: null,
+      memo: null,
+      paymentMethodFingerprint: "kakaopay-sample",
+      exclusionReason: null,
+      duplicateOfEventId: null,
+      personalAmountMinor: null,
+      relatedEventId: null,
+      isProvisional: false,
+      pendingReviewId: null,
+      version: 1,
+    },
+    {
+      id: "expense-refund",
+      kind: "refund",
+      category: "refund_income",
+      status: "confirmed",
+      amountMinor: 3_000,
+      currency: "KRW",
+      occurredAt: occurredAt(4),
+      postedDate: `${month}-04`,
+      sourceKind: "card",
+      merchant: "온라인상점",
+      counterparty: null,
+      memo: "부분 환불",
+      paymentMethodFingerprint: "kb-card-sample",
+      exclusionReason: null,
+      duplicateOfEventId: null,
+      personalAmountMinor: null,
+      relatedEventId: null,
+      isProvisional: false,
+      pendingReviewId: null,
+      version: 1,
+    },
+    {
+      id: "expense-p2p",
+      kind: "unknown_p2p",
+      category: "unconfirmed",
+      status: "unconfirmed",
+      amountMinor: 20_000,
+      currency: "KRW",
+      occurredAt: occurredAt(5, 18),
+      postedDate: `${month}-05`,
+      sourceKind: "wallet",
+      merchant: null,
+      counterparty: "카카오페이 송금 상대",
+      memo: null,
+      paymentMethodFingerprint: "kakaopay-sample",
+      exclusionReason: null,
+      duplicateOfEventId: null,
+      personalAmountMinor: null,
+      relatedEventId: null,
+      isProvisional: true,
+      pendingReviewId: "review-p2p",
+      version: 1,
+    },
+    {
+      id: "expense-openai",
+      kind: "purchase",
+      category: "ott_subscriptions",
+      status: "confirmed",
+      amountMinor: 2_000,
+      currency: "USD",
+      occurredAt: occurredAt(6),
+      postedDate: `${month}-06`,
+      sourceKind: "card",
+      merchant: "OpenAI",
+      counterparty: null,
+      memo: null,
+      paymentMethodFingerprint: "kb-card-sample",
+      exclusionReason: null,
+      duplicateOfEventId: null,
+      personalAmountMinor: null,
+      relatedEventId: null,
+      isProvisional: false,
+      pendingReviewId: null,
+      version: 1,
+    },
+    {
+      id: "expense-card-payment",
+      kind: "card_payment",
+      category: "transfer_settlement",
+      status: "excluded",
+      amountMinor: 12_000,
+      currency: "KRW",
+      occurredAt: occurredAt(7),
+      postedDate: `${month}-07`,
+      sourceKind: "account",
+      merchant: "KB국민카드",
+      counterparty: null,
+      memo: "카드대금 자동이체",
+      paymentMethodFingerprint: "kb-account-sample",
+      exclusionReason: "카드대금으로 자동 제외",
+      duplicateOfEventId: null,
+      personalAmountMinor: null,
+      relatedEventId: null,
+      isProvisional: false,
+      pendingReviewId: null,
+      version: 1,
+    },
+  ];
+  const reviews: ExpenseReview[] = [
+    {
+      id: "review-p2p",
+      reason: "unknown_p2p",
+      status: "pending",
+      transaction: transactions[3],
+      recurringExpenseId: null,
+      suggestedKind: "settlement_sent",
+      suggestedCategory: "transfer_settlement",
+      suggestedDuplicateOfEventId: null,
+      createdAt: now(),
+      resolvedAt: null,
+      version: 1,
+    },
+  ];
+  const recurring: RecurringExpenseItem[] = [
+    {
+      id: "recurring-rent",
+      name: "월세",
+      category: "housing_utilities",
+      vendor: "임대인",
+      amountMinor: 650_000,
+      currency: "KRW",
+      paymentMethodFingerprint: "kb-account-sample",
+      startDate: `${month}-01`,
+      endDate: null,
+      memo: "매월 이체",
+      reminderDays: 7,
+      amountKind: "fixed",
+      intervalMonths: 1,
+      dueRule: "last_day",
+      dueDay: null,
+      status: "active",
+      autoMatchEnabled: true,
+      createdAt: now(),
+      updatedAt: now(),
+      version: 1,
+    },
+    {
+      id: "recurring-insurance",
+      name: "보험료",
+      category: "insurance_finance_tax",
+      vendor: "보험사",
+      amountMinor: 89_000,
+      currency: "KRW",
+      paymentMethodFingerprint: "kb-card-sample",
+      startDate: `${month}-01`,
+      endDate: null,
+      memo: null,
+      reminderDays: 3,
+      amountKind: "estimate",
+      intervalMonths: 1,
+      dueRule: "specific_day",
+      dueDay: Number(today.slice(8, 10)),
+      status: "active",
+      autoMatchEnabled: false,
+      createdAt: now(),
+      updatedAt: now(),
+      version: 1,
+    },
+    {
+      id: "recurring-cloud",
+      name: "Railway",
+      category: "ott_subscriptions",
+      vendor: "Railway",
+      amountMinor: 30_000,
+      currency: "USD",
+      paymentMethodFingerprint: "kb-card-sample",
+      startDate: `${month}-01`,
+      endDate: null,
+      memo: "월 최대 한도",
+      reminderDays: 7,
+      amountKind: "limit",
+      intervalMonths: 1,
+      dueRule: "specific_day",
+      dueDay: Math.min(28, Number(today.slice(8, 10)) + 3),
+      status: "active",
+      autoMatchEnabled: false,
+      createdAt: now(),
+      updatedAt: now(),
+      version: 1,
+    },
+  ];
+  return { sources, transactions, reviews, recurring };
+};
+
 const sampleStockScreen = (today: string): {
   latest: LatestStockScreen;
   results: StockScreenResult[];
@@ -686,6 +940,10 @@ export class MemoryTransport implements CommandTransport {
   private snapshot = buildSample();
   private taskReport: TaskReportResult | null = null;
   private calendarEvents = sampleCalendarEvents(this.snapshot.today);
+  private expenses = sampleExpenses(this.snapshot.today);
+  private recurringOccurrenceOverrides = new Map<string, RecurringExpenseOccurrence>();
+  private expenseImportPreviews = new Map<string, ExpenseImportPreview>();
+  private expenseReport: ExpenseReportResult | null = null;
   private stockWatchlist: StockWatchlistItem[] = [];
   private stockScreen = sampleStockScreen(this.snapshot.today);
 
@@ -726,6 +984,74 @@ export class MemoryTransport implements CommandTransport {
         );
       case "delete_calendar_event":
         return this.deleteCalendarEvent(textValue(args.eventId), Number(args.expectedVersion));
+      case "get_expense_summary":
+        return this.getExpenseSummary(textValue(args.month));
+      case "list_expense_sources":
+        return this.expenses.sources;
+      case "update_expense_source":
+        return this.updateExpenseSource(
+          textValue(args.sourceId),
+          args.input as UpdateExpenseSourceStatusInput,
+        );
+      case "list_expense_transactions":
+        return this.listExpenseTransactions(args.input as ListExpenseTransactionsInput);
+      case "override_expense_transaction":
+        return this.overrideExpenseTransaction(
+          textValue(args.eventId),
+          args.input as OverrideExpenseTransactionInput,
+        );
+      case "list_expense_reviews":
+        return this.listExpenseReviews(args.input as ListExpenseReviewsInput);
+      case "resolve_expense_review":
+        return this.resolveExpenseReview(
+          textValue(args.reviewId),
+          args.input as ResolveExpenseReviewInput,
+        );
+      case "list_recurring_expenses":
+        return this.expenses.recurring;
+      case "list_recurring_expense_occurrences":
+        return this.listRecurringExpenseOccurrences(textValue(args.month));
+      case "create_recurring_expense":
+        return this.createRecurringExpense(args.input as CreateRecurringExpenseInput);
+      case "update_recurring_expense":
+        return this.updateRecurringExpense(
+          textValue(args.recurringExpenseId),
+          args.input as UpdateRecurringExpenseInput,
+        );
+      case "delete_recurring_expense":
+        return this.deleteRecurringExpense(
+          textValue(args.recurringExpenseId),
+          Number(args.expectedVersion),
+        );
+      case "confirm_recurring_expense_paid":
+        return this.confirmRecurringExpensePaid(
+          textValue(args.occurrenceKey),
+          args.amountMinor === null || args.amountMinor === undefined
+            ? null
+            : Number(args.amountMinor),
+          Number(args.expectedVersion),
+        );
+      case "match_recurring_expense_occurrence":
+        return this.matchRecurringExpenseOccurrence(
+          textValue(args.occurrenceKey),
+          textValue(args.eventId),
+          Boolean(args.enableFutureAutoMatch),
+          Number(args.expectedVersion),
+        );
+      case "preview_expense_import":
+        return this.previewExpenseImport(args.input as PreviewExpenseImportInput);
+      case "commit_expense_import":
+        return this.commitExpenseImport(textValue(args.sessionId));
+      case "latest_expense_report":
+        return this.expenseReport?.month === textValue(args.month) ? this.expenseReport : null;
+      case "generate_expense_report":
+        return this.generateExpenseReport(textValue(args.month));
+      case "rate_expense_report":
+        if (!this.expenseReport || this.expenseReport.reportId !== args.reportId) {
+          throw new Error("지출 리포트를 찾지 못했습니다.");
+        }
+        this.expenseReport.helpful = Boolean(args.helpful);
+        return this.expenseReport;
       case "get_stock_watchlist":
         return this.stockWatchlist;
       case "upsert_stock_watchlist_item":
@@ -880,6 +1206,432 @@ export class MemoryTransport implements CommandTransport {
     return this.taskReport;
   }
 
+  private getExpenseSummary(month: string): ExpenseMonthSummary {
+    if (!/^\d{4}-\d{2}$/.test(month)) throw new Error("월 형식이 올바르지 않습니다.");
+    const transactions = this.expenses.transactions.filter((item) =>
+      item.occurredAt.startsWith(`${month}-`));
+    const currencies = [...new Set([
+      ...transactions.map((item) => item.currency),
+      ...this.expenses.recurring.map((item) => item.currency),
+    ])].sort();
+    const recurring = this.listRecurringExpenseOccurrences(month);
+    const totals = currencies.map((currency) => {
+      const items = transactions.filter((item) => item.currency === currency && item.status === "confirmed");
+      const sum = (kind: ExpenseEventKind) => items
+        .filter((item) => item.kind === kind)
+        .reduce((total, item) => total + item.amountMinor, 0);
+      const expected = recurring
+        .filter((item) => item.currency === currency)
+        .reduce((total, item) => total + item.expectedAmountMinor, 0);
+      const paid = recurring
+        .filter((item) => item.currency === currency && ["matched", "paid"].includes(item.status))
+        .reduce((total, item) => total + (item.actualAmountMinor ?? item.expectedAmountMinor), 0);
+      const grossPurchaseMinor = sum("purchase");
+      const refundsMinor = sum("refund");
+      const settlementReceivedMinor = sum("settlement_received");
+      const settlementSentMinor = sum("settlement_sent");
+      const feesMinor = sum("fee");
+      return {
+        currency,
+        netPersonalSpendMinor: grossPurchaseMinor - refundsMinor
+          - settlementReceivedMinor + settlementSentMinor + feesMinor,
+        grossPurchaseMinor,
+        refundsMinor,
+        settlementReceivedMinor,
+        settlementSentMinor,
+        feesMinor,
+        unconfirmedOutflowMinor: transactions
+          .filter((item) => item.currency === currency && item.kind === "unknown_p2p")
+          .reduce((total, item) => total + item.amountMinor, 0),
+        recurringExpectedMinor: expected,
+        recurringPaidMinor: paid,
+        recurringRemainingMinor: Math.max(0, expected - paid),
+      };
+    });
+    const categories = [...new Set(transactions.map((item) => item.category))]
+      .flatMap((category) => currencies.map((currency) => ({
+        category,
+        currency,
+        amountMinor: transactions
+          .filter((item) => item.category === category && item.currency === currency && item.status === "confirmed")
+          .reduce((total, item) => total + (item.kind === "refund" ? -item.amountMinor : item.amountMinor), 0),
+      })))
+      .filter((item) => item.amountMinor !== 0);
+    const daily = transactions
+      .filter((item) => item.status === "confirmed")
+      .map((item) => ({
+        date: item.occurredAt.slice(0, 10),
+        currency: item.currency,
+        amountMinor: item.kind === "refund" ? -item.amountMinor : item.amountMinor,
+      }));
+    const reviews = this.expenses.reviews.filter((item) => item.transaction.occurredAt.startsWith(`${month}-`));
+    const [year, monthNumber] = month.split("-").map(Number);
+    const monthEnd = `${month}-${String(new Date(Date.UTC(year, monthNumber, 0)).getUTCDate()).padStart(2, "0")}`;
+    return {
+      month,
+      monthStart: `${month}-01`,
+      monthEnd,
+      status: reviews.length > 0 ? "provisional" : "confirmed",
+      currencies: totals,
+      categories,
+      daily,
+      recurringCandidates: 1,
+      completeness: {
+        activeSourceCount: this.expenses.sources.filter((source) => source.isActive && source.requiredForCompleteReport).length,
+        coveredSourceCount: this.expenses.sources.filter((source) => source.isActive && source.requiredForCompleteReport && source.coverageStart && source.coverageEnd).length,
+        rejectedRowCount: 0,
+        pendingReviewCount: reviews.length,
+      },
+    };
+  }
+
+  private updateExpenseSource(
+    sourceId: string,
+    input: UpdateExpenseSourceStatusInput,
+  ): ExpenseSourceStatus {
+    const source = this.expenses.sources.find((item) => item.id === sourceId);
+    if (!source) throw new Error("지출 출처를 찾지 못했습니다.");
+    if (source.version !== input.expectedVersion) throw new Error("지출 출처가 먼저 변경되었습니다.");
+    source.requiredForCompleteReport = input.requiredForCompleteReport;
+    source.isActive = input.isActive;
+    source.version += 1;
+    return source;
+  }
+
+  private listExpenseTransactions(input: ListExpenseTransactionsInput): ExpenseTransactionPage {
+    const offset = Number(input.cursor ?? 0);
+    const limit = Math.min(100, Math.max(1, input.limit ?? 50));
+    const filtered = this.expenses.transactions
+      .filter((item) => item.occurredAt.startsWith(`${input.month}-`))
+      .sort((left, right) => right.occurredAt.localeCompare(left.occurredAt));
+    return {
+      items: filtered.slice(offset, offset + limit),
+      nextCursor: offset + limit < filtered.length ? String(offset + limit) : null,
+    };
+  }
+
+  private overrideExpenseTransaction(
+    eventId: string,
+    input: OverrideExpenseTransactionInput,
+  ): ExpenseTransaction {
+    const transaction = this.expenses.transactions.find((item) => item.id === eventId);
+    if (!transaction) throw new Error("거래를 찾지 못했습니다.");
+    if (transaction.kind === "manual_recurring") {
+      throw new Error("수동 납부 거래는 정기지출 발생 건에서 변경해 주세요.");
+    }
+    if (transaction.version !== input.expectedVersion) throw new Error("거래가 먼저 변경되었습니다.");
+    transaction.kind = input.kind;
+    transaction.category = input.category;
+    transaction.duplicateOfEventId = input.duplicateOfEventId;
+    if (input.personalAmountMinor !== null && input.personalAmountMinor !== undefined) {
+      transaction.personalAmountMinor = input.personalAmountMinor;
+      transaction.relatedEventId = null;
+    } else if (input.clearPersonalAmount) {
+      transaction.personalAmountMinor = null;
+    }
+    if (input.relatedEventId !== null && input.relatedEventId !== undefined) {
+      transaction.relatedEventId = input.relatedEventId;
+      transaction.personalAmountMinor = null;
+    } else if (input.clearRelatedEvent) {
+      transaction.relatedEventId = null;
+    }
+    const excludedKinds: ExpenseEventKind[] = ["internal_transfer", "card_payment", "wallet_topup"];
+    transaction.status = input.duplicateOfEventId || excludedKinds.includes(input.kind)
+      ? "excluded"
+      : "confirmed";
+    transaction.exclusionReason = input.duplicateOfEventId
+      ? "사용자가 중복 거래로 분류"
+      : excludedKinds.includes(input.kind) ? "사용자가 비지출 이동으로 분류" : null;
+    transaction.isProvisional = false;
+    transaction.version += 1;
+    return transaction;
+  }
+
+  private listExpenseReviews(input: ListExpenseReviewsInput): ExpenseReviewPage {
+    const offset = Number(input.cursor ?? 0);
+    const limit = Math.min(100, Math.max(1, input.limit ?? 50));
+    const filtered = this.expenses.reviews
+      .filter((item) => !input.month || item.transaction.occurredAt.startsWith(`${input.month}-`))
+      .filter((item) => !input.status || item.status === input.status)
+      .sort((left, right) => right.transaction.occurredAt.localeCompare(left.transaction.occurredAt));
+    return {
+      items: filtered.slice(offset, offset + limit),
+      nextCursor: offset + limit < filtered.length ? String(offset + limit) : null,
+    };
+  }
+
+  private resolveExpenseReview(reviewId: string, input: ResolveExpenseReviewInput): null {
+    const review = this.expenses.reviews.find((item) => item.id === reviewId);
+    if (!review) throw new Error("검토 항목을 찾지 못했습니다.");
+    if (review.version !== input.expectedVersion) throw new Error("검토 항목이 먼저 변경되었습니다.");
+    const transaction = this.expenses.transactions.find((item) => item.id === review.transaction.id);
+    if (!transaction) throw new Error("연결된 거래를 찾지 못했습니다.");
+    transaction.kind = input.kind;
+    transaction.category = input.category;
+    transaction.duplicateOfEventId = input.duplicateOfEventId;
+    transaction.status = input.duplicateOfEventId
+      ? "excluded"
+      : ["internal_transfer", "card_payment", "wallet_topup"].includes(input.kind)
+      ? "excluded"
+      : "confirmed";
+    this.expenses.reviews = this.expenses.reviews.filter((item) => item.id !== reviewId);
+    return null;
+  }
+
+  private listRecurringExpenseOccurrences(month: string): RecurringExpenseOccurrence[] {
+    if (!/^\d{4}-\d{2}$/.test(month)) throw new Error("월 형식이 올바르지 않습니다.");
+    const [year, monthNumber] = month.split("-").map(Number);
+    const targetIndex = year * 12 + monthNumber - 1;
+    const lastDay = new Date(Date.UTC(year, monthNumber, 0)).getUTCDate();
+    return this.expenses.recurring.flatMap((item) => {
+      if (item.status !== "active") return [];
+      const [startYear, startMonth] = item.startDate.slice(0, 7).split("-").map(Number);
+      const startIndex = startYear * 12 + startMonth - 1;
+      if (targetIndex < startIndex || (targetIndex - startIndex) % item.intervalMonths !== 0) return [];
+      const day = item.dueRule === "first_day"
+        ? 1
+        : item.dueRule === "last_day"
+          ? lastDay
+          : Math.min(item.dueDay ?? 1, lastDay);
+      const dueDate = `${month}-${String(day).padStart(2, "0")}`;
+      if (dueDate < item.startDate || (item.endDate && dueDate > item.endDate)) return [];
+      const occurrenceKey = `${item.id}:${dueDate}`;
+      const overridden = this.recurringOccurrenceOverrides.get(occurrenceKey);
+      if (overridden) return [overridden];
+      return [{
+        occurrenceKey,
+        recurringExpenseId: item.id,
+        itemVersion: item.version,
+        name: item.name,
+        category: item.category,
+        vendor: item.vendor,
+        expectedAmountMinor: item.amountMinor,
+        actualAmountMinor: null,
+        currency: item.currency,
+        dueDate,
+        status: dueDate < this.snapshot.today
+          ? "overdue"
+          : dueDate === this.snapshot.today
+            ? "due_today"
+            : dueDate <= shiftDate(this.snapshot.today, 7) ? "due_soon" : "scheduled",
+        reminderDays: item.reminderDays,
+        amountChanged: false,
+        actualEventId: null,
+        version: 1,
+      } satisfies RecurringExpenseOccurrence];
+    }).sort((left, right) => left.dueDate.localeCompare(right.dueDate)
+      || left.name.localeCompare(right.name, "ko-KR"));
+  }
+
+  private createRecurringExpense(input: CreateRecurringExpenseInput): RecurringExpenseItem {
+    this.validateRecurringExpense(input);
+    const timestamp = now();
+    const item: RecurringExpenseItem = {
+      id: id("recurring"),
+      ...input,
+      autoMatchEnabled: false,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      version: 1,
+    };
+    this.expenses.recurring.push(item);
+    return item;
+  }
+
+  private updateRecurringExpense(
+    recurringExpenseId: string,
+    input: UpdateRecurringExpenseInput,
+  ): RecurringExpenseItem {
+    const item = this.expenses.recurring.find((entry) => entry.id === recurringExpenseId);
+    if (!item) throw new Error("정기지출을 찾지 못했습니다.");
+    if (item.version !== input.expectedVersion) throw new Error("정기지출이 먼저 변경되었습니다.");
+    if (input.autoMatchEnabled && !item.autoMatchEnabled) {
+      throw new Error("자동 연결은 첫 실제 거래 연결에서만 켤 수 있습니다.");
+    }
+    this.validateRecurringExpense(input);
+    const { expectedVersion, effectiveFromMonth, ...patch } = input;
+    void expectedVersion;
+    void effectiveFromMonth;
+    Object.assign(item, patch, { version: item.version + 1 });
+    return item;
+  }
+
+  private deleteRecurringExpense(recurringExpenseId: string, expectedVersion: number): null {
+    const item = this.expenses.recurring.find((entry) => entry.id === recurringExpenseId);
+    if (!item) throw new Error("정기지출을 찾지 못했습니다.");
+    if (item.version !== expectedVersion) throw new Error("정기지출이 먼저 변경되었습니다.");
+    this.expenses.recurring = this.expenses.recurring.filter((entry) => entry.id !== item.id);
+    return null;
+  }
+
+  private confirmRecurringExpensePaid(
+    occurrenceKey: string,
+    amountMinor: number | null,
+    expectedVersion: number,
+  ): RecurringExpenseOccurrence {
+    const occurrence = this.findRecurringOccurrence(occurrenceKey);
+    if (occurrence.version !== expectedVersion) throw new Error("정기지출 납부 상태가 먼저 변경되었습니다.");
+    const updated = {
+      ...occurrence,
+      actualAmountMinor: amountMinor ?? occurrence.expectedAmountMinor,
+      status: "paid" as const,
+      amountChanged: amountMinor !== null && amountMinor !== occurrence.expectedAmountMinor,
+      version: occurrence.version + 1,
+    };
+    this.recurringOccurrenceOverrides.set(occurrenceKey, updated);
+    return updated;
+  }
+
+  private matchRecurringExpenseOccurrence(
+    occurrenceKey: string,
+    eventId: string,
+    enableFutureAutoMatch: boolean,
+    expectedVersion: number,
+  ): RecurringExpenseOccurrence {
+    const occurrence = this.findRecurringOccurrence(occurrenceKey);
+    if (occurrence.version !== expectedVersion) throw new Error("정기지출 납부 상태가 먼저 변경되었습니다.");
+    const transaction = this.expenses.transactions.find((item) => item.id === eventId);
+    if (!transaction) throw new Error("연결할 거래를 찾지 못했습니다.");
+    const updated = {
+      ...occurrence,
+      actualAmountMinor: transaction.amountMinor,
+      status: "matched" as const,
+      amountChanged: transaction.amountMinor !== occurrence.expectedAmountMinor,
+      actualEventId: eventId,
+      version: occurrence.version + 1,
+    };
+    this.recurringOccurrenceOverrides.set(occurrenceKey, updated);
+    if (enableFutureAutoMatch) {
+      const recurring = this.expenses.recurring.find((item) => item.id === occurrence.recurringExpenseId);
+      if (recurring) {
+        recurring.autoMatchEnabled = true;
+        recurring.paymentMethodFingerprint ??= transaction.paymentMethodFingerprint;
+      }
+    }
+    return updated;
+  }
+
+  private findRecurringOccurrence(occurrenceKey: string): RecurringExpenseOccurrence {
+    const month = occurrenceKey.slice(-10, -3);
+    const occurrence = this.listRecurringExpenseOccurrences(month)
+      .find((item) => item.occurrenceKey === occurrenceKey);
+    if (!occurrence) throw new Error("정기지출 발생 건을 찾지 못했습니다.");
+    return occurrence;
+  }
+
+  private validateRecurringExpense(input: CreateRecurringExpenseInput): void {
+    if (!input.name.trim()) throw new Error("정기지출 이름을 입력하세요.");
+    if (input.name.trim().length > 120 || (input.vendor?.trim().length ?? 0) > 200 || (input.memo?.trim().length ?? 0) > 500) {
+      throw new Error("이름 120자, 업체 200자, 메모 500자 이내로 입력해 주세요.");
+    }
+    if (!Number.isSafeInteger(input.amountMinor) || input.amountMinor < 0) {
+      throw new Error("금액을 올바르게 입력하세요.");
+    }
+    if (input.dueRule === "specific_day" && (!input.dueDay || input.dueDay > 31)) {
+      throw new Error("결제일은 1일부터 31일까지 입력하세요.");
+    }
+  }
+
+  private previewExpenseImport(input: PreviewExpenseImportInput): ExpenseImportPreview {
+    if (!input.path.trim()) throw new Error("가져올 파일을 선택하세요.");
+    const emptyCounts = {
+      parsed: 0,
+      new: 0,
+      duplicate: 0,
+      settlementCandidate: 0,
+      excluded: 0,
+      unconfirmed: 0,
+      rejected: 0,
+    };
+    if (/kakao/i.test(input.path) && !input.password) {
+      return {
+        status: "password_required",
+        sessionId: null,
+        adapter: "kakaopay_money_v1",
+        sourceLabel: "카카오페이머니",
+        periodStart: null,
+        periodEnd: null,
+        passwordRequired: true,
+        counts: emptyCounts,
+        rows: [],
+      };
+    }
+    const sessionId = id("expense-import");
+    const preview: ExpenseImportPreview = {
+      status: "ready",
+      sessionId,
+      adapter: /kakao/i.test(input.path) ? "kakaopay_money_v1" : "kb_card_usage_v1",
+      sourceLabel: /kakao/i.test(input.path) ? "카카오페이머니" : "KB 신용카드",
+      periodStart: this.snapshot.today,
+      periodEnd: this.snapshot.today,
+      passwordRequired: false,
+      counts: {
+        parsed: 3,
+        new: 2,
+        duplicate: 1,
+        settlementCandidate: 1,
+        excluded: 0,
+        unconfirmed: 1,
+        rejected: 0,
+      },
+      rows: [
+        { rowNumber: 2, occurredAt: `${this.snapshot.today}T12:00:00+09:00`, amountMinor: 18_000, currency: "KRW", displayName: "합성 식당", kind: "purchase", needsReview: false, excluded: false },
+        { rowNumber: 3, occurredAt: `${this.snapshot.today}T14:00:00+09:00`, amountMinor: 20_000, currency: "KRW", displayName: "합성 송금", kind: "unknown_p2p", needsReview: true, excluded: false },
+      ],
+    };
+    this.expenseImportPreviews.set(sessionId, preview);
+    return preview;
+  }
+
+  private commitExpenseImport(sessionId: string): ExpenseImportCommitResult {
+    const preview = this.expenseImportPreviews.get(sessionId);
+    if (!preview) throw new Error("가져오기 미리보기가 만료되었거나 이미 사용되었습니다.");
+    this.expenseImportPreviews.delete(sessionId);
+    return {
+      batchId: id("expense-batch"),
+      sourceId: id("expense-source"),
+      rowCount: preview.counts.parsed,
+      newCount: preview.counts.new,
+      duplicateCount: preview.counts.duplicate,
+      rejectedCount: preview.counts.rejected,
+      excludedCount: preview.counts.excluded,
+      reviewCount: preview.counts.unconfirmed + preview.counts.settlementCandidate,
+      idempotentReplay: false,
+    };
+  }
+
+  private generateExpenseReport(month: string): ExpenseReportResult {
+    const summary = this.getExpenseSummary(month);
+    const krw = summary.currencies.find((item) => item.currency === "KRW");
+    this.expenseReport = {
+      reportId: id("expense-report"),
+      month,
+      title: `${Number(month.slice(5, 7))}월 지출 해설`,
+      summary: "확정 집계만 사용해 지출 흐름과 다음 달 확인 항목을 정리했습니다.",
+      observations: [{ factIds: ["currency:KRW:net_personal_spend"], text: `원화 순 개인지출 집계가 준비되었습니다 (${krw ? "확정값" : "자료 없음"}).` }],
+      alerts: summary.completeness.pendingReviewCount > 0
+        ? [{ factIds: ["currency:KRW:unconfirmed_outflow"], text: "확인하지 않은 송금이 있어 리포트가 잠정 상태입니다." }]
+        : [],
+      nextMonthChecks: ["정기지출 실제 납부액과 예상액 차이를 확인하세요."],
+      facts: [
+        {
+          factId: "currency:KRW:net_personal_spend",
+          metric: "net_personal_spend",
+          currency: "KRW",
+          amountMinor: krw?.netPersonalSpendMinor ?? 0,
+        },
+        {
+          factId: "currency:KRW:unconfirmed_outflow",
+          metric: "unconfirmed_outflow",
+          currency: "KRW",
+          amountMinor: krw?.unconfirmedOutflowMinor ?? 0,
+        },
+      ],
+      helpful: null,
+    };
+    return this.expenseReport;
+  }
+
   private getCalendarMonth(month: string): CalendarMonth {
     if (!/^\d{4}-\d{2}$/.test(month)) throw new Error("월 형식이 올바르지 않습니다.");
     const [year, monthNumber] = month.split("-").map(Number);
@@ -918,6 +1670,7 @@ export class MemoryTransport implements CommandTransport {
       monthEnd,
       events: this.calendarEvents.filter((event) => !event.deletedAt),
       occurrences,
+      expenseOccurrences: this.listRecurringExpenseOccurrences(month),
     };
   }
 

@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tauri::State;
 use tm_core::{
-    CalendarEvent, CalendarMonth, ChangeRequest, ChangeRequestKind, ChecklistMutationInput,
+    CalendarEvent, ChangeRequest, ChangeRequestKind, ChecklistMutationInput,
     CreateCalendarEventInput, CreateChangeRequestInput as CoreCreateChangeRequestInput,
     CreateNoteAggregateInput, CreateNoteInput, CreateProjectInput, CreateTaskAggregateInput,
     CreateTaskInput, CreateWorkLogInput, EndSessionInput, EntityLink, EntityType,
@@ -231,12 +231,13 @@ pub(crate) fn create_project(
 pub(crate) fn get_calendar_month(
     month: String,
     state: State<'_, AppState>,
-) -> CommandResult<CalendarMonth> {
+) -> CommandResult<Value> {
     let month = parse_month(&month)?;
-    state
+    let calendar = state
         .core
         .calendar_month(month.year(), month.month())
-        .map_err(command_error)
+        .map_err(command_error)?;
+    crate::expense_commands::calendar_month_value(&state, calendar)
 }
 
 #[tauri::command]

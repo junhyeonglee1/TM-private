@@ -17,8 +17,8 @@ release 앱과 CLI는 고정 기본 경로만 사용한다. debug/test의 `TM_HO
 ## 주요 명령
 
 - 전체 검증(설치 없음): `scripts\\verify.ps1`
-- Windows x64 raw EXE 빌드(NSIS 없음): `scripts\\build-release.ps1`
-- NSIS 빌드: 명시적 승인 후에만 `scripts\\build-nsis.ps1 -Approved`
+- Windows x64 검증 artifact 설치: `scripts\\build-release.ps1 -Approved -RunId <Actions run ID> -ExpectedHeadSha <검증 commit SHA>`
+- 로컬 NSIS 빌드는 Windows 정책상 비활성화되어 있으며, `scripts\\build-nsis.ps1 -Approved`는 안전하게 중단한다.
 - DB 백업: `tm-cli backup create`
 - 소스 ZIP 스냅샷: `tm-cli backup source`
 - 상태 확인: `tm-cli health --json`

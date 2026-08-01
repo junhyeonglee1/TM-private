@@ -49,7 +49,7 @@ case "$schema_version" in
         exit 1
         ;;
 esac
-if [ "$schema_version" -lt 1 ] || [ "$schema_version" -gt 14 ]; then
+if [ "$schema_version" -lt 1 ] || [ "$schema_version" -gt 15 ]; then
     echo "event=tm_backup_failed reason=unsupported_schema_version" >&2
     exit 1
 fi
@@ -118,6 +118,39 @@ app_state'
         )"
         if [ "$table_exists" != "1" ]; then
             echo "event=tm_backup_failed reason=required_table_missing table=$table" >&2
+            exit 1
+        fi
+    done
+fi
+if [ "$schema_version" -ge 15 ]; then
+    expense_required_tables='expense_crypto_metadata
+expense_sources
+expense_import_batches
+expense_import_preview_sessions
+expense_raw_rows
+expense_postings
+expense_events
+expense_event_postings
+expense_allocations
+expense_reviews
+expense_rules
+recurring_expense_items
+recurring_expense_versions
+recurring_expense_occurrences
+expense_month_reports
+expense_ai_reports
+expense_ai_feedback
+expense_ai_request_bindings
+expense_ai_attempts
+expense_mutation_receipts'
+    for table in $expense_required_tables; do
+        table_exists="$(
+            sqlite3 -readonly "$snapshot" \
+                "SELECT COUNT(*) FROM sqlite_schema
+                 WHERE type = 'table' AND name = '$table';"
+        )"
+        if [ "$table_exists" != "1" ]; then
+            echo "event=tm_backup_failed reason=required_expense_table_missing table=$table" >&2
             exit 1
         fi
     done
@@ -202,6 +235,148 @@ if [ "$schema_version" -ge 14 ]; then
     )"
     if [ "$schema_semantic_summary" != "1|1|0|0|1|1|6" ]; then
         echo "event=tm_backup_failed reason=schema_semantics summary=$schema_semantic_summary" >&2
+        exit 1
+    fi
+    schema_semantics_validated=true
+fi
+if [ "$schema_version" -ge 15 ]; then
+    expense_schema_semantic_summary="$(
+        sqlite3 -readonly "$snapshot" "
+            WITH objects AS (
+                SELECT type,
+                       name,
+                       lower(
+                           replace(replace(replace(replace(sql, ' ', ''), char(9), ''), char(10), ''), char(13), '')
+                       ) AS normalized_sql
+                FROM sqlite_schema
+                WHERE sql IS NOT NULL
+            ), expense_tables(name) AS (
+                VALUES
+                    ('expense_crypto_metadata'), ('expense_sources'),
+                    ('expense_import_batches'), ('expense_import_preview_sessions'),
+                    ('expense_raw_rows'), ('expense_postings'), ('expense_events'),
+                    ('expense_event_postings'), ('expense_allocations'),
+                    ('expense_reviews'), ('expense_rules'),
+                    ('recurring_expense_items'), ('recurring_expense_versions'),
+                    ('recurring_expense_occurrences'), ('expense_month_reports'),
+                    ('expense_ai_reports'), ('expense_ai_feedback'),
+                    ('expense_ai_request_bindings'), ('expense_ai_attempts'),
+                    ('expense_mutation_receipts')
+            ), immutable_triggers(name, normalized_sql) AS (
+                VALUES
+                    ('expense_raw_rows_immutable_update',
+                     'createtriggerexpense_raw_rows_immutable_updatebeforeupdateonexpense_raw_rowsbeginselectraise(abort,''expenserawrowsareimmutable'');end'),
+                    ('expense_raw_rows_immutable_delete',
+                     'createtriggerexpense_raw_rows_immutable_deletebeforedeleteonexpense_raw_rowsbeginselectraise(abort,''expenserawrowsareimmutable'');end'),
+                    ('expense_postings_immutable_update',
+                     'createtriggerexpense_postings_immutable_updatebeforeupdateonexpense_postingsbeginselectraise(abort,''expensepostingsareimmutable'');end'),
+                    ('expense_postings_immutable_delete',
+                     'createtriggerexpense_postings_immutable_deletebeforedeleteonexpense_postingsbeginselectraise(abort,''expensepostingsareimmutable'');end'),
+                    ('expense_event_postings_immutable_update',
+                     'createtriggerexpense_event_postings_immutable_updatebeforeupdateonexpense_event_postingsbeginselectraise(abort,''expenseeventpostinglinksareimmutable'');end'),
+                    ('expense_event_postings_immutable_delete',
+                     'createtriggerexpense_event_postings_immutable_deletebeforedeleteonexpense_event_postingsbeginselectraise(abort,''expenseeventpostinglinksareimmutable'');end'),
+                    ('recurring_expense_versions_immutable_update',
+                     'createtriggerrecurring_expense_versions_immutable_updatebeforeupdateonrecurring_expense_versionsbeginselectraise(abort,''recurringexpenseversionsareimmutable'');end'),
+                    ('recurring_expense_versions_immutable_delete',
+                     'createtriggerrecurring_expense_versions_immutable_deletebeforedeleteonrecurring_expense_versionsbeginselectraise(abort,''recurringexpenseversionsareimmutable'');end')
+            ), required_unique_indexes(name, normalized_sql) AS (
+                VALUES
+                    ('idx_expense_allocations_personal_unique',
+                     'createuniqueindexidx_expense_allocations_personal_uniqueonexpense_allocations(event_id)whereallocation_kind=''personal'''),
+                    ('idx_expense_allocations_settlement_event_unique',
+                     'createuniqueindexidx_expense_allocations_settlement_event_uniqueonexpense_allocations(event_id)whereallocation_kindin(''settlement_received'',''settlement_sent'')'),
+                    ('idx_recurring_occurrences_actual_event_unique',
+                     'createuniqueindexidx_recurring_occurrences_actual_event_uniqueonrecurring_expense_occurrences(actual_event_id)whereactual_event_idisnotnull'),
+                    ('idx_expense_rules_classification_unique',
+                     'createuniqueindexidx_expense_rules_classification_uniqueonexpense_rules(merchant_blind_index,coalesce(payment_method_fingerprint,''''))whererule_kind=''classification'''),
+                    ('idx_expense_rules_recurring_match_unique',
+                     'createuniqueindexidx_expense_rules_recurring_match_uniqueonexpense_rules(recurring_expense_id,merchant_blind_index,coalesce(payment_method_fingerprint,''''))whererule_kind=''recurring_match''')
+            ), required_indexes(name) AS (
+                VALUES
+                    ('idx_expense_import_preview_expiry'),
+                    ('idx_expense_postings_merchant'),
+                    ('idx_expense_events_month'),
+                    ('idx_expense_reviews_queue'),
+                    ('idx_recurring_expense_versions_effective'),
+                    ('idx_recurring_occurrences_due'),
+                    ('idx_expense_ai_attempts_month')
+            ), required_ai_columns(table_name, column_name) AS (
+                VALUES
+                    ('expense_ai_attempts', 'report_month_start'),
+                    ('expense_ai_attempts', 'result_json'),
+                    ('expense_ai_attempts', 'attempt_status'),
+                    ('expense_ai_attempts', 'failure_code'),
+                    ('expense_ai_attempts', 'completed_at'),
+                    ('expense_ai_reports', 'cached_input_tokens'),
+                    ('expense_ai_reports', 'total_tokens'),
+                    ('expense_ai_request_bindings', 'report_month_start'),
+                    ('expense_ai_request_bindings', 'aggregate_sha256')
+            ), present_ai_columns(table_name, column_name) AS (
+                SELECT 'expense_ai_attempts', name
+                  FROM pragma_table_info('expense_ai_attempts')
+                UNION ALL
+                SELECT 'expense_ai_reports', name
+                  FROM pragma_table_info('expense_ai_reports')
+                UNION ALL
+                SELECT 'expense_ai_request_bindings', name
+                  FROM pragma_table_info('expense_ai_request_bindings')
+            ), forbidden_plaintext_columns(name) AS (
+                SELECT name FROM pragma_table_info('expense_postings')
+                WHERE name IN ('merchant', 'counterparty', 'memo')
+                UNION ALL
+                SELECT name FROM pragma_table_info('recurring_expense_items')
+                WHERE name IN ('name', 'vendor', 'memo')
+            )
+            SELECT
+                (SELECT COUNT(*) FROM expense_tables AS required
+                 JOIN objects ON objects.type = 'table' AND objects.name = required.name) || '|' ||
+                (SELECT COUNT(*) FROM immutable_triggers AS required
+                 JOIN objects ON objects.type = 'trigger'
+                             AND objects.name = required.name
+                             AND objects.normalized_sql = required.normalized_sql) || '|' ||
+                (SELECT COUNT(*) FROM required_indexes AS required
+                 JOIN objects ON objects.type = 'index' AND objects.name = required.name
+                 WHERE objects.normalized_sql LIKE '%createindex%') || '|' ||
+                (SELECT COUNT(*) FROM required_unique_indexes AS required
+                 JOIN objects ON objects.type = 'index'
+                             AND objects.name = required.name
+                             AND objects.normalized_sql = required.normalized_sql) || '|' ||
+                (SELECT COUNT(*) FROM required_ai_columns AS required
+                 JOIN present_ai_columns AS present
+                   ON present.table_name = required.table_name
+                  AND present.column_name = required.column_name) || '|' ||
+                (SELECT COUNT(*) FROM forbidden_plaintext_columns) || '|' ||
+                (SELECT COUNT(*) FROM expense_raw_rows AS raw
+                 LEFT JOIN expense_postings AS posting ON posting.raw_row_id = raw.id
+                 WHERE posting.id IS NULL) || '|' ||
+                (SELECT COUNT(*) FROM expense_postings AS posting
+                 LEFT JOIN expense_raw_rows AS raw ON raw.id = posting.raw_row_id
+                 WHERE raw.id IS NULL OR raw.source_id <> posting.source_id) || '|' ||
+                (SELECT COUNT(*) FROM expense_event_postings AS link
+                 LEFT JOIN expense_events AS event ON event.id = link.event_id
+                 LEFT JOIN expense_postings AS posting ON posting.id = link.posting_id
+                 WHERE event.id IS NULL OR posting.id IS NULL) || '|' ||
+                (SELECT COUNT(*) FROM expense_postings AS posting
+                 LEFT JOIN expense_event_postings AS link ON link.posting_id = posting.id
+                 WHERE link.posting_id IS NULL) || '|' ||
+                (SELECT COUNT(*) FROM expense_events AS event
+                 WHERE event.primary_posting_id IS NOT NULL
+                   AND NOT EXISTS(
+                       SELECT 1 FROM expense_event_postings AS link
+                       WHERE link.event_id = event.id
+                         AND link.posting_id = event.primary_posting_id
+                         AND link.posting_role = 'primary'
+                   )) || '|' ||
+                (SELECT COUNT(*) FROM expense_event_postings AS link
+                 JOIN expense_events AS event ON event.id = link.event_id
+                 WHERE link.posting_role = 'primary'
+                   AND event.primary_posting_id IS NOT link.posting_id) || '|' ||
+                (SELECT COUNT(*) FROM expense_crypto_metadata
+                 WHERE singleton_key <> 'expense-data-key-probe' OR key_version <> 1);"
+    )"
+    if [ "$expense_schema_semantic_summary" != "20|8|7|5|9|0|0|0|0|0|0|0|0" ]; then
+        echo "event=tm_backup_failed reason=expense_schema_semantics summary=$expense_schema_semantic_summary" >&2
         exit 1
     fi
     schema_semantics_validated=true

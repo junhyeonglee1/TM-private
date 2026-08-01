@@ -447,7 +447,7 @@ fn schema_twelve_migration_preserves_scheduler_rows_and_foreign_keys() -> Result
     drop(connection);
 
     let migrated = TmCore::open(TmHome::new(temporary.path()))?;
-    assert_eq!(migrated.health()?.schema_version, 14);
+    assert_eq!(migrated.health()?.schema_version, 15);
     let connection = Connection::open(migrated.home().database_path())?;
     connection.execute_batch("PRAGMA foreign_keys = ON;")?;
     let after: i64 =

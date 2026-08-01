@@ -457,7 +457,7 @@ try {
     $serviceWorker = Invoke-TmRequest `
         -Client $client -Method ([System.Net.Http.HttpMethod]::Get) -Uri "$base/mobile/sw.js"
     Assert-Status -Response $serviceWorker -Expected 200 -Stage $stage
-    if ($serviceWorker.Body -notmatch 'tm-mobile-shell-v12' -or
+    if ($serviceWorker.Body -notmatch 'tm-mobile-shell-v15-expenses' -or
         $serviceWorker.Body -notmatch 'url\.pathname\.startsWith\("/api/"\)' -or
         $serviceWorker.Body -notmatch 'request\.method !== "GET"' -or
         $serviceWorker.Body -notmatch 'keys\.filter\(\(key\) => key !== CACHE_NAME\)') {
@@ -633,7 +633,7 @@ try {
         pwa = [ordered]@{
             projectTaskUi = $true
             controlledMutationClient = $true
-            cacheContract = 'tm-mobile-shell-v12'
+            cacheContract = 'tm-mobile-shell-v15-expenses'
             apiResponsesCached = $false
         }
         mobileApi = [ordered]@{

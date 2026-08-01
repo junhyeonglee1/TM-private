@@ -1404,6 +1404,18 @@ impl TmCore {
             })
     }
 
+    pub fn migration_applied_at(&self, version: i64) -> Result<Option<String>> {
+        let connection = self.database.connect()?;
+        connection
+            .query_row(
+                "SELECT applied_at FROM schema_migrations WHERE version = ?1",
+                [version],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn health(&self) -> Result<HealthReport> {
         let connection = self.database.connect()?;
         let schema_version: i64 =

@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use crate::{Error, Result, TmHome};
 
-pub(crate) const SCHEMA_VERSION: i64 = 14;
+pub(crate) const SCHEMA_VERSION: i64 = 15;
 const INITIAL_MIGRATION: &str = include_str!("../migrations/0001_initial.sql");
 const CHANGE_REQUESTS_MIGRATION: &str = include_str!("../migrations/0002_change_requests.sql");
 const CHANGE_REQUESTS_STRICT_CAS_MIGRATION: &str =
@@ -36,6 +36,7 @@ const STOCK_DAILY_SCREEN_MIGRATION: &str =
     include_str!("../migrations/0013_stock_daily_screen.sql");
 const UNCATEGORIZED_PROJECT_MIGRATION: &str =
     include_str!("../migrations/0014_uncategorized_project.sql");
+const EXPENSE_REPORTING_MIGRATION: &str = include_str!("../migrations/0015_expense_reporting.sql");
 const BUSY_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone)]
@@ -287,6 +288,18 @@ impl Database {
             transaction.pragma_update(None, "user_version", 14_i64)?;
             transaction.commit()?;
         }
+        if current_version < 15 {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(EXPENSE_REPORTING_MIGRATION)?;
+            transaction.execute(
+                "INSERT INTO schema_migrations(version, name, applied_at)
+                 VALUES (15, 'expense-and-recurring-reporting', ?1)",
+                [now_utc()],
+            )?;
+            transaction.pragma_update(None, "user_version", 15_i64)?;
+            transaction.commit()?;
+        }
         Ok(())
     }
 
@@ -451,6 +464,306 @@ pub(crate) fn validate_schema_semantics(connection: &Connection, version: i64) -
         require_schema_object(connection, "trigger", name, fragments)?;
     }
 
+    if version < 15 {
+        return Ok(());
+    }
+
+    for table in [
+        "expense_crypto_metadata",
+        "expense_sources",
+        "expense_import_batches",
+        "expense_import_preview_sessions",
+        "expense_raw_rows",
+        "expense_postings",
+        "expense_events",
+        "expense_event_postings",
+        "expense_allocations",
+        "expense_reviews",
+        "expense_rules",
+        "recurring_expense_items",
+        "recurring_expense_versions",
+        "recurring_expense_occurrences",
+        "expense_month_reports",
+        "expense_ai_reports",
+        "expense_ai_feedback",
+        "expense_ai_request_bindings",
+        "expense_ai_attempts",
+        "expense_mutation_receipts",
+    ] {
+        let fragment = format!("createtable{table}");
+        require_schema_object(connection, "table", table, &[fragment.as_str()])?;
+    }
+    require_schema_object(
+        connection,
+        "table",
+        "expense_ai_reports",
+        &[
+            "cached_input_tokensintegernotnulldefault0",
+            "total_tokensintegernotnulldefault0",
+        ],
+    )?;
+    require_schema_object(
+        connection,
+        "table",
+        "expense_ai_attempts",
+        &[
+            "report_month_starttextnotnull",
+            "attempt_statustextnotnulldefault'claimed'",
+            "result_jsontextcheck(result_jsonisnullorjson_valid(result_json))",
+            "failure_codetext",
+            "completed_attext",
+        ],
+    )?;
+    require_schema_object(
+        connection,
+        "table",
+        "expense_ai_request_bindings",
+        &[
+            "report_month_starttextnotnull",
+            "aggregate_sha256textnotnull",
+        ],
+    )?;
+
+    for (name, fragments) in [
+        (
+            "expense_raw_rows_immutable_update",
+            &[
+                "beforeupdateonexpense_raw_rows",
+                "raise(abort,'expenserawrowsareimmutable')",
+            ][..],
+        ),
+        (
+            "expense_raw_rows_immutable_delete",
+            &[
+                "beforedeleteonexpense_raw_rows",
+                "raise(abort,'expenserawrowsareimmutable')",
+            ][..],
+        ),
+        (
+            "expense_postings_immutable_update",
+            &[
+                "beforeupdateonexpense_postings",
+                "raise(abort,'expensepostingsareimmutable')",
+            ][..],
+        ),
+        (
+            "expense_postings_immutable_delete",
+            &[
+                "beforedeleteonexpense_postings",
+                "raise(abort,'expensepostingsareimmutable')",
+            ][..],
+        ),
+        (
+            "expense_event_postings_immutable_update",
+            &[
+                "beforeupdateonexpense_event_postings",
+                "raise(abort,'expenseeventpostinglinksareimmutable')",
+            ][..],
+        ),
+        (
+            "expense_event_postings_immutable_delete",
+            &[
+                "beforedeleteonexpense_event_postings",
+                "raise(abort,'expenseeventpostinglinksareimmutable')",
+            ][..],
+        ),
+        (
+            "recurring_expense_versions_immutable_update",
+            &[
+                "beforeupdateonrecurring_expense_versions",
+                "raise(abort,'recurringexpenseversionsareimmutable')",
+            ][..],
+        ),
+        (
+            "recurring_expense_versions_immutable_delete",
+            &[
+                "beforedeleteonrecurring_expense_versions",
+                "raise(abort,'recurringexpenseversionsareimmutable')",
+            ][..],
+        ),
+    ] {
+        require_schema_object(connection, "trigger", name, fragments)?;
+    }
+
+    for index in [
+        "idx_expense_import_preview_expiry",
+        "idx_expense_postings_merchant",
+        "idx_expense_events_month",
+        "idx_expense_reviews_queue",
+        "idx_recurring_expense_versions_effective",
+        "idx_recurring_occurrences_due",
+        "idx_expense_ai_attempts_month",
+    ] {
+        require_schema_object(connection, "index", index, &["createindex"])?;
+    }
+    require_schema_object(
+        connection,
+        "index",
+        "idx_expense_allocations_personal_unique",
+        &[
+            "createuniqueindex",
+            "onexpense_allocations(event_id)",
+            "whereallocation_kind='personal'",
+        ],
+    )?;
+    require_schema_object(
+        connection,
+        "index",
+        "idx_recurring_occurrences_actual_event_unique",
+        &[
+            "createuniqueindex",
+            "onrecurring_expense_occurrences(actual_event_id)",
+            "whereactual_event_idisnotnull",
+        ],
+    )?;
+    require_schema_object(
+        connection,
+        "index",
+        "idx_expense_allocations_settlement_event_unique",
+        &[
+            "createuniqueindex",
+            "onexpense_allocations(event_id)",
+            "whereallocation_kindin('settlement_received','settlement_sent')",
+        ],
+    )?;
+    require_schema_object_exact(
+        connection,
+        "index",
+        "idx_expense_rules_classification_unique",
+        "createuniqueindexidx_expense_rules_classification_uniqueonexpense_rules(merchant_blind_index,coalesce(payment_method_fingerprint,''))whererule_kind='classification'",
+    )?;
+    require_schema_object_exact(
+        connection,
+        "index",
+        "idx_expense_rules_recurring_match_unique",
+        "createuniqueindexidx_expense_rules_recurring_match_uniqueonexpense_rules(recurring_expense_id,merchant_blind_index,coalesce(payment_method_fingerprint,''))whererule_kind='recurring_match'",
+    )?;
+
+    for (table, forbidden_columns) in [
+        (
+            "expense_postings",
+            &["merchant", "counterparty", "memo"][..],
+        ),
+        ("recurring_expense_items", &["name", "vendor", "memo"][..]),
+    ] {
+        let pragma = format!("PRAGMA table_info(\"{table}\")");
+        let mut statement = connection.prepare(&pragma)?;
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if let Some(column) = forbidden_columns
+            .iter()
+            .find(|column| columns.iter().any(|candidate| candidate == **column))
+        {
+            return Err(Error::Invariant(format!(
+                "schema 15 forbids plaintext expense column {table}.{column}"
+            )));
+        }
+    }
+
+    let invalid_crypto_metadata: i64 = connection.query_row(
+        "SELECT count(*) FROM expense_crypto_metadata
+         WHERE singleton_key <> 'expense-data-key-probe' OR key_version <> 1",
+        [],
+        |row| row.get(0),
+    )?;
+    if invalid_crypto_metadata != 0 {
+        return Err(Error::Invariant(format!(
+            "schema 15 expense crypto metadata must use the singleton v1 probe; found {invalid_crypto_metadata} invalid rows"
+        )));
+    }
+
+    let raw_rows_without_postings: i64 = connection.query_row(
+        "SELECT count(*)
+         FROM expense_raw_rows AS raw
+         LEFT JOIN expense_postings AS posting ON posting.raw_row_id = raw.id
+         WHERE posting.id IS NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    if raw_rows_without_postings != 0 {
+        return Err(Error::Invariant(format!(
+            "schema 15 requires every expense raw row to have a posting; found {raw_rows_without_postings} orphan raw rows"
+        )));
+    }
+
+    let inconsistent_posting_sources: i64 = connection.query_row(
+        "SELECT count(*)
+         FROM expense_postings AS posting
+         LEFT JOIN expense_raw_rows AS raw ON raw.id = posting.raw_row_id
+         WHERE raw.id IS NULL OR raw.source_id <> posting.source_id",
+        [],
+        |row| row.get(0),
+    )?;
+    if inconsistent_posting_sources != 0 {
+        return Err(Error::Invariant(format!(
+            "schema 15 requires every expense posting to reference its raw row source; found {inconsistent_posting_sources} inconsistent postings"
+        )));
+    }
+
+    let invalid_event_posting_links: i64 = connection.query_row(
+        "SELECT count(*)
+         FROM expense_event_postings AS link
+         LEFT JOIN expense_events AS event ON event.id = link.event_id
+         LEFT JOIN expense_postings AS posting ON posting.id = link.posting_id
+         WHERE event.id IS NULL OR posting.id IS NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    if invalid_event_posting_links != 0 {
+        return Err(Error::Invariant(format!(
+            "schema 15 expense event-posting links must reference both sides; found {invalid_event_posting_links} invalid links"
+        )));
+    }
+
+    let unlinked_postings: i64 = connection.query_row(
+        "SELECT count(*)
+         FROM expense_postings AS posting
+         LEFT JOIN expense_event_postings AS link ON link.posting_id = posting.id
+         WHERE link.posting_id IS NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    if unlinked_postings != 0 {
+        return Err(Error::Invariant(format!(
+            "schema 15 requires every expense posting to belong to an economic event; found {unlinked_postings} unlinked postings"
+        )));
+    }
+
+    let events_without_primary_links: i64 = connection.query_row(
+        "SELECT count(*)
+         FROM expense_events AS event
+         WHERE event.primary_posting_id IS NOT NULL
+           AND NOT EXISTS(
+               SELECT 1 FROM expense_event_postings AS link
+               WHERE link.event_id = event.id
+                 AND link.posting_id = event.primary_posting_id
+                 AND link.posting_role = 'primary'
+           )",
+        [],
+        |row| row.get(0),
+    )?;
+    if events_without_primary_links != 0 {
+        return Err(Error::Invariant(format!(
+            "schema 15 requires each posted expense event to link its primary posting; found {events_without_primary_links} inconsistent events"
+        )));
+    }
+
+    let inconsistent_primary_links: i64 = connection.query_row(
+        "SELECT count(*)
+         FROM expense_event_postings AS link
+         JOIN expense_events AS event ON event.id = link.event_id
+         WHERE link.posting_role = 'primary'
+           AND event.primary_posting_id IS NOT link.posting_id",
+        [],
+        |row| row.get(0),
+    )?;
+    if inconsistent_primary_links != 0 {
+        return Err(Error::Invariant(format!(
+            "schema 15 primary expense links must agree with their event; found {inconsistent_primary_links} inconsistent links"
+        )));
+    }
+
     Ok(())
 }
 
@@ -469,9 +782,7 @@ fn require_schema_object(
         .optional()?
         .flatten()
         .ok_or_else(|| {
-            Error::Invariant(format!(
-                "schema 14 required {object_type} is missing: {name}"
-            ))
+            Error::Invariant(format!("schema required {object_type} is missing: {name}"))
         })?;
     let normalized = sql
         .split_whitespace()
@@ -482,7 +793,36 @@ fn require_schema_object(
         .find(|fragment| !normalized.contains(*fragment))
     {
         return Err(Error::Invariant(format!(
-            "schema 14 {object_type} {name} is missing required SQL fragment: {fragment}"
+            "schema {object_type} {name} is missing required SQL fragment: {fragment}"
+        )));
+    }
+    Ok(())
+}
+
+fn require_schema_object_exact(
+    connection: &Connection,
+    object_type: &str,
+    name: &str,
+    expected_sql: &str,
+) -> Result<()> {
+    let sql = connection
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE type = ?1 AND name = ?2",
+            params![object_type, name],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten()
+        .ok_or_else(|| {
+            Error::Invariant(format!("schema required {object_type} is missing: {name}"))
+        })?;
+    let normalized = sql
+        .split_whitespace()
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if normalized != expected_sql {
+        return Err(Error::Invariant(format!(
+            "schema {object_type} {name} does not match its required SQL definition"
         )));
     }
     Ok(())

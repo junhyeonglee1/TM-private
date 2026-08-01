@@ -3,7 +3,7 @@ use std::{env, error::Error, io};
 use tm_core::{TmCore, TmHome};
 use tm_server::{
     IncidentMode, MaintenanceMode, ServerConfig, ServerProfile,
-    build_cloud_authenticated_router_with_feature_controls_costs_and_stock,
+    build_cloud_authenticated_router_with_feature_controls_costs_stock_and_expenses,
     build_cloud_bootstrap_router, build_cloud_import_router, build_router_with_openai,
     costs::RailwayUsageClient, openai::OpenAiClient, scheduler, stock::StockDataClient,
 };
@@ -51,7 +51,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         scheduler_runtime =
                             Some((stock_data, stock_config.clone(), openai.clone()));
                     }
-                    build_cloud_authenticated_router_with_feature_controls_costs_and_stock(
+                    build_cloud_authenticated_router_with_feature_controls_costs_stock_and_expenses(
                         core,
                         auth,
                         openai,
@@ -60,6 +60,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         config.task_report_enabled,
                         railway_usage,
                         stock_config,
+                        config.expense_ai_enabled,
                     )
                 }
                 MaintenanceMode::Import => build_cloud_import_router(core, auth),

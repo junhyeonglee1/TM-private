@@ -27,6 +27,11 @@ jobs:
         with:
           node-version: 22
 
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
       - name: Set up pnpm
         shell: pwsh
         run: |
@@ -62,12 +67,82 @@ jobs:
         shell: pwsh
         run: pnpm install --frozen-lockfile
 
+      - name: Build and pin expense workbook decryptor
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes --requirement sidecars/requirements-expense-sidecar-lock.txt
+          if ($LASTEXITCODE -ne 0) { throw "Expense sidecar dependency installation failed with exit code $LASTEXITCODE" }
+          python -m unittest discover -s sidecars -p 'test_*.py'
+          if ($LASTEXITCODE -ne 0) { throw "Expense sidecar tests failed with exit code $LASTEXITCODE" }
+          $sidecarRoot = Join-Path $env:RUNNER_TEMP 'tm-expense-sidecar-build'
+          $dist = Join-Path $sidecarRoot 'dist'
+          $work = Join-Path $sidecarRoot 'work'
+          $spec = Join-Path $sidecarRoot 'spec'
+          New-Item -ItemType Directory -Force -Path $dist, $work, $spec | Out-Null
+          python -m PyInstaller --clean --noconfirm --onefile --name tm-office-decryptor --distpath $dist --workpath $work --specpath $spec sidecars/tm_office_decryptor.py
+          if ($LASTEXITCODE -ne 0) { throw "Expense sidecar build failed with exit code $LASTEXITCODE" }
+          $sidecar = Join-Path $dist 'tm-office-decryptor.exe'
+          if (-not (Test-Path -LiteralPath $sidecar -PathType Leaf)) { throw 'Expense sidecar executable was not created.' }
+          $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+          $startInfo.FileName = $sidecar
+          $startInfo.UseShellExecute = $false
+          $startInfo.CreateNoWindow = $true
+          $startInfo.RedirectStandardInput = $true
+          $startInfo.RedirectStandardOutput = $true
+          $startInfo.RedirectStandardError = $true
+          $process = [System.Diagnostics.Process]::new()
+          $process.StartInfo = $startInfo
+          if (-not $process.Start()) { throw 'Expense sidecar executable smoke test could not start.' }
+          $process.StandardInput.BaseStream.Write([byte[]](0, 0, 0, 0), 0, 4)
+          $process.StandardInput.Close()
+          $stdout = $process.StandardOutput.ReadToEnd()
+          $stderr = $process.StandardError.ReadToEnd()
+          $process.WaitForExit()
+          if ($process.ExitCode -ne 1 -or $stdout -notmatch '"code":"invalid_password"' -or
+              -not [string]::IsNullOrEmpty($stderr)) {
+            throw 'Expense sidecar executable smoke test failed.'
+          }
+          $process.Dispose()
+          $hash = (Get-FileHash -LiteralPath $sidecar -Algorithm SHA256).Hash.ToLowerInvariant()
+          "TM_EXPENSE_DECRYPTOR_PATH=$sidecar" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "TM_EXPENSE_DECRYPTOR_SHA256=$hash" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Verify frontend
         shell: pwsh
         run: |
           pnpm lint
           pnpm typecheck
           pnpm test
+
+      - name: Verify production expense deployment guards
+        shell: pwsh
+        run: |
+          .\scripts\configure-expense-railway.ps1 -RunGuardSelfTest
+          .\scripts\deploy-verified-expense-railway.ps1 `
+            -ExpectedHeadSha '0000000000000000000000000000000000000000' `
+            -Step10RunId 1 `
+            -Step16RunId 1 `
+            -RunGuardSelfTest
+
+      - name: Parse reviewed PowerShell operations scripts
+        shell: pwsh
+        run: |
+          $paths = @(
+            '.\scripts\build-release.ps1',
+            '.\scripts\configure-expense-railway.ps1',
+            '.\scripts\deploy-verified-expense-railway.ps1',
+            '.\scripts\verify-expense-production.ps1'
+          )
+          foreach ($path in $paths) {
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $path),
+              [ref]$tokens,
+              [ref]$errors
+            )
+            if ($errors.Count -ne 0) { throw "PowerShell parser rejected $path" }
+          }
 
       - name: Verify Rust workspace
         shell: pwsh
@@ -105,7 +180,15 @@ jobs:
           New-Item -ItemType Directory -Force -Path $artifact | Out-Null
           Copy-Item -LiteralPath $desktop.FullName -Destination (Join-Path $artifact 'tm.exe')
           Copy-Item -LiteralPath $cli.FullName -Destination (Join-Path $artifact 'tm-cli.exe')
-          Get-FileHash -Algorithm SHA256 (Join-Path $artifact 'tm.exe'), (Join-Path $artifact 'tm-cli.exe') |
+          if (-not (Test-Path -LiteralPath $env:TM_EXPENSE_DECRYPTOR_PATH -PathType Leaf)) {
+            throw 'The verified expense sidecar was not found.'
+          }
+          $sidecarHash = (Get-FileHash -LiteralPath $env:TM_EXPENSE_DECRYPTOR_PATH -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($sidecarHash -ne $env:TM_EXPENSE_DECRYPTOR_SHA256) {
+            throw 'The expense sidecar changed after its build hash was embedded.'
+          }
+          Copy-Item -LiteralPath $env:TM_EXPENSE_DECRYPTOR_PATH -Destination (Join-Path $artifact 'tm-office-decryptor.exe')
+          Get-FileHash -Algorithm SHA256 (Join-Path $artifact 'tm.exe'), (Join-Path $artifact 'tm-cli.exe'), (Join-Path $artifact 'tm-office-decryptor.exe') |
             ForEach-Object { '{0}  {1}' -f $_.Hash.ToLowerInvariant(), (Split-Path -Leaf $_.Path) } |
             Set-Content -Encoding ascii (Join-Path $artifact 'SHA256SUMS.txt')
 

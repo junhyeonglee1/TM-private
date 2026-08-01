@@ -1,70 +1,156 @@
-$ErrorActionPreference = "Stop"
-. (Join-Path $PSScriptRoot "env.ps1")
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $true)]
+    [ValidateRange(1, [long]::MaxValue)]
+    [long]$RunId,
 
-# This script creates raw Windows x64 executables only. It never invokes the
-# Tauri bundler, NSIS, an installer, or an uninstaller. NSIS is handled by the
-# separately approval-gated build-nsis.ps1 script.
-$appRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$tmRoot = (Resolve-Path (Join-Path $appRoot "..")).Path
-$target = "x86_64-pc-windows-msvc"
-$releaseDir = Join-Path $tmRoot "dist\release"
-$cargoReleaseDir = Join-Path $tmRoot "dist\build\cargo\$target\release"
-$stageDir = Join-Path $tmRoot "dist\stage\raw-release"
-$overridePath = Join-Path $stageDir "tauri.raw.config.json"
-$tauri = Join-Path $appRoot "node_modules\.bin\tauri.cmd"
-$tsc = Join-Path $appRoot "node_modules\.bin\tsc.cmd"
-$vite = Join-Path $appRoot "node_modules\.bin\vite.cmd"
-$cargo = "C:\Users\tkfk0\.cargo\bin\cargo.exe"
-$env:VSLANG = "1033"
-$env:CARGO_NET_OFFLINE = "true"
-$env:npm_config_offline = "true"
-$env:COREPACK_ENABLE_NETWORK = "0"
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern('^[0-9a-fA-F]{40}$')]
+    [string]$ExpectedHeadSha,
 
-if (-not (Test-Path -LiteralPath (Join-Path $appRoot "node_modules") -PathType Container)) {
-    throw "node_modules is missing; run the separately approved dependency installation before the raw release build"
+    [switch]$Approved
+)
+
+$ErrorActionPreference = 'Stop'
+
+# Windows Application Control blocks Cargo-generated build scripts on this PC.
+# A release is therefore compiled and tested only by the pinned GitHub Actions
+# workflow. This script never invokes Cargo, rustc, Tauri, NSIS, an installer,
+# or an uninstaller; it only verifies and copies an already-successful artifact.
+if (-not $Approved) {
+    throw 'GitHub Actions artifact retrieval is not approved. Re-run with -Approved after reviewing the run ID.'
 }
 
-Push-Location $appRoot
-try {
-    & $tsc -b --pretty false
-    if ($LASTEXITCODE -ne 0) { throw "frontend typecheck failed: $LASTEXITCODE" }
+$repository = 'junhyeonglee1/TM-private'
+$expectedHeadBranch = 'agent/step10-cloud-cutover'
+$ExpectedHeadSha = $ExpectedHeadSha.ToLowerInvariant()
 
-    & $vite build
-    if ($LASTEXITCODE -ne 0) { throw "frontend release build failed: $LASTEXITCODE" }
-
-    New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
-    $override = [ordered]@{ build = [ordered]@{ beforeBuildCommand = $null } }
-    [System.IO.File]::WriteAllText(
-        $overridePath,
-        ($override | ConvertTo-Json -Depth 3),
-        [System.Text.UTF8Encoding]::new($false)
-    )
-
-    # Use Tauri's production build path while explicitly skipping all bundles.
-    # custom-protocol is repeated here and guarded in Rust so localhost builds
-    # cannot be published by this raw-EXE workflow again.
-    & $tauri build --target $target --no-bundle --features custom-protocol --config $overridePath -- --locked --offline
-    if ($LASTEXITCODE -ne 0) { throw "desktop release build failed: $LASTEXITCODE" }
-
-    & $cargo build --locked --offline --release --target $target -p tm-cli --bin tm-cli
-    if ($LASTEXITCODE -ne 0) { throw "CLI release build failed: $LASTEXITCODE" }
+$gh = Get-Command gh -ErrorAction SilentlyContinue
+if (-not $gh) {
+    throw 'GitHub CLI is required to retrieve the verified Windows artifact.'
 }
-finally {
-    Pop-Location
+
+$appRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$tmRoot = (Resolve-Path (Join-Path $appRoot '..')).Path
+$releaseDir = Join-Path $tmRoot 'dist\release'
+$downloadRoot = Join-Path $tmRoot ("dist\stage\github-actions\{0}-{1}" -f $RunId, [Guid]::NewGuid().ToString('N'))
+
+$runJson = & $gh.Source run view $RunId --repo $Repository --json databaseId,workflowName,conclusion,headBranch,headSha 2>&1
+if ($LASTEXITCODE -ne 0) {
+    throw "Unable to inspect GitHub Actions run $RunId. Re-authenticate GitHub CLI and retry."
+}
+$run = $runJson | ConvertFrom-Json
+if ($run.workflowName -ne 'STEP 10 Windows build') {
+    throw "Run $RunId belongs to an unexpected workflow: $($run.workflowName)"
+}
+if ($run.conclusion -ne 'success') {
+    throw "Run $RunId is not successful: $($run.conclusion)"
+}
+if ($run.headBranch -ne $expectedHeadBranch) {
+    throw "Run $RunId belongs to an unexpected branch: $($run.headBranch)"
+}
+if ([string]$run.headSha -ne $ExpectedHeadSha) {
+    throw "Run $RunId does not match the expected source commit."
+}
+
+New-Item -ItemType Directory -Force -Path $downloadRoot | Out-Null
+& $gh.Source run download $RunId --repo $Repository --name 'tm-step10-windows-x64' --dir $downloadRoot
+if ($LASTEXITCODE -ne 0) {
+    throw "Unable to download tm-step10-windows-x64 from run $RunId."
+}
+
+$requiredFiles = @(
+    'tm.exe',
+    'tm-cli.exe',
+    'tm-office-decryptor.exe'
+)
+$manifestPath = Join-Path $downloadRoot 'SHA256SUMS.txt'
+if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+    throw 'The artifact does not contain SHA256SUMS.txt.'
+}
+
+$manifest = @{}
+foreach ($line in Get-Content -LiteralPath $manifestPath) {
+    if ($line -notmatch '^([0-9a-fA-F]{64})\s{2}([^\\/:*?"<>|]+)$') {
+        throw 'SHA256SUMS.txt contains an invalid entry.'
+    }
+    $manifest[$Matches[2]] = $Matches[1].ToLowerInvariant()
+}
+
+foreach ($name in $requiredFiles) {
+    $path = Join-Path $downloadRoot $name
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw "The artifact does not contain $name."
+    }
+    if (-not $manifest.ContainsKey($name)) {
+        throw "SHA256SUMS.txt does not contain $name."
+    }
+    $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actual -ne $manifest[$name]) {
+        throw "SHA-256 verification failed for $name."
+    }
+}
+
+if ($manifest.Count -ne $requiredFiles.Count) {
+    throw 'SHA256SUMS.txt contains an unexpected file entry.'
 }
 
 New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
-$appVersion = (Get-Content -Raw -LiteralPath (Join-Path $appRoot "src-tauri\tauri.conf.json") | ConvertFrom-Json).version
-$desktopDestination = Join-Path $releaseDir "tm.exe"
-try {
-    Copy-Item -LiteralPath (Join-Path $cargoReleaseDir "tm.exe") -Destination $desktopDestination -Force
+$destinations = @{}
+foreach ($name in $requiredFiles) {
+    $destination = Join-Path $releaseDir $name
+    $destinations[$name] = $destination
+    if (-not (Test-Path -LiteralPath $destination -PathType Leaf)) {
+        continue
+    }
+    try {
+        $lockProbe = [System.IO.File]::Open(
+            $destination,
+            [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::ReadWrite,
+            [System.IO.FileShare]::None
+        )
+        $lockProbe.Dispose()
+    }
+    catch {
+        throw "Close the running TM process before replacing $name. No release files were changed."
+    }
 }
-catch [System.IO.IOException] {
-    $desktopDestination = Join-Path $releaseDir "tm-$appVersion.exe"
-    Copy-Item -LiteralPath (Join-Path $cargoReleaseDir "tm.exe") -Destination $desktopDestination -Force
-    Write-Warning "dist\release\tm.exe is running; wrote the new build to $(Split-Path -Leaf $desktopDestination)"
-}
-Copy-Item -LiteralPath (Join-Path $cargoReleaseDir "tm-cli.exe") -Destination (Join-Path $releaseDir "tm-cli.exe") -Force
 
-Write-Output "Raw Windows x64 executables created. No NSIS installer was built or run."
-Get-FileHash -Algorithm SHA256 -LiteralPath $desktopDestination, (Join-Path $releaseDir "tm-cli.exe")
+$copied = @()
+foreach ($name in $requiredFiles) {
+    $source = Join-Path $downloadRoot $name
+    $destination = $destinations[$name]
+    Copy-Item -LiteralPath $source -Destination $destination -Force
+    $actual = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actual -ne $manifest[$name]) {
+        throw "The copied release file failed SHA-256 verification: $name"
+    }
+    $copied += $destination
+}
+
+$releaseManifestLines = [string[]]@(
+    $requiredFiles | ForEach-Object { '{0}  {1}' -f $manifest[$_], $_ }
+)
+[System.IO.File]::WriteAllLines(
+    (Join-Path $releaseDir 'SHA256SUMS.txt'),
+    $releaseManifestLines,
+    [System.Text.Encoding]::ASCII
+)
+$provenance = [ordered]@{
+    runId = $RunId
+    repository = $Repository
+    workflow = $run.workflowName
+    conclusion = $run.conclusion
+    headBranch = $run.headBranch
+    headSha = $run.headSha
+    retrievedAtUtc = [DateTime]::UtcNow.ToString('o')
+}
+[System.IO.File]::WriteAllText(
+    (Join-Path $releaseDir 'STEP10_PROVENANCE.json'),
+    ($provenance | ConvertTo-Json -Depth 3),
+    [System.Text.UTF8Encoding]::new($false)
+)
+
+Write-Output "Verified GitHub Actions artifact from run $RunId was copied to $releaseDir."
+Get-FileHash -Algorithm SHA256 -LiteralPath $copied

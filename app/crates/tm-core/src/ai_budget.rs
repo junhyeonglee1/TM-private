@@ -1,4 +1,5 @@
-use chrono::Utc;
+use chrono::{DateTime, Utc};
+use chrono_tz::Asia::Seoul;
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 
 use crate::{
@@ -30,7 +31,7 @@ pub struct AiBudgetSettlementRecord {
 pub(crate) fn status(database: &Database, policy: AiBudgetPolicy) -> Result<AiBudgetStatus> {
     validate_policy(policy)?;
     let connection = database.connect()?;
-    status_for_month(&connection, &month_utc(), policy)
+    status_for_month(&connection, &month_seoul(), policy)
 }
 
 pub(crate) fn reserve(
@@ -87,7 +88,7 @@ pub(crate) fn reserve_with_operation_limit(
     }
     let requested = as_i64(maximum_cost_microusd, "AI maximum request cost")?;
     let hard_limit = as_i64(policy.hard_limit_microusd, "AI monthly hard limit")?;
-    let month = month_utc();
+    let month = month_seoul();
 
     database.transaction(TransactionBehavior::Immediate, |transaction| {
         let existing = transaction
@@ -197,7 +198,7 @@ pub(crate) fn operation_status(
     if hard_limit_microusd == 0 || hard_limit_microusd > i64::MAX as u64 {
         return Err(invalid("AI operation monthly hard limit is invalid"));
     }
-    let month = month_utc();
+    let month = month_seoul();
     let connection = database.connect()?;
     let committed: i64 = connection.query_row(
         "SELECT COALESCE(SUM(amount_microusd), 0)
@@ -458,6 +459,29 @@ fn as_i64(value: u64, field: &str) -> Result<i64> {
     i64::try_from(value).map_err(|_| invalid(format!("{field} is too large")))
 }
 
-fn month_utc() -> String {
-    Utc::now().format("%Y-%m").to_string()
+fn month_seoul() -> String {
+    month_seoul_at(Utc::now())
+}
+
+fn month_seoul_at(instant: DateTime<Utc>) -> String {
+    instant.with_timezone(&Seoul).format("%Y-%m").to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{DateTime, Utc};
+
+    use super::month_seoul_at;
+
+    #[test]
+    fn budget_month_rolls_over_at_seoul_midnight() {
+        let before = DateTime::parse_from_rfc3339("2026-07-31T14:59:59Z")
+            .expect("valid timestamp")
+            .with_timezone(&Utc);
+        let boundary = DateTime::parse_from_rfc3339("2026-07-31T15:00:00Z")
+            .expect("valid timestamp")
+            .with_timezone(&Utc);
+        assert_eq!(month_seoul_at(before), "2026-07");
+        assert_eq!(month_seoul_at(boundary), "2026-08");
+    }
 }

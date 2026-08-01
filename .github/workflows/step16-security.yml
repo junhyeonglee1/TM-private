@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   source-and-container:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - name: Check out source
@@ -28,6 +28,12 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12.13"
+          architecture: x64
 
       - name: Set up pnpm
         shell: pwsh
@@ -47,6 +53,23 @@ jobs:
       - name: Static secret and workflow policy scan
         shell: pwsh
         run: ./app/scripts/security-static-scan.ps1
+
+      - name: Verify reviewed container input lock
+        shell: pwsh
+        run: ./app/scripts/verify-step16-container-supply-chain.ps1
+
+      - name: Parse reviewed shell operations scripts
+        shell: bash
+        run: find app/scripts -type f -name '*.sh' -print0 | xargs -0 -r -n1 sh -n
+
+      - name: Verify and audit expense workbook sidecar
+        shell: bash
+        run: |
+          python -m py_compile app/sidecars/tm_office_decryptor.py
+          python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes --requirement app/sidecars/requirements-expense-sidecar-lock.txt
+          python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes --requirement app/sidecars/requirements-pip-audit-lock.txt
+          python -m unittest discover -s app/sidecars -p 'test_*.py'
+          python -m pip_audit --requirement app/sidecars/requirements-expense-sidecar-lock.txt --require-hashes --no-deps
 
       - name: Install cargo-audit
         uses: taiki-e/install-action@a6b2e2dcd845ddd7f509ce4f3ed3d922b80cc5d9 # v2.84.0
@@ -70,11 +93,90 @@ jobs:
           cache: "false"
           trivyignores: app/.trivyignore.yaml
 
-      - name: Build reviewed production image
+      - name: Prepare exact committed container context
+        id: container-context
         shell: bash
-        run: docker build --file app/Dockerfile --tag tm-server:step16 app
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/tm-step16-app.tar"
+          context="${RUNNER_TEMP}/tm-step16-context"
+          provenance="${RUNNER_TEMP}/tm-step16-container-provenance"
+          rm -rf "${context}" "${provenance}"
+          mkdir -p "${context}" "${provenance}"
+          git archive --format=tar --output="${archive}" "${GITHUB_SHA}:app"
+          tar -xf "${archive}" -C "${context}"
+          source_archive_sha256="$(sha256sum "${archive}" | cut -d ' ' -f 1)"
+          echo "context=${context}" >> "${GITHUB_OUTPUT}"
+          echo "provenance=${provenance}" >> "${GITHUB_OUTPUT}"
+          echo "source_archive_sha256=${source_archive_sha256}" >> "${GITHUB_OUTPUT}"
 
-      - name: Scan production container image
+      - name: Verify exact committed container inputs
+        shell: pwsh
+        env:
+          TM_STEP16_CONTEXT: ${{ steps.container-context.outputs.context }}
+        run: |
+          ./app/scripts/verify-step16-container-supply-chain.ps1 `
+            -DockerfilePath (Join-Path $env:TM_STEP16_CONTEXT 'Dockerfile') `
+            -PolicyPath (Join-Path $env:TM_STEP16_CONTEXT 'container-supply-chain.lock.json')
+
+      - name: Build reviewed CI image
+        shell: bash
+        env:
+          TM_STEP16_CONTEXT: ${{ steps.container-context.outputs.context }}
+        run: |
+          set -euo pipefail
+          docker build \
+            --pull \
+            --platform linux/amd64 \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            --file "${TM_STEP16_CONTEXT}/Dockerfile" \
+            --tag tm-server:step16 \
+            "${TM_STEP16_CONTEXT}"
+
+      - name: Record CI image provenance
+        shell: pwsh
+        env:
+          TM_STEP16_CONTEXT: ${{ steps.container-context.outputs.context }}
+          TM_STEP16_PROVENANCE: ${{ steps.container-context.outputs.provenance }}
+          TM_SOURCE_ARCHIVE_SHA256: ${{ steps.container-context.outputs.source_archive_sha256 }}
+        run: |
+          ./app/scripts/verify-step16-container-supply-chain.ps1 `
+            -DockerfilePath (Join-Path $env:TM_STEP16_CONTEXT 'Dockerfile') `
+            -PolicyPath (Join-Path $env:TM_STEP16_CONTEXT 'container-supply-chain.lock.json') `
+            -ImageReference 'tm-server:step16' `
+            -CommitSha $env:GITHUB_SHA `
+            -Repository $env:GITHUB_REPOSITORY `
+            -SourceArchiveSha256 $env:TM_SOURCE_ARCHIVE_SHA256 `
+            -WorkflowRunId $env:GITHUB_RUN_ID `
+            -WorkflowRunAttempt ([int]$env:GITHUB_RUN_ATTEMPT) `
+            -GitRef $env:GITHUB_REF `
+            -EventName $env:GITHUB_EVENT_NAME `
+            -OutputDirectory $env:TM_STEP16_PROVENANCE
+
+      - name: Record CI image package and file manifests
+        shell: bash
+        env:
+          TM_STEP16_CONTEXT: ${{ steps.container-context.outputs.context }}
+          TM_STEP16_PROVENANCE: ${{ steps.container-context.outputs.provenance }}
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint dpkg-query tm-server:step16 \
+            -W '-f=${binary:Package}\t${Version}\t${Architecture}\n' \
+            | LC_ALL=C sort > "${TM_STEP16_PROVENANCE}/dpkg-packages.tsv"
+          docker run --rm --entrypoint sha256sum tm-server:step16 \
+            /usr/local/bin/tm-server \
+            /usr/local/bin/railway-entrypoint \
+            /usr/local/bin/railway-backup-once \
+            /usr/local/bin/railway-backup-loop \
+            /usr/local/bin/railway-backup-restore-drill \
+            > "${TM_STEP16_PROVENANCE}/image-files.sha256"
+          cp "${TM_STEP16_CONTEXT}/Dockerfile" "${TM_STEP16_PROVENANCE}/Dockerfile"
+          cp "${TM_STEP16_CONTEXT}/.dockerignore" "${TM_STEP16_PROVENANCE}/.dockerignore"
+          cp "${TM_STEP16_CONTEXT}/Cargo.lock" "${TM_STEP16_PROVENANCE}/Cargo.lock"
+          cp "${TM_STEP16_CONTEXT}/container-supply-chain.lock.json" "${TM_STEP16_PROVENANCE}/container-supply-chain.lock.json"
+
+      - name: Scan reviewed CI container image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: tm-server:step16
@@ -83,4 +185,29 @@ jobs:
           ignore-unfixed: true
           exit-code: "1"
           cache: "false"
+          format: json
+          output: tm-step16-trivy-image.json
           trivyignores: app/.trivyignore.yaml
+
+      - name: Finalize container provenance artifact
+        shell: bash
+        env:
+          TM_STEP16_PROVENANCE: ${{ steps.container-context.outputs.provenance }}
+        run: |
+          set -euo pipefail
+          mv tm-step16-trivy-image.json "${TM_STEP16_PROVENANCE}/trivy-image.json"
+          (
+            cd "${TM_STEP16_PROVENANCE}"
+            find . -type f ! -name ARTIFACT-SHA256SUMS.txt -print0 \
+              | LC_ALL=C sort -z \
+              | xargs -0 sha256sum > ARTIFACT-SHA256SUMS.txt
+          )
+
+      - name: Upload STEP 16 container provenance
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tm-step16-container-provenance
+          path: ${{ steps.container-context.outputs.provenance }}
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 90

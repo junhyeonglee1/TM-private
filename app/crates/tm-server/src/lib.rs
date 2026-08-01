@@ -14,6 +14,9 @@ pub mod auth;
 pub mod costs;
 mod desktop_api;
 mod device_api;
+mod expense_api;
+mod expense_crypto;
+mod expense_report;
 mod import_api;
 mod memories;
 pub mod openai;
@@ -41,9 +44,9 @@ use chrono::{DateTime, FixedOffset, Utc};
 use serde::{Deserialize, Serialize};
 use tm_core::{
     ASSISTANT_ACTION_APPROVAL_TTL_SECONDS, AiBudgetStatus, AiTokenUsage, DesktopCommand,
-    Error as CoreError, HealthReport, STOCK_AI_MONTHLY_HARD_LIMIT_MICROUSD, STOCK_AI_OPERATION,
-    SchedulerStatus, StockScreenAttemptSummary, StockScreenCoverage, TaskReportCompletion,
-    TaskReportStart, TmCore,
+    Error as CoreError, ExpenseCryptoProbe, HealthReport, STOCK_AI_MONTHLY_HARD_LIMIT_MICROUSD,
+    STOCK_AI_OPERATION, SchedulerStatus, StockScreenAttemptSummary, StockScreenCoverage,
+    TaskReportCompletion, TaskReportStart, TmCore, expense_text_aad,
 };
 use uuid::Uuid;
 
@@ -52,6 +55,7 @@ use crate::auth::{
     AuthDecision, FAILED_ATTEMPT_LIMIT, TokenAuthenticator, sha256_hex, valid_device_token,
 };
 use crate::costs::{CloudCostMeter, RailwayUsageClient, RailwayUsageConfig};
+use crate::expense_crypto::{ExpenseCrypto, ExpenseCryptoError};
 use crate::openai::{
     OpenAiClient, OpenAiConfig, OpenAiError, OpenAiProbeResult, PROBE_MAXIMUM_COST_MICROUSD,
 };
@@ -76,6 +80,7 @@ pub const CLOUD_AUTHENTICATED_PROFILE: &str = "cloud-authenticated";
 pub const IMPORT_MAINTENANCE_MODE: &str = "import";
 pub const INCIDENT_MODE_ENV: &str = "TM_INCIDENT_MODE";
 pub const AI_ENABLED_ENV: &str = "TM_AI_ENABLED";
+pub const EXPENSE_AI_ENABLED_ENV: &str = "TM_EXPENSE_AI_ENABLED";
 pub const TASK_REPORT_ENABLED_ENV: &str = "TM_TASK_REPORT_ENABLED";
 const REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-request-id");
 const AI_CONFIRM_HEADER: HeaderName = HeaderName::from_static("x-tm-confirm-ai-call");
@@ -178,6 +183,7 @@ pub struct ServerConfig {
     pub maintenance_mode: MaintenanceMode,
     pub incident_mode: IncidentMode,
     pub ai_enabled: bool,
+    pub expense_ai_enabled: bool,
     pub task_report_enabled: bool,
     pub stock: StockConfig,
     pub railway_usage: RailwayUsageConfig,
@@ -239,6 +245,24 @@ impl ServerConfig {
                 ));
             }
         };
+        let expense_ai_enabled = match optional_env(EXPENSE_AI_ENABLED_ENV)? {
+            None => profile != ServerProfile::CloudAuthenticated,
+            Some(value) if profile == ServerProfile::CloudAuthenticated => match value.as_str() {
+                "true" => true,
+                "false" => false,
+                _ => return Err(format!("{EXPENSE_AI_ENABLED_ENV} must be true or false")),
+            },
+            Some(_) => {
+                return Err(format!(
+                    "{EXPENSE_AI_ENABLED_ENV} is only allowed in cloud-authenticated"
+                ));
+            }
+        };
+        if expense_ai_enabled && !ai_enabled {
+            return Err(format!(
+                "{EXPENSE_AI_ENABLED_ENV}=true requires {AI_ENABLED_ENV}=true"
+            ));
+        }
         let stock = StockConfig::from_env()?;
         if stock.ai_enabled() && !ai_enabled {
             return Err(format!(
@@ -314,6 +338,7 @@ impl ServerConfig {
                 "OPENAI_API_KEY is required when {STOCK_AI_ENABLED_ENV}=true"
             ));
         }
+        validate_expense_ai_provider_configuration(profile, expense_ai_enabled, &openai)?;
 
         Ok(Self {
             profile,
@@ -324,6 +349,7 @@ impl ServerConfig {
             maintenance_mode,
             incident_mode,
             ai_enabled,
+            expense_ai_enabled,
             task_report_enabled,
             stock,
             railway_usage,
@@ -331,12 +357,28 @@ impl ServerConfig {
     }
 }
 
+fn validate_expense_ai_provider_configuration(
+    profile: ServerProfile,
+    expense_ai_enabled: bool,
+    openai: &OpenAiConfig,
+) -> Result<(), String> {
+    if profile == ServerProfile::CloudAuthenticated && expense_ai_enabled && !openai.configured() {
+        return Err(format!(
+            "OPENAI_API_KEY is required when {EXPENSE_AI_ENABLED_ENV}=true"
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 struct AppState {
     core: TmCore,
     openai: OpenAiClient,
+    expense_crypto: Result<ExpenseCrypto, ExpenseCryptoError>,
+    expense_crypto_required: bool,
     incident_mode: IncidentMode,
     ai_enabled: bool,
+    expense_ai_enabled: bool,
     task_report_enabled: bool,
     stock: StockConfig,
     railway_usage: RailwayUsageClient,
@@ -386,17 +428,92 @@ impl AppState {
         railway_usage: RailwayUsageClient,
         stock: StockConfig,
     ) -> Self {
+        let expense_crypto = load_expense_crypto(&core);
         Self {
             core,
             openai,
+            expense_crypto,
+            expense_crypto_required: false,
             incident_mode,
             ai_enabled,
+            expense_ai_enabled: ai_enabled,
             task_report_enabled,
             stock,
             railway_usage,
             security,
         }
     }
+}
+
+const EXPENSE_CRYPTO_PROBE_PLAINTEXT: &str = "tm-expense-key-probe-v1";
+
+#[cfg(not(test))]
+fn configured_expense_crypto() -> Result<ExpenseCrypto, ExpenseCryptoError> {
+    ExpenseCrypto::from_env()
+}
+
+#[cfg(test)]
+fn configured_expense_crypto() -> Result<ExpenseCrypto, ExpenseCryptoError> {
+    ExpenseCrypto::for_test()
+}
+
+fn load_expense_crypto(core: &TmCore) -> Result<ExpenseCrypto, ExpenseCryptoError> {
+    let crypto = configured_expense_crypto()?;
+    let expected_aad = expense_text_aad("crypto-probe", "value");
+    let probe = core
+        .expense_crypto_probe()
+        .map_err(|_| ExpenseCryptoError::KeyVerificationFailed)?;
+    if let Some(probe) = probe {
+        verify_expense_crypto_probe(&crypto, &probe, &expected_aad)?;
+        return Ok(crypto);
+    }
+    let encrypted = crypto
+        .encrypt(
+            "value",
+            expected_aad.as_bytes(),
+            EXPENSE_CRYPTO_PROBE_PLAINTEXT,
+        )
+        .map_err(|_| ExpenseCryptoError::KeyVerificationFailed)?;
+    let candidate = ExpenseCryptoProbe {
+        key_version: encrypted.key_version,
+        nonce: encrypted.nonce,
+        ciphertext: encrypted.ciphertext,
+        aad: expected_aad,
+    };
+    if core
+        .initialize_expense_crypto_probe_if_ledger_empty(candidate)
+        .is_err()
+    {
+        let saved = core
+            .expense_crypto_probe()
+            .map_err(|_| ExpenseCryptoError::KeyVerificationFailed)?
+            .ok_or(ExpenseCryptoError::KeyVerificationFailed)?;
+        let expected_aad = expense_text_aad("crypto-probe", "value");
+        verify_expense_crypto_probe(&crypto, &saved, &expected_aad)?;
+    }
+    Ok(crypto)
+}
+
+fn verify_expense_crypto_probe(
+    crypto: &ExpenseCrypto,
+    probe: &ExpenseCryptoProbe,
+    expected_aad: &str,
+) -> Result<(), ExpenseCryptoError> {
+    if probe.aad != expected_aad {
+        return Err(ExpenseCryptoError::KeyVerificationFailed);
+    }
+    let plaintext = crypto
+        .decrypt(
+            probe.key_version,
+            &probe.nonce,
+            &probe.ciphertext,
+            probe.aad.as_bytes(),
+        )
+        .map_err(|_| ExpenseCryptoError::KeyVerificationFailed)?;
+    if plaintext != EXPENSE_CRYPTO_PROBE_PLAINTEXT {
+        return Err(ExpenseCryptoError::KeyVerificationFailed);
+    }
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -470,6 +587,7 @@ impl SecurityMonitor {
 struct RuntimeControlState {
     incident_mode: IncidentMode,
     ai_enabled: bool,
+    expense_ai_enabled: bool,
     task_report_enabled: bool,
     security: SecurityMonitor,
 }
@@ -652,6 +770,7 @@ struct ApiCostMeter {
 #[serde(rename_all = "camelCase")]
 struct OperationsStatus {
     service_version: &'static str,
+    deployment_provenance: OperationsDeploymentProvenance,
     overall_status: &'static str,
     alerts: Vec<OperationsAlert>,
     objectives: OperationsObjectives,
@@ -663,6 +782,13 @@ struct OperationsStatus {
     local_backup: LocalBackupStatus,
     remote_backup: RemoteBackupStatus,
     stock: OperationsStockStatus,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OperationsDeploymentProvenance {
+    build_commit_sha: Option<String>,
+    railway_deployment_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -687,12 +813,19 @@ struct OperationsObjectives {
 struct OperationsControls {
     incident_mode: &'static str,
     ai_enabled: bool,
+    expense_ai_enabled: bool,
+    expense_crypto_ready: bool,
+    expense_ledger_empty: bool,
+    expense_key_initialized: bool,
+    expense_key_initialization_allowed: bool,
     task_report_enabled: bool,
     primary_failed_attempt_limit_per_minute: u32,
     authenticated_request_limit_per_minute: u32,
     maximum_request_target_bytes: usize,
     maximum_request_header_bytes: usize,
     maximum_mutation_body_bytes: usize,
+    maximum_expense_import_body_bytes: usize,
+    maximum_expense_preview_body_bytes: usize,
     maximum_assistant_body_bytes: usize,
 }
 
@@ -712,6 +845,7 @@ struct SecurityStatus {
 struct OperationsDatabaseStatus {
     ok: bool,
     schema_version: i64,
+    current_schema_applied_at: Option<String>,
     journal_mode: String,
     checked_at: String,
 }
@@ -722,6 +856,9 @@ struct LocalBackupStatus {
     count: usize,
     latest_created_at: Option<String>,
     latest_byte_size: Option<u64>,
+    pre_migration_count: usize,
+    latest_pre_migration_created_at: Option<String>,
+    latest_pre_migration_byte_size: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -888,6 +1025,31 @@ pub fn build_cloud_authenticated_router_with_feature_controls_costs_and_stock(
     railway_usage: RailwayUsageClient,
     stock: StockConfig,
 ) -> Router {
+    build_cloud_authenticated_router_with_feature_controls_costs_stock_and_expenses(
+        core,
+        auth,
+        openai,
+        incident_mode,
+        ai_enabled,
+        task_report_enabled,
+        railway_usage,
+        stock,
+        ai_enabled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_cloud_authenticated_router_with_feature_controls_costs_stock_and_expenses(
+    core: TmCore,
+    auth: AuthConfig,
+    openai: OpenAiClient,
+    incident_mode: IncidentMode,
+    ai_enabled: bool,
+    task_report_enabled: bool,
+    railway_usage: RailwayUsageClient,
+    stock: StockConfig,
+    expense_ai_enabled: bool,
+) -> Router {
     let security = SecurityMonitor::new();
     let authenticator = TokenAuthenticator::new(auth);
     let auth_state = CloudAuthState {
@@ -899,6 +1061,7 @@ pub fn build_cloud_authenticated_router_with_feature_controls_costs_and_stock(
     let runtime_state = RuntimeControlState {
         incident_mode,
         ai_enabled,
+        expense_ai_enabled,
         task_report_enabled,
         security: security.clone(),
     };
@@ -906,6 +1069,7 @@ pub fn build_cloud_authenticated_router_with_feature_controls_costs_and_stock(
         .route("/healthz", get(cloud_healthz))
         .route("/readyz", get(cloud_readyz))
         .merge(device_api::routes())
+        .merge(expense_api::routes())
         .merge(pwa::routes())
         .route("/api/v1/auth/status", get(auth_status))
         .route("/api/v1/ops/status", get(operations_status))
@@ -983,16 +1147,21 @@ pub fn build_cloud_authenticated_router_with_feature_controls_costs_and_stock(
         )
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
-        .with_state(AppState::with_controls_and_costs(
-            core,
-            openai,
-            incident_mode,
-            ai_enabled,
-            task_report_enabled,
-            security,
-            railway_usage,
-            stock,
-        ))
+        .with_state({
+            let mut state = AppState::with_controls_and_costs(
+                core,
+                openai,
+                incident_mode,
+                ai_enabled,
+                task_report_enabled,
+                security,
+                railway_usage,
+                stock,
+            );
+            state.expense_crypto_required = true;
+            state.expense_ai_enabled = expense_ai_enabled;
+            state
+        })
         .layer(write_api::body_limit())
         .layer(middleware::from_fn_with_state(
             auth_state,
@@ -1066,6 +1235,7 @@ async fn readyz(
     State(state): State<AppState>,
     Extension(request_id): Extension<RequestId>,
 ) -> Result<Json<ApiEnvelope<Readiness>>, ApiError> {
+    ensure_expense_crypto_ready(&state, &request_id)?;
     let error_request_id = request_id.0.clone();
     let health = tokio::task::spawn_blocking(move || state.core.health())
         .await
@@ -1114,6 +1284,7 @@ async fn cloud_readyz(
     State(state): State<AppState>,
     Extension(request_id): Extension<RequestId>,
 ) -> Result<Json<ApiEnvelope<CloudReadiness>>, ApiError> {
+    ensure_expense_crypto_ready(&state, &request_id)?;
     let error_request_id = request_id.0.clone();
     let health = tokio::task::spawn_blocking(move || state.core.health())
         .await
@@ -1146,6 +1317,18 @@ async fn cloud_readyz(
             checked_at: health.checked_at,
         },
     }))
+}
+
+fn ensure_expense_crypto_ready(state: &AppState, request_id: &RequestId) -> Result<(), ApiError> {
+    if state.expense_crypto_required && state.expense_crypto.is_err() {
+        return Err(ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "EXPENSE_CRYPTO_NOT_READY",
+            message: "expense data protection is not ready".to_owned(),
+            request_id: request_id.0.clone(),
+        });
+    }
+    Ok(())
 }
 
 async fn auth_status(
@@ -1962,9 +2145,18 @@ async fn operations_status(
             .latest_attempt
             .as_ref()
             .and_then(|attempt| attempt.failure_code.clone());
+        let expense_key_status = state.core.expense_key_initialization_status()?;
         let security = state.security.snapshot();
         let backups = state.core.list_backups()?;
         let latest = backups.first();
+        let latest_pre_migration = backups
+            .iter()
+            .find(|backup| backup.trigger == "pre_migration");
+        let pre_migration_count = backups
+            .iter()
+            .filter(|backup| backup.trigger == "pre_migration")
+            .count();
+        let current_schema_applied_at = state.core.migration_applied_at(health.schema_version)?;
         let remote_status_path = state
             .core
             .home()
@@ -2004,10 +2196,12 @@ async fn operations_status(
             &security,
             state.incident_mode,
             state.ai_enabled,
+            !state.expense_crypto_required || state.expense_crypto.is_ok(),
             checked_at,
         );
         Ok::<_, CoreError>(OperationsStatus {
             service_version: env!("CARGO_PKG_VERSION"),
+            deployment_provenance: operations_deployment_provenance(),
             overall_status,
             alerts,
             objectives: OperationsObjectives {
@@ -2019,12 +2213,19 @@ async fn operations_status(
             controls: OperationsControls {
                 incident_mode: state.incident_mode.as_str(),
                 ai_enabled: state.ai_enabled,
+                expense_ai_enabled: state.expense_ai_enabled,
+                expense_crypto_ready: state.expense_crypto.is_ok(),
+                expense_ledger_empty: expense_key_status.ledger_empty,
+                expense_key_initialized: expense_key_status.key_initialized,
+                expense_key_initialization_allowed: expense_key_status.key_initialization_allowed,
                 task_report_enabled: state.task_report_enabled,
                 primary_failed_attempt_limit_per_minute: FAILED_ATTEMPT_LIMIT,
                 authenticated_request_limit_per_minute: AUTHENTICATED_REQUEST_LIMIT,
                 maximum_request_target_bytes: MAX_REQUEST_TARGET_BYTES,
                 maximum_request_header_bytes: MAX_REQUEST_HEADER_BYTES,
                 maximum_mutation_body_bytes: write_api::MAX_MUTATION_BODY_BYTES,
+                maximum_expense_import_body_bytes: expense_api::MAX_EXPENSE_IMPORT_BODY_BYTES,
+                maximum_expense_preview_body_bytes: expense_api::MAX_EXPENSE_PREVIEW_BODY_BYTES,
                 maximum_assistant_body_bytes: ASSISTANT_MAX_BODY_BYTES,
             },
             security,
@@ -2032,6 +2233,7 @@ async fn operations_status(
             database: OperationsDatabaseStatus {
                 ok: health.ok,
                 schema_version: health.schema_version,
+                current_schema_applied_at,
                 journal_mode: health.journal_mode,
                 checked_at: health.checked_at,
             },
@@ -2040,6 +2242,10 @@ async fn operations_status(
                 count: backups.len(),
                 latest_created_at: latest.map(|backup| backup.created_at.clone()),
                 latest_byte_size: latest.map(|backup| backup.byte_size),
+                pre_migration_count,
+                latest_pre_migration_created_at: latest_pre_migration
+                    .map(|backup| backup.created_at.clone()),
+                latest_pre_migration_byte_size: latest_pre_migration.map(|backup| backup.byte_size),
             },
             remote_backup,
             stock: OperationsStockStatus {
@@ -2081,6 +2287,22 @@ async fn operations_status(
     }))
 }
 
+fn operations_deployment_provenance() -> OperationsDeploymentProvenance {
+    let build_commit_sha = env::var("TM_BUILD_COMMIT_SHA").ok().and_then(|value| {
+        let normalized = value.trim().to_ascii_lowercase();
+        (normalized.len() == 40 && normalized.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .then_some(normalized)
+    });
+    let railway_deployment_id = env::var("RAILWAY_DEPLOYMENT_ID").ok().and_then(|value| {
+        let normalized = value.trim().to_ascii_lowercase();
+        Uuid::parse_str(&normalized).ok().map(|_| normalized)
+    });
+    OperationsDeploymentProvenance {
+        build_commit_sha,
+        railway_deployment_id,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn operations_alerts(
     health: &HealthReport,
@@ -2090,6 +2312,7 @@ fn operations_alerts(
     security: &SecurityStatus,
     incident_mode: IncidentMode,
     ai_enabled: bool,
+    expense_crypto_ready: bool,
     now: DateTime<Utc>,
 ) -> (&'static str, Vec<OperationsAlert>) {
     let mut alerts = Vec::new();
@@ -2105,6 +2328,13 @@ fn operations_alerts(
             severity: "warning",
             code: "AI_KILL_SWITCH_ACTIVE",
             message: "OpenAI execution is disabled by the TM kill switch",
+        });
+    }
+    if !expense_crypto_ready {
+        alerts.push(OperationsAlert {
+            severity: "critical",
+            code: "EXPENSE_CRYPTO_NOT_READY",
+            message: "Expense data protection key verification failed",
         });
     }
     if !health.ok {
@@ -2595,12 +2825,20 @@ async fn runtime_controls_guard(
                 "the Today Task report feature is disabled",
             ))
     });
+    let blocked = blocked.or_else(|| {
+        (!runtime.expense_ai_enabled && expense_ai_execution_path(request.method(), path))
+            .then_some((
+                "EXPENSE_AI_DISABLED",
+                "expense report AI commentary is disabled",
+            ))
+    });
     if let Some((code, message)) = blocked {
         runtime.security.incident_blocked();
         tracing::warn!(
             event = "security_runtime_control_blocked",
             incident_mode = runtime.incident_mode.as_str(),
             ai_enabled = runtime.ai_enabled,
+            expense_ai_enabled = runtime.expense_ai_enabled,
             task_report_enabled = runtime.task_report_enabled,
             method = %request.method(),
             route = safe_route_family(path),
@@ -2633,8 +2871,15 @@ fn ai_execution_path(method: &Method, path: &str) -> bool {
     *method == Method::POST
         && (matches!(
             path,
-            "/api/v1/ai/probe" | "/api/v1/assistant/query" | "/api/v1/assistant/task-report"
+            "/api/v1/ai/probe"
+                | "/api/v1/assistant/query"
+                | "/api/v1/assistant/task-report"
+                | "/api/v1/expenses/reports"
         ) || (path.starts_with("/api/v1/assistant/actions/") && path.ends_with("/approve")))
+}
+
+fn expense_ai_execution_path(method: &Method, path: &str) -> bool {
+    *method == Method::POST && path == "/api/v1/expenses/reports"
 }
 
 fn auth_decision_error(decision: AuthDecision, request_id: String) -> Response {
@@ -2818,6 +3063,16 @@ fn safe_route_family(path: &str) -> &'static str {
         "/api/v1/ops/import" => "/api/v1/ops/import",
         "/api/v1/ai/status" => "/api/v1/ai/status",
         "/api/v1/costs/status" => "/api/v1/costs/status",
+        "/api/v1/expenses/summary" => "/api/v1/expenses/summary",
+        "/api/v1/expenses/sources" => "/api/v1/expenses/sources",
+        "/api/v1/expenses/transactions" => "/api/v1/expenses/transactions",
+        "/api/v1/expenses/reviews" => "/api/v1/expenses/reviews",
+        "/api/v1/expenses/imports" => "/api/v1/expenses/imports",
+        "/api/v1/expenses/imports/preview" => "/api/v1/expenses/imports/preview",
+        "/api/v1/expenses/recurring" => "/api/v1/expenses/recurring",
+        "/api/v1/expenses/recurring/occurrences" => "/api/v1/expenses/recurring/occurrences",
+        "/api/v1/expenses/reports" => "/api/v1/expenses/reports",
+        "/api/v1/expenses/reports/latest" => "/api/v1/expenses/reports/latest",
         "/api/v1/ai/probe" => "/api/v1/ai/probe",
         "/api/v1/assistant/query" => "/api/v1/assistant/query",
         "/api/v1/assistant/task-report" => "/api/v1/assistant/task-report",
@@ -2846,6 +3101,31 @@ fn safe_route_family(path: &str) -> &'static str {
         }
         value if value.starts_with("/api/v1/assistant/memories/") => {
             "/api/v1/assistant/memories/{id-or-operation}"
+        }
+        value if value.starts_with("/api/v1/expenses/reviews/") && value.ends_with("/resolve") => {
+            "/api/v1/expenses/reviews/{id}/resolve"
+        }
+        value if value.starts_with("/api/v1/expenses/sources/") => "/api/v1/expenses/sources/{id}",
+        value if value.starts_with("/api/v1/expenses/transactions/") => {
+            "/api/v1/expenses/transactions/{id}"
+        }
+        value
+            if value.starts_with("/api/v1/expenses/recurring/occurrences/")
+                && value.ends_with("/confirm-paid") =>
+        {
+            "/api/v1/expenses/recurring/occurrences/{key}/confirm-paid"
+        }
+        value
+            if value.starts_with("/api/v1/expenses/recurring/occurrences/")
+                && value.ends_with("/match") =>
+        {
+            "/api/v1/expenses/recurring/occurrences/{key}/match"
+        }
+        value if value.starts_with("/api/v1/expenses/recurring/") => {
+            "/api/v1/expenses/recurring/{id}"
+        }
+        value if value.starts_with("/api/v1/expenses/reports/") && value.ends_with("/feedback") => {
+            "/api/v1/expenses/reports/{id}/feedback"
         }
         value if value.starts_with("/api/v1/tasks/") => "/api/v1/tasks/{id}",
         value if value.starts_with("/api/v1/checklist/") => "/api/v1/checklist/{id}",
@@ -2897,8 +3177,9 @@ mod tests {
         body::{Body, to_bytes},
         extract::State,
         http::{HeaderMap, HeaderValue, Request, StatusCode},
+        middleware,
         response::IntoResponse,
-        routing::post,
+        routing::{get, post},
     };
     use chrono::{Duration as ChronoDuration, NaiveDate, Utc};
     use serde_json::{Value, json};
@@ -2907,20 +3188,25 @@ mod tests {
         ASSISTANT_ACTION_APPROVAL_TTL_SECONDS, AiBudgetPolicy, CalendarEventKind,
         CalendarRecurrence, ChangeRequestKind, CreateCalendarEventInput, CreateChangeRequestInput,
         CreateMemoryInput, CreateNoteInput, CreateProjectInput, CreateTaskInput,
-        CreateWorkLogInput, DEFAULT_TM_HOME, MemoryKind, MemoryRetention, MemorySensitivity,
-        NoteType, STOCK_AI_MONTHLY_HARD_LIMIT_MICROUSD, SessionStatus, StartSessionInput,
-        StockMarket, TaskStatus, TmCore, TmHome, UpsertStockWatchlistItemInput,
+        CreateWorkLogInput, DEFAULT_TM_HOME, ExpenseImportAdapter, ExpenseImportPreviewInput,
+        ExpenseReportFact, ExpenseReportObservation, ExpenseSourceKind, MemoryKind,
+        MemoryRetention, MemorySensitivity, NoteType, STOCK_AI_MONTHLY_HARD_LIMIT_MICROUSD,
+        SaveExpenseReportInput, SessionStatus, StartSessionInput, StockMarket, TaskStatus, TmCore,
+        TmHome, UpsertStockWatchlistItemInput,
     };
     use tower::ServiceExt;
 
     use super::{
-        IncidentMode, ServerProfile, build_cloud_authenticated_router,
-        build_cloud_authenticated_router_with_controls,
+        AppState, IncidentMode, RailwayUsageClient, ServerProfile, StockConfig, assign_request_id,
+        build_cloud_authenticated_router, build_cloud_authenticated_router_with_controls,
+        build_cloud_authenticated_router_with_feature_controls_costs_stock_and_expenses,
         build_cloud_authenticated_router_with_openai, build_cloud_bootstrap_router,
-        build_cloud_import_router, build_router, build_router_with_openai, validate_bind_addr,
-        validate_cloud_home,
+        build_cloud_import_router, build_router, build_router_with_openai, cloud_readyz,
+        expense_api, load_expense_crypto, readyz, safe_route_family, validate_bind_addr,
+        validate_cloud_home, validate_expense_ai_provider_configuration, write_api,
     };
-    use crate::auth::{AuthConfig, TOKEN_PREFIX};
+    use crate::auth::{AuthConfig, DEVICE_TOKEN_PREFIX, TOKEN_PREFIX, sha256_hex};
+    use crate::expense_crypto::ExpenseCryptoError;
     use crate::openai::{OpenAiClient, OpenAiConfig, ProbeUsage};
 
     const TEST_AUTH_SECRET: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -2931,6 +3217,200 @@ mod tests {
 
     fn test_auth_config() -> AuthConfig {
         AuthConfig::for_test(&test_auth_token(), Utc::now() + ChronoDuration::minutes(5))
+    }
+
+    fn install_test_device(core: &TmCore) -> (String, String) {
+        let as_of = Utc::now();
+        let code = "123456";
+        let polling_secret = "p".repeat(64);
+        let device_token = format!("{DEVICE_TOKEN_PREFIX}{}", "a".repeat(64));
+        let csrf = format!("tm_csrf_v1_{}", "b".repeat(64));
+        let pairing = core
+            .start_device_pairing(
+                "Expense test phone",
+                code,
+                &sha256_hex(code),
+                &polling_secret,
+                &sha256_hex(&polling_secret),
+                as_of,
+            )
+            .expect("start test device pairing");
+        core.approve_device_pairing(
+            &pairing.pairing.id,
+            &sha256_hex(code),
+            "primary-admin",
+            as_of,
+        )
+        .expect("approve test device pairing");
+        core.complete_device_pairing(
+            &pairing.pairing.id,
+            &sha256_hex(&polling_secret),
+            &sha256_hex(&device_token),
+            &sha256_hex(&csrf),
+            as_of,
+        )
+        .expect("complete test device pairing");
+        (
+            format!("__Host-tm_device={device_token}; __Host-tm_csrf={csrf}"),
+            csrf,
+        )
+    }
+
+    fn expense_import_body() -> Value {
+        expense_api::sign_test_expense_import_value(json!({
+            "adapter": "kb_card_usage_v1",
+            "sourceKind": "card",
+            "sourceFingerprint": "11".repeat(32),
+            "fileSha256": "22".repeat(32),
+            "normalizedSha256": "33".repeat(32),
+            "coverageStart": "2026-08-01",
+            "coverageEnd": "2026-08-31",
+            "rejectedCount": 0,
+            "rows": [
+                {
+                    "stableKey": "row-one",
+                    "rowSha256": "01".repeat(32),
+                    "sourceRowNumber": 1,
+                    "occurredAt": "2026-08-03T09:00:00+09:00",
+                    "postedDate": "2026-08-03",
+                    "direction": "debit",
+                    "amountMinor": 4_500,
+                    "currency": "KRW",
+                    "kind": "purchase",
+                    "categoryHint": "cafe",
+                    "merchant": "첫 번째 카페",
+                    "counterparty": null,
+                    "memo": null,
+                    "paymentMethodFingerprint": "aa".repeat(32),
+                    "externalReferenceFingerprint": null
+                },
+                {
+                    "stableKey": "row-two",
+                    "rowSha256": "02".repeat(32),
+                    "sourceRowNumber": 2,
+                    "occurredAt": "2026-08-04T10:30:00+09:00",
+                    "postedDate": "2026-08-04",
+                    "direction": "debit",
+                    "amountMinor": 8_900,
+                    "currency": "KRW",
+                    "kind": "purchase",
+                    "categoryHint": "food",
+                    "merchant": "두 번째 식당",
+                    "counterparty": null,
+                    "memo": null,
+                    "paymentMethodFingerprint": null,
+                    "externalReferenceFingerprint": null
+                }
+            ]
+        }))
+    }
+
+    fn large_expense_import_body(row_count: usize) -> Value {
+        let occurred_at = chrono::DateTime::parse_from_rfc3339("2026-08-01T00:00:00+09:00")
+            .expect("valid large import timestamp");
+        let rows = (0..row_count)
+            .map(|index| {
+                json!({
+                    "stableKey": format!("large-row-{index}"),
+                    "rowSha256": format!("{:064x}", index + 1),
+                    "sourceRowNumber": index + 1,
+                    "occurredAt": occurred_at
+                        .checked_add_signed(ChronoDuration::seconds(index as i64))
+                        .expect("large import timestamp stays in range")
+                        .to_rfc3339(),
+                    "postedDate": "2026-08-01",
+                    "direction": "debit",
+                    "amountMinor": 1_000 + index as i64,
+                    "currency": "KRW",
+                    "kind": "purchase",
+                    "categoryHint": "other",
+                    "merchant": "대용량 테스트 업체",
+                    "counterparty": null,
+                    "memo": "m".repeat(500),
+                    "paymentMethodFingerprint": null,
+                    "externalReferenceFingerprint": null
+                })
+            })
+            .collect::<Vec<_>>();
+        expense_api::sign_test_expense_import_value(json!({
+            "adapter": "kb_card_usage_v1",
+            "sourceKind": "card",
+            "sourceFingerprint": "88".repeat(32),
+            "fileSha256": "99".repeat(32),
+            "normalizedSha256": "aa".repeat(32),
+            "coverageStart": "2026-08-01",
+            "coverageEnd": "2026-08-31",
+            "rejectedCount": 0,
+            "rows": rows
+        }))
+    }
+
+    fn expense_import_body_with_preview_session(
+        mut body: Value,
+        preview_session_id: &str,
+    ) -> Value {
+        body.as_object_mut()
+            .expect("expense import body object")
+            .insert(
+                "previewSessionId".to_owned(),
+                Value::String(preview_session_id.to_owned()),
+            );
+        body
+    }
+
+    fn expense_preview_body_for(import: &Value) -> Value {
+        let mut preview = import.clone();
+        preview
+            .as_object_mut()
+            .expect("expense preview body object")
+            .remove("previewSessionId");
+        preview
+    }
+
+    fn expense_preview_body() -> Value {
+        expense_preview_body_for(&expense_import_body())
+    }
+
+    fn maximum_row_expense_preview_body() -> Value {
+        let import = large_expense_import_body(5_000);
+        let mut preview = expense_preview_body_for(&import);
+        for (index, row) in preview["rows"]
+            .as_array_mut()
+            .expect("maximum expense preview rows")
+            .iter_mut()
+            .enumerate()
+        {
+            let row = row.as_object_mut().expect("maximum expense preview row");
+            row.insert(
+                "stableKey".to_owned(),
+                Value::String(format!("{index:04}-{}", "s".repeat(240))),
+            );
+            row.insert(
+                "paymentMethodFingerprint".to_owned(),
+                Value::String("cc".repeat(32)),
+            );
+        }
+        expense_api::sign_test_expense_import_value(preview)
+    }
+
+    fn recurring_expense_body() -> Value {
+        json!({
+            "name": "테스트 구독",
+            "category": "ott_subscriptions",
+            "vendor": "테스트 업체",
+            "amountMinor": 10_000,
+            "currency": "KRW",
+            "paymentMethodFingerprint": null,
+            "startDate": "2026-08-01",
+            "endDate": null,
+            "memo": "테스트 메모",
+            "reminderDays": 7,
+            "amountKind": "fixed",
+            "intervalMonths": 1,
+            "dueRule": "specific_day",
+            "dueDay": 15,
+            "status": "active"
+        })
     }
 
     #[derive(Clone, Default)]
@@ -3324,7 +3804,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
         assert_eq!(body["data"]["status"], "ready");
-        assert_eq!(body["data"]["schemaVersion"], 14);
+        assert_eq!(body["data"]["schemaVersion"], 15);
         assert_eq!(body["data"]["journalMode"], "wal");
     }
 
@@ -4158,6 +4638,41 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[test]
+    fn cloud_expense_ai_configuration_requires_an_openai_provider() {
+        let unavailable = OpenAiConfig::default();
+        let error = validate_expense_ai_provider_configuration(
+            ServerProfile::CloudAuthenticated,
+            true,
+            &unavailable,
+        )
+        .expect_err("enabled cloud expense AI must require OpenAI configuration");
+        assert!(error.contains("TM_EXPENSE_AI_ENABLED=true"));
+        assert!(
+            validate_expense_ai_provider_configuration(
+                ServerProfile::CloudAuthenticated,
+                false,
+                &unavailable,
+            )
+            .is_ok()
+        );
+        let configured = OpenAiConfig::for_test(
+            Some("test-api-key"),
+            "gpt-5.4-nano-2026-03-17",
+            "https://api.openai.com/v1",
+            Duration::from_secs(5),
+        )
+        .expect("build configured expense OpenAI provider");
+        assert!(
+            validate_expense_ai_provider_configuration(
+                ServerProfile::CloudAuthenticated,
+                true,
+                &configured,
+            )
+            .is_ok()
+        );
+    }
+
     #[tokio::test]
     async fn ai_probe_requires_explicit_billable_call_confirmation() {
         let (_temporary, core) = test_core();
@@ -4345,14 +4860,61 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
         assert_eq!(body["data"]["database"]["ok"], true);
-        assert_eq!(body["data"]["database"]["schemaVersion"], 14);
+        assert_eq!(body["data"]["database"]["schemaVersion"], 15);
+        assert!(body["data"]["database"]["currentSchemaAppliedAt"].is_string());
+        assert_eq!(body["data"]["localBackup"]["preMigrationCount"], 0);
+        assert!(body["data"]["localBackup"]["latestPreMigrationCreatedAt"].is_null());
         assert_eq!(body["data"]["scheduler"]["status"], "healthy");
         assert_eq!(body["data"]["scheduler"]["openaiCallsEnabled"], false);
         assert_eq!(body["data"]["scheduler"]["effectCount"], 0);
         assert_eq!(body["data"]["remoteBackup"]["status"], "pending");
+        assert!(body["data"]["deploymentProvenance"].is_object());
+        assert!(
+            body["data"]["deploymentProvenance"]
+                .get("buildCommitSha")
+                .is_some()
+        );
+        assert!(
+            body["data"]["deploymentProvenance"]
+                .get("railwayDeploymentId")
+                .is_some()
+        );
+        assert_eq!(body["data"]["controls"]["expenseLedgerEmpty"], true);
+        assert_eq!(body["data"]["controls"]["expenseKeyInitialized"], true);
+        assert_eq!(
+            body["data"]["controls"]["expenseKeyInitializationAllowed"],
+            false
+        );
         let serialized = body.to_string();
         assert!(!serialized.contains("databasePath"));
         assert!(!serialized.contains("TM_AUTH"));
+    }
+
+    #[test]
+    fn expense_crypto_startup_refuses_probe_after_unencrypted_ledger_state() {
+        let (_temporary, core) = test_core();
+        core.preview_expense_import_redacted(&ExpenseImportPreviewInput {
+            adapter: ExpenseImportAdapter::KbCardUsageV1,
+            source_kind: ExpenseSourceKind::Card,
+            source_fingerprint: "11".repeat(32),
+            file_sha256: "22".repeat(32),
+            normalized_sha256: "33".repeat(32),
+            coverage_start: NaiveDate::from_ymd_opt(2026, 8, 1).expect("valid date"),
+            coverage_end: NaiveDate::from_ymd_opt(2026, 8, 31).expect("valid date"),
+            rejected_count: 1,
+            rows: Vec::new(),
+        })
+        .expect("create unencrypted preview ledger state");
+
+        assert!(matches!(
+            load_expense_crypto(&core),
+            Err(ExpenseCryptoError::KeyVerificationFailed)
+        ));
+        assert_eq!(
+            core.expense_crypto_probe()
+                .expect("query probe after refusal"),
+            None
+        );
     }
 
     #[tokio::test]
@@ -5628,7 +6190,7 @@ mod tests {
                 .to_vec(),
         )
         .expect("service worker is UTF-8");
-        assert!(service_worker.contains(r#"tm-mobile-shell-v12"#));
+        assert!(service_worker.contains(r#"tm-mobile-shell-v15-expenses"#));
         assert!(service_worker.contains(r#"request.method !== "GET""#));
 
         let stock_catalog = router
@@ -6270,6 +6832,951 @@ mod tests {
         assert_eq!(status["data"]["objectives"]["rpoHours"], 24);
         assert_eq!(status["data"]["objectives"]["rtoHours"], 2);
         assert_eq!(status["data"]["security"]["failedAuthenticationCount"], 1);
+    }
+
+    #[tokio::test]
+    async fn expense_import_preview_and_device_scope_are_enforced_by_the_router() {
+        let (_temporary, core) = test_core();
+        let (cookie, csrf) = install_test_device(&core);
+        let saved_report = core
+            .save_expense_report(SaveExpenseReportInput {
+                month_start: NaiveDate::from_ymd_opt(2026, 8, 1).expect("valid report month"),
+                aggregate_sha256: "77".repeat(32),
+                prompt_version: "expense-aggregate-report-v1".to_owned(),
+                model: "gpt-5.4-nano-2026-03-17".to_owned(),
+                title: "월간 지출 요약".to_owned(),
+                summary: "지출 흐름을 확인했습니다.".to_owned(),
+                observations: vec![ExpenseReportObservation {
+                    text: "확정 집계를 확인하세요.".to_owned(),
+                    fact_ids: vec!["currency:KRW:net_personal_spend".to_owned()],
+                }],
+                alerts: Vec::new(),
+                facts: vec![ExpenseReportFact {
+                    fact_id: "currency:KRW:net_personal_spend".to_owned(),
+                    metric: "net_personal_spend".to_owned(),
+                    currency: "KRW".to_owned(),
+                    amount_minor: 123_000,
+                }],
+                next_month_checks: vec!["정기지출 변동을 확인하세요.".to_owned()],
+                input_tokens: 100,
+                cached_input_tokens: 20,
+                output_tokens: 50,
+                total_tokens: 150,
+                cost_microusd: 100,
+                latency_ms: 25,
+            })
+            .expect("seed expense report for feedback contract");
+        let router = build_cloud_authenticated_router(core, test_auth_config());
+        let expense_import = expense_import_body();
+        let expense_preview = expense_preview_body_for(&expense_import).to_string();
+
+        let preview = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/expenses/imports/preview")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "expense-preview-router-test")
+                    .header("if-none-match", "*")
+                    .header("x-tm-confirm-mutation", "expense-import-preview")
+                    .body(Body::from(expense_preview.clone()))
+                    .expect("build primary expense preview request"),
+            )
+            .await
+            .expect("call primary expense preview");
+        assert_eq!(preview.status(), StatusCode::OK);
+        assert_eq!(
+            preview
+                .headers()
+                .get("cache-control")
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+        let preview_body = response_json(preview).await;
+        let preview_session_id = preview_body["data"]["sessionId"]
+            .as_str()
+            .expect("expense preview session ID")
+            .to_owned();
+        assert_eq!(preview_body["data"]["newCount"], 2);
+
+        let preview_replay = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/expenses/imports/preview")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "expense-preview-router-test")
+                    .header("if-none-match", "*")
+                    .header("x-tm-confirm-mutation", "expense-import-preview")
+                    .body(Body::from(expense_preview))
+                    .expect("build exact expense preview replay"),
+            )
+            .await
+            .expect("call exact expense preview replay");
+        assert_eq!(preview_replay.status(), StatusCode::OK);
+        assert_eq!(
+            preview_replay
+                .headers()
+                .get("x-tm-idempotency-replayed")
+                .and_then(|value| value.to_str().ok()),
+            Some("true")
+        );
+        assert_eq!(
+            response_json(preview_replay).await["data"]["sessionId"],
+            preview_session_id
+        );
+
+        let mut tampered_import = expense_import.clone();
+        tampered_import["rows"][0]["amountMinor"] = json!(99_999);
+        tampered_import["rows"][0]["kind"] = json!("refund");
+        let tampered_import = expense_api::sign_test_expense_import_value(tampered_import);
+        let tampered_import =
+            expense_import_body_with_preview_session(tampered_import, &preview_session_id);
+        let rejected_tamper = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/expenses/imports")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "expense-import-preview-tamper")
+                    .header("if-none-match", "*")
+                    .header("x-tm-confirm-mutation", "expense-import")
+                    .body(Body::from(tampered_import.to_string()))
+                    .expect("build expense import changed after preview"),
+            )
+            .await
+            .expect("call expense import changed after preview");
+        assert_eq!(rejected_tamper.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response_json(rejected_tamper).await["error"]["code"],
+            "EXPENSE_CONFLICT"
+        );
+
+        let expense_import =
+            expense_import_body_with_preview_session(expense_import, &preview_session_id);
+
+        let no_report_yet = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/expenses/reports/latest?month=2026-08")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .body(Body::empty())
+                    .expect("build empty latest expense report request"),
+            )
+            .await
+            .expect("call empty latest expense report");
+        assert_eq!(no_report_yet.status(), StatusCode::OK);
+        assert!(response_json(no_report_yet).await["data"].is_null());
+
+        let imported = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/expenses/imports")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "expense-import-router-test")
+                    .header("if-none-match", "*")
+                    .header("x-tm-confirm-mutation", "expense-import")
+                    .body(Body::from(expense_import.clone().to_string()))
+                    .expect("build primary expense import request"),
+            )
+            .await
+            .expect("call primary expense import");
+        assert_eq!(imported.status(), StatusCode::CREATED);
+        assert_eq!(
+            imported
+                .headers()
+                .get("cache-control")
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+
+        let replay = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/expenses/imports")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "expense-import-router-test")
+                    .header("if-none-match", "*")
+                    .header("x-tm-confirm-mutation", "expense-import")
+                    .body(Body::from(expense_import.clone().to_string()))
+                    .expect("build exact expense import replay"),
+            )
+            .await
+            .expect("call exact expense import replay");
+        assert_eq!(replay.status(), StatusCode::OK);
+        assert_eq!(
+            replay
+                .headers()
+                .get("x-tm-idempotency-replayed")
+                .and_then(|value| value.to_str().ok()),
+            Some("true")
+        );
+
+        let consumed_preview = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/expenses/imports")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "expense-import-consumed-preview")
+                    .header("if-none-match", "*")
+                    .header("x-tm-confirm-mutation", "expense-import")
+                    .body(Body::from(expense_import.to_string()))
+                    .expect("build consumed preview import"),
+            )
+            .await
+            .expect("call consumed preview import");
+        assert_eq!(consumed_preview.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response_json(consumed_preview).await["error"]["code"],
+            "EXPENSE_CONFLICT"
+        );
+
+        let mut overlapping_import = expense_import_body();
+        overlapping_import["fileSha256"] = json!("ab".repeat(32));
+        overlapping_import["rows"]
+            .as_array_mut()
+            .expect("overlapping expense import rows")
+            .truncate(1);
+        overlapping_import["rows"][0]["stableKey"] = json!("overlap-row-one");
+        overlapping_import["rows"][0]["sourceRowNumber"] = json!(99);
+        let overlapping_import = expense_api::sign_test_expense_import_value(overlapping_import);
+        let overlapping_preview = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/expenses/imports/preview")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "expense-overlap-preview")
+                    .header("if-none-match", "*")
+                    .header("x-tm-confirm-mutation", "expense-import-preview")
+                    .body(Body::from(overlapping_import.to_string()))
+                    .expect("build overlapping expense preview"),
+            )
+            .await
+            .expect("call overlapping expense preview");
+        assert_eq!(overlapping_preview.status(), StatusCode::OK);
+        let overlapping_preview = response_json(overlapping_preview).await;
+        assert_eq!(overlapping_preview["data"]["newCount"], 0);
+        assert_eq!(overlapping_preview["data"]["duplicateCount"], 1);
+
+        let mut mirror_import = expense_import_body();
+        mirror_import["adapter"] = json!("kb_account_history_v1");
+        mirror_import["sourceKind"] = json!("account");
+        mirror_import["sourceFingerprint"] = json!("dd".repeat(32));
+        mirror_import["fileSha256"] = json!("ee".repeat(32));
+        mirror_import["rows"]
+            .as_array_mut()
+            .expect("ambiguous mirror import rows")
+            .truncate(1);
+        mirror_import["rows"][0]["stableKey"] = json!("account-mirror-row");
+        mirror_import["rows"][0]["occurredAt"] = json!("2026-08-03T12:00:00+09:00");
+        let mirror_import = expense_api::sign_test_expense_import_value(mirror_import);
+        let mirror_preview = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/expenses/imports/preview")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "expense-mirror-preview")
+                    .header("if-none-match", "*")
+                    .header("x-tm-confirm-mutation", "expense-import-preview")
+                    .body(Body::from(mirror_import.clone().to_string()))
+                    .expect("build ambiguous mirror preview"),
+            )
+            .await
+            .expect("call ambiguous mirror preview");
+        assert_eq!(mirror_preview.status(), StatusCode::OK);
+        let mirror_preview = response_json(mirror_preview).await;
+        let mirror_session_id = mirror_preview["data"]["sessionId"]
+            .as_str()
+            .expect("ambiguous mirror preview session ID");
+        let mirror_import =
+            expense_import_body_with_preview_session(mirror_import, mirror_session_id);
+        let mirror_imported = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/expenses/imports")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "expense-ambiguous-mirror-import")
+                    .header("if-none-match", "*")
+                    .header("x-tm-confirm-mutation", "expense-import")
+                    .body(Body::from(mirror_import.to_string()))
+                    .expect("build ambiguous mirror import"),
+            )
+            .await
+            .expect("call ambiguous mirror import");
+        assert_eq!(mirror_imported.status(), StatusCode::CREATED);
+
+        let reviews = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/expenses/reviews?month=2026-08&status=pending&limit=100")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .body(Body::empty())
+                    .expect("build ambiguous mirror review request"),
+            )
+            .await
+            .expect("call ambiguous mirror review request");
+        assert_eq!(reviews.status(), StatusCode::OK);
+        let reviews = response_json(reviews).await;
+        let ambiguous_mirror = reviews["data"]["items"]
+            .as_array()
+            .expect("expense review items")
+            .iter()
+            .find(|review| review["reason"] == "ambiguous_mirror")
+            .expect("ambiguous mirror review");
+        assert!(ambiguous_mirror["suggestedDuplicateOfEventId"].is_string());
+
+        let match_candidates = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/expenses/transactions?month=2026-08&limit=100")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .body(Body::empty())
+                    .expect("build recurring match candidate request"),
+            )
+            .await
+            .expect("call recurring match candidate request");
+        assert_eq!(match_candidates.status(), StatusCode::OK);
+        let match_candidates = response_json(match_candidates).await;
+        let card_event = match_candidates["data"]["items"]
+            .as_array()
+            .expect("expense transaction items")
+            .iter()
+            .find(|item| {
+                item["sourceKind"] == "card"
+                    && item["amountMinor"] == 4_500
+                    && item["merchant"] == "첫 번째 카페"
+            })
+            .expect("card transaction for recurring match");
+        let card_event_id = card_event["id"]
+            .as_str()
+            .expect("card transaction ID")
+            .to_owned();
+        assert_eq!(
+            card_event["paymentMethodFingerprint"],
+            Value::String("aa".repeat(32))
+        );
+
+        let mut learned_recurring_body = recurring_expense_body();
+        let learned_recurring = learned_recurring_body
+            .as_object_mut()
+            .expect("learned recurring body object");
+        learned_recurring.insert("name".to_owned(), json!("카페 정기 결제"));
+        learned_recurring.insert("category".to_owned(), json!("cafe"));
+        learned_recurring.insert("vendor".to_owned(), Value::Null);
+        learned_recurring.insert("amountMinor".to_owned(), json!(4_500));
+        learned_recurring.insert("paymentMethodFingerprint".to_owned(), Value::Null);
+        learned_recurring.insert("dueDay".to_owned(), json!(3));
+        let created_recurring = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/expenses/recurring")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "expense-recurring-learning-create")
+                    .header("if-none-match", "*")
+                    .header("x-tm-confirm-mutation", "recurring-expense-create")
+                    .body(Body::from(learned_recurring_body.to_string()))
+                    .expect("build recurring item for auto-match learning"),
+            )
+            .await
+            .expect("create recurring item for auto-match learning");
+        assert_eq!(created_recurring.status(), StatusCode::CREATED);
+        let created_recurring = response_json(created_recurring).await;
+        let recurring_id = created_recurring["data"]["id"]
+            .as_str()
+            .expect("created recurring item ID")
+            .to_owned();
+        assert!(created_recurring["data"]["vendor"].is_null());
+
+        let occurrences = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/expenses/recurring/occurrences?month=2026-08")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .body(Body::empty())
+                    .expect("build recurring occurrence request"),
+            )
+            .await
+            .expect("call recurring occurrence request");
+        assert_eq!(occurrences.status(), StatusCode::OK);
+        let occurrences = response_json(occurrences).await;
+        let occurrence = occurrences["data"]
+            .as_array()
+            .expect("recurring occurrences")
+            .iter()
+            .find(|item| item["recurringExpenseId"] == recurring_id)
+            .expect("created recurring occurrence");
+        let occurrence_key = occurrence["occurrenceKey"]
+            .as_str()
+            .expect("recurring occurrence key")
+            .to_owned();
+        let occurrence_version = occurrence["version"]
+            .as_u64()
+            .expect("recurring occurrence version");
+
+        let matched = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/expenses/recurring/occurrences/{occurrence_key}/match"
+                    ))
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "expense-recurring-learning-match")
+                    .header("if-match", format!("\"{occurrence_version}\""))
+                    .header("x-tm-confirm-mutation", "recurring-expense-match")
+                    .body(Body::from(
+                        json!({
+                            "eventId": card_event_id,
+                            "enableFutureAutoMatch": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build first recurring auto-match confirmation"),
+            )
+            .await
+            .expect("confirm first recurring auto-match");
+        assert_eq!(matched.status(), StatusCode::OK);
+        assert!(response_json(matched).await["data"]["vendor"].is_null());
+
+        let learned_items = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/expenses/recurring")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .body(Body::empty())
+                    .expect("build learned recurring item request"),
+            )
+            .await
+            .expect("call learned recurring item request");
+        assert_eq!(learned_items.status(), StatusCode::OK);
+        let learned_items = response_json(learned_items).await;
+        let learned_item = learned_items["data"]
+            .as_array()
+            .expect("recurring expense items")
+            .iter()
+            .find(|item| item["id"] == recurring_id)
+            .expect("learned recurring item");
+        assert!(learned_item["vendor"].is_null());
+        assert_eq!(
+            learned_item["paymentMethodFingerprint"],
+            Value::String("aa".repeat(32))
+        );
+        assert_eq!(learned_item["autoMatchEnabled"], true);
+
+        let first_page = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/expenses/transactions?month=2026-08&limit=1")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .body(Body::empty())
+                    .expect("build first expense transaction page request"),
+            )
+            .await
+            .expect("call first expense transaction page");
+        assert_eq!(first_page.status(), StatusCode::OK);
+        let first_page = response_json(first_page).await;
+        let first_id = first_page["data"]["items"][0]["id"]
+            .as_str()
+            .expect("first expense transaction ID")
+            .to_owned();
+        let cursor = first_page["data"]["nextCursor"]
+            .as_str()
+            .expect("expense transaction next cursor");
+        assert!(cursor.contains('|'));
+        assert!(cursor.contains(':'));
+        let second_query = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("month", "2026-08")
+            .append_pair("cursor", cursor)
+            .append_pair("limit", "1")
+            .finish();
+        let second_page = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/expenses/transactions?{second_query}"))
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .body(Body::empty())
+                    .expect("build second expense transaction page request"),
+            )
+            .await
+            .expect("call second expense transaction page");
+        assert_eq!(second_page.status(), StatusCode::OK);
+        let second_page = response_json(second_page).await;
+        assert_ne!(
+            second_page["data"]["items"][0]["id"]
+                .as_str()
+                .expect("second expense transaction ID"),
+            first_id.as_str()
+        );
+
+        let feedback = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/api/v1/expenses/reports/{}/feedback",
+                        saved_report.id
+                    ))
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "expense-report-feedback-router-test")
+                    .header("if-none-match", "*")
+                    .header("x-tm-confirm-mutation", "expense-report-feedback")
+                    .body(Body::from(r#"{"helpful":true}"#))
+                    .expect("build expense report feedback request"),
+            )
+            .await
+            .expect("call expense report feedback");
+        assert_eq!(feedback.status(), StatusCode::OK);
+        let feedback = response_json(feedback).await;
+        assert_eq!(feedback["data"]["reportId"], saved_report.id);
+        assert_eq!(feedback["data"]["helpful"], true);
+        assert_eq!(feedback["data"]["cached"], true);
+        assert_eq!(feedback["data"]["facts"][0]["amountMinor"], 123_000);
+        assert_eq!(feedback["data"]["title"], "월간 지출 요약");
+
+        for (path, body) in [
+            ("/api/v1/expenses/imports", expense_import_body()),
+            ("/api/v1/expenses/imports/preview", expense_preview_body()),
+        ] {
+            let denied = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .header("host", "tm.example.test")
+                        .header("origin", "https://tm.example.test")
+                        .header("cookie", &cookie)
+                        .header("x-tm-csrf", &csrf)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .expect("build device expense import request"),
+                )
+                .await
+                .expect("call device expense import route");
+            assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+            assert_eq!(
+                response_json(denied).await["error"]["code"],
+                "DEVICE_SCOPE_FORBIDDEN"
+            );
+        }
+
+        let missing_csrf = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/expenses/recurring")
+                    .header("host", "tm.example.test")
+                    .header("origin", "https://tm.example.test")
+                    .header("cookie", cookie)
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "device-recurring-without-csrf")
+                    .header("if-none-match", "*")
+                    .header("x-tm-confirm-mutation", "recurring-expense-create")
+                    .body(Body::from(recurring_expense_body().to_string()))
+                    .expect("build device mutation without CSRF"),
+            )
+            .await
+            .expect("call device mutation without CSRF");
+        assert_eq!(missing_csrf.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            response_json(missing_csrf).await["error"]["code"],
+            "DEVICE_CSRF_REJECTED"
+        );
+    }
+
+    #[tokio::test]
+    async fn expense_mutation_preconditions_fail_closed_at_the_router() {
+        let (_temporary, core) = test_core();
+        let router = build_cloud_authenticated_router(core, test_auth_config());
+        let bearer = format!("Bearer {}", test_auth_token());
+
+        let preview_without_mutation_headers = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/expenses/imports/preview")
+                    .header("authorization", &bearer)
+                    .header("content-type", "application/json")
+                    .body(Body::from(expense_preview_body().to_string()))
+                    .expect("build preview without mutation headers"),
+            )
+            .await
+            .expect("call preview without mutation headers");
+        assert_eq!(
+            preview_without_mutation_headers.status(),
+            StatusCode::PRECONDITION_REQUIRED
+        );
+
+        let missing_idempotency = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/expenses/recurring")
+                    .header("authorization", &bearer)
+                    .header("content-type", "application/json")
+                    .header("if-none-match", "*")
+                    .header("x-tm-confirm-mutation", "recurring-expense-create")
+                    .body(Body::from(recurring_expense_body().to_string()))
+                    .expect("build mutation without idempotency key"),
+            )
+            .await
+            .expect("call mutation without idempotency key");
+        assert_eq!(
+            missing_idempotency.status(),
+            StatusCode::PRECONDITION_REQUIRED
+        );
+
+        let missing_confirmation = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/expenses/recurring")
+                    .header("authorization", &bearer)
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "missing-confirmation")
+                    .header("if-none-match", "*")
+                    .body(Body::from(recurring_expense_body().to_string()))
+                    .expect("build mutation without confirmation"),
+            )
+            .await
+            .expect("call mutation without confirmation");
+        assert_eq!(
+            missing_confirmation.status(),
+            StatusCode::PRECONDITION_REQUIRED
+        );
+
+        let missing_if_none_match = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/expenses/recurring")
+                    .header("authorization", &bearer)
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "missing-if-none-match")
+                    .header("x-tm-confirm-mutation", "recurring-expense-create")
+                    .body(Body::from(recurring_expense_body().to_string()))
+                    .expect("build create mutation without If-None-Match"),
+            )
+            .await
+            .expect("call create mutation without If-None-Match");
+        assert_eq!(
+            missing_if_none_match.status(),
+            StatusCode::PRECONDITION_REQUIRED
+        );
+
+        let mut update_body = recurring_expense_body();
+        update_body
+            .as_object_mut()
+            .expect("recurring body object")
+            .insert("effectiveFromMonth".to_owned(), json!("2026-08-01"));
+        let missing_if_match = router
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/api/v1/expenses/recurring/missing-item")
+                    .header("authorization", bearer)
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "missing-if-match")
+                    .header("x-tm-confirm-mutation", "recurring-expense-update")
+                    .body(Body::from(update_body.to_string()))
+                    .expect("build update mutation without If-Match"),
+            )
+            .await
+            .expect("call update mutation without If-Match");
+        assert_eq!(missing_if_match.status(), StatusCode::PRECONDITION_REQUIRED);
+    }
+
+    #[tokio::test]
+    async fn expense_import_route_overrides_the_global_body_limit_but_stops_at_eight_mib() {
+        let (_temporary, core) = test_core();
+        let router = build_cloud_authenticated_router(core, test_auth_config());
+
+        let maximum_row_preview = maximum_row_expense_preview_body().to_string();
+        assert!(maximum_row_preview.len() > 2 * 1024 * 1024);
+        assert!(maximum_row_preview.len() < expense_api::MAX_EXPENSE_PREVIEW_BODY_BYTES);
+        let accepted_preview = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/expenses/imports/preview")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "expense-maximum-row-preview")
+                    .header("if-none-match", "*")
+                    .header("x-tm-confirm-mutation", "expense-import-preview")
+                    .body(Body::from(maximum_row_preview))
+                    .expect("build maximum-row expense preview"),
+            )
+            .await
+            .expect("call maximum-row expense preview");
+        assert_eq!(accepted_preview.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(accepted_preview).await["data"]["newCount"],
+            5_000
+        );
+
+        let oversized_preview = format!(
+            "{{\"padding\":\"{}\"}}",
+            "x".repeat(expense_api::MAX_EXPENSE_PREVIEW_BODY_BYTES)
+        );
+        assert!(oversized_preview.len() > expense_api::MAX_EXPENSE_PREVIEW_BODY_BYTES);
+        let rejected_preview = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/expenses/imports/preview")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "expense-oversized-preview")
+                    .header("if-none-match", "*")
+                    .header("x-tm-confirm-mutation", "expense-import-preview")
+                    .body(Body::from(oversized_preview))
+                    .expect("build oversized expense preview"),
+            )
+            .await
+            .expect("call oversized expense preview");
+        assert_eq!(rejected_preview.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+        let valid_large_body = large_expense_import_body(200);
+        let valid_large_preview = expense_preview_body_for(&valid_large_body).to_string();
+        assert!(valid_large_preview.len() < expense_api::MAX_EXPENSE_PREVIEW_BODY_BYTES);
+        let preview = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/expenses/imports/preview")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "expense-large-preview")
+                    .header("if-none-match", "*")
+                    .header("x-tm-confirm-mutation", "expense-import-preview")
+                    .body(Body::from(valid_large_preview))
+                    .expect("build large expense import preview"),
+            )
+            .await
+            .expect("call large expense import preview");
+        assert_eq!(preview.status(), StatusCode::OK);
+        let preview = response_json(preview).await;
+        let preview_session_id = preview["data"]["sessionId"]
+            .as_str()
+            .expect("large expense preview session ID");
+        let valid_large_body =
+            expense_import_body_with_preview_session(valid_large_body, preview_session_id)
+                .to_string();
+        assert!(valid_large_body.len() > write_api::MAX_MUTATION_BODY_BYTES);
+        assert!(valid_large_body.len() < expense_api::MAX_EXPENSE_IMPORT_BODY_BYTES);
+
+        let accepted = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/expenses/imports")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "expense-import-large-valid")
+                    .header("if-none-match", "*")
+                    .header("x-tm-confirm-mutation", "expense-import")
+                    .body(Body::from(valid_large_body))
+                    .expect("build valid large expense import"),
+            )
+            .await
+            .expect("call valid large expense import");
+        assert_eq!(accepted.status(), StatusCode::CREATED);
+
+        let oversized_body = format!(
+            "{{\"padding\":\"{}\"}}",
+            "x".repeat(expense_api::MAX_EXPENSE_IMPORT_BODY_BYTES)
+        );
+        assert!(oversized_body.len() > expense_api::MAX_EXPENSE_IMPORT_BODY_BYTES);
+        let rejected = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/expenses/imports")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "expense-import-too-large")
+                    .header("if-none-match", "*")
+                    .header("x-tm-confirm-mutation", "expense-import")
+                    .body(Body::from(oversized_body))
+                    .expect("build oversized expense import"),
+            )
+            .await
+            .expect("call oversized expense import");
+        assert_eq!(rejected.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn expense_incident_ai_and_crypto_readiness_controls_fail_closed() {
+        let (_temporary, core) = test_core();
+        let read_only = build_cloud_authenticated_router_with_controls(
+            core.clone(),
+            test_auth_config(),
+            OpenAiClient::disabled(),
+            IncidentMode::ReadOnly,
+            true,
+        );
+        for (path, body) in [
+            ("/api/v1/expenses/recurring", recurring_expense_body()),
+            ("/api/v1/expenses/reports", json!({"month": "2026-08"})),
+            ("/api/v1/expenses/imports/preview", expense_preview_body()),
+        ] {
+            let blocked = read_only
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .header("authorization", format!("Bearer {}", test_auth_token()))
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .expect("build incident-mode expense mutation"),
+                )
+                .await
+                .expect("call incident-mode expense mutation");
+            assert_eq!(blocked.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(
+                response_json(blocked).await["error"]["code"],
+                "INCIDENT_READ_ONLY"
+            );
+        }
+
+        let ai_disabled =
+            build_cloud_authenticated_router_with_feature_controls_costs_stock_and_expenses(
+                core.clone(),
+                test_auth_config(),
+                OpenAiClient::disabled(),
+                IncidentMode::Normal,
+                true,
+                true,
+                RailwayUsageClient::disabled(),
+                StockConfig::default(),
+                false,
+            );
+        let blocked_ai = ai_disabled
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/expenses/reports")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "expense-ai-disabled")
+                    .header("if-none-match", "*")
+                    .header("x-tm-confirm-mutation", "expense-report-generate")
+                    .header("x-tm-confirm-ai-call", "expense-report")
+                    .body(Body::from(r#"{"month":"2026-08"}"#))
+                    .expect("build disabled expense AI request"),
+            )
+            .await
+            .expect("call disabled expense AI route");
+        assert_eq!(blocked_ai.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response_json(blocked_ai).await["error"]["code"],
+            "EXPENSE_AI_DISABLED"
+        );
+
+        let mut unavailable_state = AppState::new(core, OpenAiClient::disabled());
+        unavailable_state.expense_crypto = Err(ExpenseCryptoError::MissingKey);
+        let local_readiness_router = Router::new()
+            .route("/readyz", get(readyz))
+            .with_state(unavailable_state.clone())
+            .layer(middleware::from_fn(assign_request_id));
+        let local_readiness = local_readiness_router
+            .oneshot(
+                Request::builder()
+                    .uri("/readyz")
+                    .body(Body::empty())
+                    .expect("build local readiness request"),
+            )
+            .await
+            .expect("call local readiness without expense key");
+        assert_eq!(local_readiness.status(), StatusCode::OK);
+
+        unavailable_state.expense_crypto_required = true;
+        let readiness_router = Router::new()
+            .route("/readyz", get(cloud_readyz))
+            .with_state(unavailable_state)
+            .layer(middleware::from_fn(assign_request_id));
+        let readiness = readiness_router
+            .oneshot(
+                Request::builder()
+                    .uri("/readyz")
+                    .body(Body::empty())
+                    .expect("build expense crypto readiness request"),
+            )
+            .await
+            .expect("call expense crypto readiness");
+        assert_eq!(readiness.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response_json(readiness).await["error"]["code"],
+            "EXPENSE_CRYPTO_NOT_READY"
+        );
+    }
+
+    #[test]
+    fn expense_route_telemetry_never_contains_resource_or_search_values() {
+        assert_eq!(
+            safe_route_family("/api/v1/expenses/reviews/private-value/resolve"),
+            "/api/v1/expenses/reviews/{id}/resolve"
+        );
+        assert_eq!(
+            safe_route_family("/api/v1/expenses/recurring/occurrences/private-value/confirm-paid"),
+            "/api/v1/expenses/recurring/occurrences/{key}/confirm-paid"
+        );
+        assert_eq!(
+            safe_route_family("/api/v1/expenses/reports/private-value/feedback"),
+            "/api/v1/expenses/reports/{id}/feedback"
+        );
+        assert_eq!(
+            safe_route_family("/api/v1/expenses/transactions/private-search-value"),
+            "unmatched"
+        );
     }
 
     #[test]

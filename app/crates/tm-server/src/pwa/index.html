@@ -52,6 +52,7 @@
         <nav class="tabs" aria-label="모바일 메뉴">
           <button data-tab="assistant" aria-current="page">비서</button>
           <button data-tab="calendar">캘린더</button>
+          <button data-tab="expenses">지출</button>
           <button data-tab="stocks">주식</button>
           <button data-tab="tasks">할 일</button>
           <button data-tab="notes">노트</button>
@@ -62,6 +63,10 @@
         <section id="tab-assistant" class="tab-panel panel">
           <p class="eyebrow">OpenAI API · 명시적 전송만</p>
           <h1>무엇을 도와드릴까요?</h1>
+          <section class="expense-due-brief" aria-labelledby="expense-due-brief-heading">
+            <div class="expense-due-brief-heading"><div><p class="eyebrow">무료 일정 계산 · 푸시 없음</p><h2 id="expense-due-brief-heading">정기지출 확인</h2></div><button id="expense-due-open" class="secondary" type="button">전체 보기</button></div>
+            <div id="expense-due-brief-content" class="expense-due-grid" aria-live="polite"><p class="empty">납부 일정을 불러오는 중입니다.</p></div>
+          </section>
           <section class="task-report-card" aria-labelledby="mobile-task-report-heading">
             <div class="task-report-heading">
               <div><p class="eyebrow">읽기 전용 · 하루 최대 4회</p><h2 id="mobile-task-report-heading">오늘의 우선순위·일정</h2></div>
@@ -136,6 +141,82 @@
             <h2 id="calendar-recurring-title">반복 일정</h2>
             <div id="calendar-recurring-list" class="card-list"></div>
           </section>
+        </section>
+
+        <section id="tab-expenses" class="tab-panel panel hidden">
+          <div class="section-heading expense-heading">
+            <div><p class="eyebrow">정규화 거래 · 원본 파일 없음</p><h1>지출</h1></div>
+            <button id="expense-refresh" class="secondary" type="button">새로고침</button>
+          </div>
+          <p class="muted">원화와 외화는 환산하지 않습니다. 파일 가져오기는 Windows TM에서만 할 수 있습니다.</p>
+          <div class="expense-month-toolbar" aria-label="지출 조회 월">
+            <button id="expense-prev" class="secondary" aria-label="이전 달" type="button">‹</button>
+            <strong id="expense-month-label"></strong>
+            <button id="expense-next" class="secondary" aria-label="다음 달" type="button">›</button>
+          </div>
+          <section id="expense-summary" class="expense-summary" aria-labelledby="expense-summary-heading" aria-live="polite">
+            <h2 id="expense-summary-heading">월간 요약</h2>
+            <p class="empty">지출 요약을 불러오는 중입니다.</p>
+          </section>
+          <nav class="expense-subtabs" aria-label="지출 상세 메뉴">
+            <button data-expense-view="transactions" aria-current="page" type="button">거래</button>
+            <button data-expense-view="reviews" type="button">확인 필요</button>
+            <button data-expense-view="recurring" type="button">정기지출</button>
+          </nav>
+          <section id="expense-view-transactions" class="expense-view" aria-labelledby="expense-transactions-heading">
+            <div class="expense-subheading"><h2 id="expense-transactions-heading">거래</h2><span id="expense-transactions-count">0건</span></div>
+            <div id="expense-transactions-list" class="card-list"></div>
+            <button id="expense-transactions-more" class="secondary pagination-more hidden" type="button">거래 더 보기</button>
+          </section>
+          <section id="expense-view-reviews" class="expense-view hidden" aria-labelledby="expense-reviews-heading">
+            <div class="expense-subheading"><h2 id="expense-reviews-heading">확인 필요</h2><span id="expense-reviews-count">0건</span></div>
+            <p class="muted">목적이 불명확한 송금은 결정하기 전까지 확정 지출에서 제외됩니다.</p>
+            <div id="expense-reviews-list" class="card-list"></div>
+            <button id="expense-reviews-more" class="secondary pagination-more hidden" type="button">검토 더 보기</button>
+          </section>
+          <section id="expense-view-recurring" class="expense-view hidden" aria-labelledby="expense-recurring-heading">
+            <div class="expense-subheading"><h2 id="expense-recurring-heading">정기지출</h2><button id="expense-recurring-add" class="primary" type="button">항목 추가</button></div>
+            <h3>이 달의 납부</h3>
+            <div id="expense-occurrences-list" class="card-list"></div>
+            <h3>등록 항목</h3>
+            <div id="expense-recurring-list" class="card-list"></div>
+          </section>
+          <form id="expense-recurring-form" class="mobile-editor hidden">
+            <div class="mobile-editor-heading"><h2 id="expense-recurring-form-title">정기지출 추가</h2><button id="expense-recurring-form-close" class="text-button" type="button">닫기</button></div>
+            <p id="expense-recurring-registration-note" class="expense-registration-note hidden"></p>
+            <label for="expense-recurring-name">이름</label>
+            <input id="expense-recurring-name" maxlength="120" required>
+            <label for="expense-recurring-category">카테고리</label>
+            <select id="expense-recurring-category"></select>
+            <label for="expense-recurring-merchant">업체 (선택)</label>
+            <input id="expense-recurring-merchant" maxlength="200">
+            <div class="expense-field-grid">
+              <div><label for="expense-recurring-amount">예상 금액 (minor unit)</label><input id="expense-recurring-amount" type="number" min="1" step="1" required></div>
+              <div><label for="expense-recurring-currency">통화</label><input id="expense-recurring-currency" minlength="3" maxlength="3" value="KRW" required></div>
+            </div>
+            <div class="expense-field-grid">
+              <div><label for="expense-recurring-amount-type">금액 유형</label><select id="expense-recurring-amount-type"><option value="fixed">고정</option><option value="estimate">예상</option><option value="limit">최대 한도</option></select></div>
+              <div><label for="expense-recurring-interval">주기</label><select id="expense-recurring-interval"><option value="1">매월</option><option value="2">2개월마다</option><option value="3">3개월마다</option><option value="6">6개월마다</option><option value="12">12개월마다</option></select></div>
+            </div>
+            <input id="expense-recurring-payment-method" type="hidden">
+            <p id="expense-recurring-payment-method-note" class="expense-payment-learning muted">첫 실제 거래 연결을 확인하면 업체·결제수단을 안전하게 학습합니다. 원문 카드·계좌번호는 표시하거나 저장하지 않습니다.</p>
+            <div class="expense-field-grid">
+              <div><label for="expense-recurring-due-rule">결제일</label><select id="expense-recurring-due-rule"><option value="specific_day">특정일</option><option value="first_day">초일</option><option value="last_day">말일</option></select></div>
+              <div id="expense-recurring-due-day-field"><label for="expense-recurring-due-day">매월 날짜</label><input id="expense-recurring-due-day" type="number" min="1" max="31" required><small>없는 날짜는 말일로 보정합니다.</small></div>
+            </div>
+            <div class="expense-field-grid">
+              <div><label for="expense-recurring-start">시작일</label><input id="expense-recurring-start" type="date" required></div>
+              <div><label for="expense-recurring-end">종료일 (선택)</label><input id="expense-recurring-end" type="date"></div>
+            </div>
+            <div class="expense-field-grid">
+              <div><label for="expense-recurring-reminder">사전 알림일</label><input id="expense-recurring-reminder" type="number" min="0" max="31" value="7" required></div>
+              <div><label for="expense-recurring-status">상태</label><select id="expense-recurring-status"><option value="active">활성</option><option value="paused">일시정지</option><option value="ended">종료</option></select></div>
+            </div>
+            <label for="expense-recurring-note">메모 (선택)</label>
+            <textarea id="expense-recurring-note" maxlength="500" rows="3"></textarea>
+            <label class="expense-checkbox" for="expense-recurring-auto-match"><input id="expense-recurring-auto-match" type="checkbox"> 이후 고신뢰 거래 자동 연결 <small>처음 켜는 것은 실제 거래를 직접 연결하며 동의한 경우에만 가능합니다. 편집에서는 기존 동의를 철회할 수 있습니다.</small></label>
+            <div class="expense-form-actions"><button id="expense-recurring-delete" class="danger hidden" type="button">삭제</button><button id="expense-recurring-save" class="primary" type="submit">저장</button></div>
+          </form>
         </section>
 
         <section id="tab-stocks" class="tab-panel panel hidden">

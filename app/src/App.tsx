@@ -8,6 +8,7 @@ import { NotesPage, SearchPage, WorkLogsPage } from "./components/KnowledgePages
 import { SessionPage } from "./components/SessionPage";
 import { StockPage } from "./components/StockPage";
 import { DeviceManagementPage } from "./components/DeviceManagementPage";
+import { ExpensesPage, TodayExpenseDueCards } from "./components/ExpensesPage";
 import { TaskDetail } from "./components/TaskDetail";
 import { HistoryPage, InboxPage, ProjectsPage, TodayPage } from "./components/TaskPages";
 import {
@@ -42,6 +43,7 @@ type PageId =
   | "worklogs"
   | "notes"
   | "stocks"
+  | "expenses"
   | "search"
   | "change-requests"
   | "trash"
@@ -92,6 +94,7 @@ export function App({ api = defaultApi }: AppProps) {
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null);
   const [page, setPage] = useState<PageId>("today");
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [selectedRecurringExpenseId, setSelectedRecurringExpenseId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [savingTask, setSavingTask] = useState(false);
   const [fatalError, setFatalError] = useState<string | null>(null);
@@ -358,9 +361,15 @@ export function App({ api = defaultApi }: AppProps) {
   );
 
   const navigate = (target: PageId) => {
+    if (target !== "expenses") setSelectedRecurringExpenseId(null);
     setPage(target);
     setMobileNavOpen(false);
     document.querySelector<HTMLElement>("#main-content")?.focus({ preventScroll: true });
+  };
+
+  const openExpenses = (recurringExpenseId?: string) => {
+    setSelectedRecurringExpenseId(recurringExpenseId ?? null);
+    navigate("expenses");
   };
 
   if (loading) {
@@ -410,6 +419,7 @@ export function App({ api = defaultApi }: AppProps) {
     {
       title: "도구",
       items: [
+        { id: "expenses", label: "지출", icon: "chart" },
         { id: "stocks", label: "주식", icon: "chart" },
         { id: "search", label: "통합 검색", icon: "search" },
         { id: "change-requests", label: "개선 요청함", icon: "spark", count: pendingApprovalCount || undefined },
@@ -425,9 +435,9 @@ export function App({ api = defaultApi }: AppProps) {
       case "inbox":
         return <InboxPage />;
       case "today":
-        return <TodayPage onComplete={completeTask} onGenerateReport={generateTaskReport} onOpen={(task) => setSelectedTaskId(task.id)} onOpenStocks={() => navigate("stocks")} onRateReport={rateTaskReport} onResolve={resolveDayEntry} report={taskReport} reportLoading={taskReportLoading} stockScreen={stockScreen} stockScreenError={stockScreenError} stockScreenLoading={stockScreenLoading} tasks={snapshot.tasks} today={snapshot.today} view={snapshot.todayView} />;
+        return <TodayPage expenseDueCards={<TodayExpenseDueCards api={api} onOpenExpenses={openExpenses} today={snapshot.today} />} onComplete={completeTask} onGenerateReport={generateTaskReport} onOpen={(task) => setSelectedTaskId(task.id)} onOpenStocks={() => navigate("stocks")} onRateReport={rateTaskReport} onResolve={resolveDayEntry} report={taskReport} reportLoading={taskReportLoading} stockScreen={stockScreen} stockScreenError={stockScreenError} stockScreenLoading={stockScreenLoading} tasks={snapshot.tasks} today={snapshot.today} view={snapshot.todayView} />;
       case "calendar":
-        return <CalendarPage onCreate={api.createCalendarEvent} onDelete={api.deleteCalendarEvent} onLoad={api.getCalendarMonth} onNotify={notify} onUpdate={api.updateCalendarEvent} today={snapshot.today} />;
+        return <CalendarPage onCreate={api.createCalendarEvent} onDelete={api.deleteCalendarEvent} onLoad={api.getCalendarMonth} onNotify={notify} onOpenExpense={(recurringExpenseId) => openExpenses(recurringExpenseId)} onUpdate={api.updateCalendarEvent} today={snapshot.today} />;
       case "projects":
         return <ProjectsPage onComplete={completeTask} onCreateProject={createProject} onCreateTask={createTask} onOpen={(task) => setSelectedTaskId(task.id)} onPlan={(task) => void planTask(task)} projects={snapshot.projects} tasks={snapshot.tasks} />;
       case "history":
@@ -440,6 +450,8 @@ export function App({ api = defaultApi }: AppProps) {
         return <NotesPage notes={snapshot.notes} onCreate={createNote} onOpenTask={(task) => setSelectedTaskId(task.id)} onTrash={(noteId) => moveRecordToTrash(noteId, "note", "Note")} sessions={snapshot.recentSessions} tasks={snapshot.tasks} />;
       case "stocks":
         return <StockPage onDelete={api.deleteStockWatchlistItem} onListScreenResults={api.listStockScreenResults} onLoad={api.getStockWatchlist} onNotify={notify} onRefreshScreen={loadStockScreen} onUpsert={api.upsertStockWatchlistItem} screen={stockScreen} screenError={stockScreenError} screenLoading={stockScreenLoading} />;
+      case "expenses":
+        return <ExpensesPage api={api} initialRecurringExpenseId={selectedRecurringExpenseId} onNotify={notify} today={snapshot.today} />;
       case "search":
         return <SearchPage onOpenTask={(taskId) => setSelectedTaskId(taskId)} onSearch={(query) => api.search(query)} />;
       case "change-requests":

@@ -59,6 +59,7 @@ export interface CalendarMonth {
   monthEnd: string;
   events: CalendarEvent[];
   occurrences: CalendarOccurrence[];
+  expenseOccurrences: RecurringExpenseOccurrence[];
 }
 
 export interface CreateCalendarEventInput {
@@ -494,4 +495,319 @@ export interface ExportResult {
   jsonPath: string;
   markdownPath: string;
   exportedAt: string;
+}
+
+export type ExpenseCategory =
+  | "food"
+  | "delivery"
+  | "cafe"
+  | "groceries"
+  | "housing_utilities"
+  | "transportation"
+  | "ott_subscriptions"
+  | "shopping"
+  | "health"
+  | "leisure"
+  | "education"
+  | "travel"
+  | "insurance_finance_tax"
+  | "gifts_dues"
+  | "refund_income"
+  | "transfer_settlement"
+  | "other"
+  | "unconfirmed";
+
+export type ExpenseEventKind =
+  | "purchase"
+  | "refund"
+  | "settlement_received"
+  | "settlement_sent"
+  | "fee"
+  | "internal_transfer"
+  | "card_payment"
+  | "wallet_topup"
+  | "external_transfer"
+  | "unknown_p2p"
+  | "manual_recurring";
+
+export type EditableExpenseEventKind = Exclude<
+  ExpenseEventKind,
+  "external_transfer" | "unknown_p2p" | "manual_recurring"
+>;
+
+export type ExpenseReportStatus = "confirmed" | "provisional" | "incomplete";
+export type ExpenseSourceKind = "card" | "account" | "wallet";
+export type ExpenseAdapter =
+  | "kb_card_usage_v1"
+  | "kb_account_history_v1"
+  | "kakaopay_money_v1";
+
+export interface ExpenseSourceStatus {
+  id: string;
+  adapter: ExpenseAdapter;
+  sourceKind: ExpenseSourceKind;
+  requiredForCompleteReport: boolean;
+  isActive: boolean;
+  coverageStart: string | null;
+  coverageEnd: string | null;
+  version: number;
+}
+
+export interface UpdateExpenseSourceStatusInput {
+  requiredForCompleteReport: boolean;
+  isActive: boolean;
+  expectedVersion: number;
+}
+
+export interface ExpenseCurrencyTotals {
+  currency: string;
+  netPersonalSpendMinor: number;
+  grossPurchaseMinor: number;
+  refundsMinor: number;
+  settlementReceivedMinor: number;
+  settlementSentMinor: number;
+  feesMinor: number;
+  unconfirmedOutflowMinor: number;
+  recurringExpectedMinor: number;
+  recurringPaidMinor: number;
+  recurringRemainingMinor: number;
+}
+
+export interface ExpenseCategoryTotal {
+  category: ExpenseCategory;
+  currency: string;
+  amountMinor: number;
+}
+
+export interface ExpenseDailyTotal {
+  date: string;
+  currency: string;
+  amountMinor: number;
+}
+
+export interface ExpenseMonthSummary {
+  month: string;
+  monthStart: string;
+  monthEnd: string;
+  status: ExpenseReportStatus;
+  currencies: ExpenseCurrencyTotals[];
+  categories: ExpenseCategoryTotal[];
+  daily: ExpenseDailyTotal[];
+  recurringCandidates: number;
+  completeness: {
+    activeSourceCount: number;
+    coveredSourceCount: number;
+    rejectedRowCount: number;
+    pendingReviewCount: number;
+  };
+}
+
+export interface ExpenseTransaction {
+  id: string;
+  kind: ExpenseEventKind;
+  category: ExpenseCategory;
+  status: "confirmed" | "unconfirmed" | "excluded";
+  amountMinor: number;
+  currency: string;
+  occurredAt: string;
+  postedDate: string;
+  sourceKind: ExpenseSourceKind | null;
+  merchant: string | null;
+  counterparty: string | null;
+  memo: string | null;
+  paymentMethodFingerprint: string | null;
+  exclusionReason: string | null;
+  duplicateOfEventId: string | null;
+  personalAmountMinor: number | null;
+  relatedEventId: string | null;
+  isProvisional: boolean;
+  pendingReviewId: string | null;
+  version: number;
+}
+
+export interface ExpenseTransactionPage {
+  items: ExpenseTransaction[];
+  nextCursor: string | null;
+}
+
+export interface ListExpenseTransactionsInput {
+  month: string;
+  cursor?: string;
+  limit?: number;
+}
+
+export interface ExpenseReview {
+  id: string;
+  reason: "unknown_p2p" | "ambiguous_mirror" | "recurring_match_candidate" | "recurring_registration_candidate" | "category_confirmation" | "import_rejected";
+  status: "pending" | "resolved";
+  transaction: ExpenseTransaction;
+  recurringExpenseId: string | null;
+  suggestedKind: ExpenseEventKind | null;
+  suggestedCategory: ExpenseCategory | null;
+  suggestedDuplicateOfEventId: string | null;
+  createdAt: string;
+  resolvedAt: string | null;
+  version: number;
+}
+
+export interface ExpenseReviewPage {
+  items: ExpenseReview[];
+  nextCursor: string | null;
+}
+
+export interface ListExpenseReviewsInput {
+  month?: string;
+  status?: "pending" | "resolved";
+  cursor?: string;
+  limit?: number;
+}
+
+export interface ResolveExpenseReviewInput {
+  kind: EditableExpenseEventKind;
+  category: ExpenseCategory;
+  expectedVersion: number;
+  duplicateOfEventId: string | null;
+  relatedEventId?: string | null;
+  personalAmountMinor?: number | null;
+  createRule: boolean;
+}
+
+export interface OverrideExpenseTransactionInput extends ResolveExpenseReviewInput {
+  clearPersonalAmount: boolean;
+  clearRelatedEvent: boolean;
+}
+
+export type RecurringAmountKind = "fixed" | "estimate" | "limit";
+export type RecurringDueRule = "specific_day" | "first_day" | "last_day";
+export type RecurringExpenseStatus = "active" | "paused" | "ended";
+export type RecurringOccurrenceStatus = "scheduled" | "due_today" | "due_soon" | "overdue" | "paid" | "matched";
+
+export interface RecurringExpenseItem {
+  id: string;
+  name: string;
+  category: ExpenseCategory;
+  vendor: string | null;
+  amountMinor: number;
+  currency: string;
+  paymentMethodFingerprint: string | null;
+  startDate: string;
+  endDate: string | null;
+  memo: string | null;
+  reminderDays: number;
+  amountKind: RecurringAmountKind;
+  intervalMonths: 1 | 2 | 3 | 6 | 12;
+  dueRule: RecurringDueRule;
+  dueDay: number | null;
+  status: RecurringExpenseStatus;
+  autoMatchEnabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+  version: number;
+}
+
+export interface RecurringExpenseOccurrence {
+  occurrenceKey: string;
+  recurringExpenseId: string;
+  itemVersion: number;
+  name: string;
+  category: ExpenseCategory;
+  vendor: string | null;
+  expectedAmountMinor: number;
+  actualAmountMinor: number | null;
+  currency: string;
+  dueDate: string;
+  status: RecurringOccurrenceStatus;
+  amountChanged: boolean;
+  reminderDays: number;
+  actualEventId: string | null;
+  version: number;
+}
+
+export interface CreateRecurringExpenseInput {
+  name: string;
+  category: ExpenseCategory;
+  vendor: string | null;
+  amountMinor: number;
+  currency: string;
+  paymentMethodFingerprint: string | null;
+  startDate: string;
+  endDate: string | null;
+  memo: string | null;
+  reminderDays: number;
+  amountKind: RecurringAmountKind;
+  intervalMonths: 1 | 2 | 3 | 6 | 12;
+  dueRule: RecurringDueRule;
+  dueDay: number | null;
+  status: RecurringExpenseStatus;
+}
+
+export interface UpdateRecurringExpenseInput extends CreateRecurringExpenseInput {
+  expectedVersion: number;
+  effectiveFromMonth: string;
+  autoMatchEnabled: boolean;
+}
+
+export interface ExpenseImportPreviewRow {
+  rowNumber: number;
+  occurredAt: string;
+  amountMinor: number;
+  currency: string;
+  displayName: string;
+  kind: string;
+  needsReview: boolean;
+  excluded: boolean;
+}
+
+export interface ExpenseImportPreview {
+  status: "ready" | "password_required";
+  sessionId: string | null;
+  adapter: ExpenseAdapter | null;
+  sourceLabel: string | null;
+  periodStart: string | null;
+  periodEnd: string | null;
+  passwordRequired: boolean;
+  counts: {
+    parsed: number;
+    new: number;
+    duplicate: number;
+    settlementCandidate: number;
+    excluded: number;
+    unconfirmed: number;
+    rejected: number;
+  };
+  rows: ExpenseImportPreviewRow[];
+}
+
+export interface PreviewExpenseImportInput {
+  path: string;
+  password?: string;
+}
+
+export interface ExpenseImportCommitResult {
+  batchId: string;
+  sourceId: string;
+  rowCount: number;
+  newCount: number;
+  duplicateCount: number;
+  rejectedCount: number;
+  excludedCount: number;
+  reviewCount: number;
+  idempotentReplay: boolean;
+}
+
+export interface ExpenseReportResult {
+  reportId: string;
+  month: string;
+  title: string;
+  summary: string;
+  observations: Array<{ factIds: string[]; text: string }>;
+  alerts: Array<{ factIds: string[]; text: string }>;
+  nextMonthChecks: string[];
+  facts: Array<{
+    factId: string;
+    metric: string;
+    currency: string;
+    amountMinor: number;
+  }>;
+  helpful: boolean | null;
 }

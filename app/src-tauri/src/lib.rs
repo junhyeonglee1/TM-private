@@ -3,6 +3,10 @@ compile_error!("TM release builds require the `custom-protocol` feature");
 
 mod cloud_client;
 mod commands;
+mod expense_commands;
+mod expense_crypto;
+mod expense_decryptor;
+mod expense_import;
 
 use std::{
     sync::atomic::{AtomicBool, Ordering},
@@ -18,6 +22,8 @@ use cloud_client::{CloudClient, DataMode};
 pub(crate) struct AppState {
     core: TmCore,
     cloud: CloudClient,
+    expense_crypto: Result<expense_crypto::ExpenseCrypto, String>,
+    expense_imports: expense_import::ExpenseImportSessions,
     shutdown_backed_up: AtomicBool,
 }
 
@@ -77,6 +83,21 @@ async fn invoke_cloud_assistant_feature(
 }
 
 #[tauri::command]
+async fn invoke_cloud_expense_feature(
+    command: String,
+    args: Option<Value>,
+    state: tauri::State<'_, AppState>,
+) -> Result<Value, String> {
+    let cloud = state.cloud.clone();
+    cloud
+        .expense_feature(
+            &command,
+            args.unwrap_or_else(|| Value::Object(serde_json::Map::new())),
+        )
+        .await
+}
+
+#[tauri::command]
 async fn get_cost_status(state: tauri::State<'_, AppState>) -> Result<Value, String> {
     let cloud = state.cloud.clone();
     cloud.cost_status().await
@@ -111,6 +132,14 @@ pub fn run() {
                 home
             };
             let core = TmCore::open(core_home)?;
+            let expense_crypto = if data_mode == DataMode::Local {
+                expense_crypto::ExpenseCrypto::load_or_create(&core).and_then(|crypto| {
+                    crypto.ensure_probe(&core)?;
+                    Ok(crypto)
+                })
+            } else {
+                Err("Cloud expense encryption is managed by the TM server".to_owned())
+            };
             if data_mode == DataMode::Local {
                 core.create_startup_backup()?;
                 let daily_core = core.clone();
@@ -126,6 +155,8 @@ pub fn run() {
             app.manage(AppState {
                 core,
                 cloud,
+                expense_crypto,
+                expense_imports: expense_import::ExpenseImportSessions::default(),
                 shutdown_backed_up: AtomicBool::new(false),
             });
             Ok(())
@@ -136,7 +167,27 @@ pub fn run() {
             invoke_cloud_command,
             invoke_cloud_device_admin,
             invoke_cloud_assistant_feature,
+            invoke_cloud_expense_feature,
             get_cost_status,
+            expense_commands::preview_expense_import,
+            expense_commands::commit_expense_import,
+            expense_commands::get_expense_summary,
+            expense_commands::list_expense_sources,
+            expense_commands::update_expense_source,
+            expense_commands::list_expense_transactions,
+            expense_commands::override_expense_transaction,
+            expense_commands::list_expense_reviews,
+            expense_commands::resolve_expense_review,
+            expense_commands::list_recurring_expenses,
+            expense_commands::list_recurring_expense_occurrences,
+            expense_commands::create_recurring_expense,
+            expense_commands::update_recurring_expense,
+            expense_commands::delete_recurring_expense,
+            expense_commands::confirm_recurring_expense_paid,
+            expense_commands::match_recurring_expense_occurrence,
+            expense_commands::generate_expense_report,
+            expense_commands::latest_expense_report,
+            expense_commands::rate_expense_report,
             commands::get_app_snapshot,
             commands::get_calendar_month,
             commands::create_calendar_event,

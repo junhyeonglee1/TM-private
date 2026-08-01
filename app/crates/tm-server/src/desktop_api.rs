@@ -5,11 +5,14 @@ use axum::{
     extract::{Path, State, rejection::JsonRejection},
     http::{HeaderMap, HeaderName, StatusCode},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tm_core::{DesktopCommand, Error as CoreError, execute_desktop_command};
+use tm_core::{
+    CalendarEvent, CalendarMonth, CalendarOccurrence, DesktopCommand, Error as CoreError,
+    execute_desktop_command,
+};
 
-use super::{ApiEnvelope, ApiError, AppState, RequestId};
+use super::{ApiEnvelope, ApiError, AppState, RequestId, expense_api};
 
 const CONFIRM_COMMAND_HEADER: HeaderName = HeaderName::from_static("x-tm-confirm-desktop-command");
 const MAX_DESKTOP_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
@@ -25,6 +28,17 @@ fn empty_args() -> Value {
     Value::Object(serde_json::Map::new())
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CalendarMonthDto {
+    month: String,
+    month_start: chrono::NaiveDate,
+    month_end: chrono::NaiveDate,
+    events: Vec<CalendarEvent>,
+    occurrences: Vec<CalendarOccurrence>,
+    expense_occurrences: Vec<expense_api::RecurringExpenseOccurrenceDto>,
+}
+
 pub(super) async fn invoke(
     State(state): State<AppState>,
     Extension(request_id): Extension<RequestId>,
@@ -38,6 +52,23 @@ pub(super) async fn invoke(
         message: "the requested desktop command is not available".to_owned(),
         request_id: request_id.0.clone(),
     })?;
+    if matches!(
+        command,
+        DesktopCommand::GetExpenseSummary
+            | DesktopCommand::ListExpenseTransactions
+            | DesktopCommand::ListExpenseReviews
+            | DesktopCommand::ListRecurringExpenses
+            | DesktopCommand::GetRecurringExpenseOccurrences
+            | DesktopCommand::PreviewExpenseImport
+            | DesktopCommand::ExecuteExpenseMutation
+    ) {
+        return Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            code: "EXPENSE_REST_API_REQUIRED",
+            message: "expense operations must use the dedicated expense API".to_owned(),
+            request_id: request_id.0,
+        });
+    }
     if !command.is_read_only() {
         let confirmation = headers
             .get(&CONFIRM_COMMAND_HEADER)
@@ -69,16 +100,46 @@ pub(super) async fn invoke(
 
     let error_request_id = request_id.0.clone();
     let args = body.0.args;
-    let result =
-        tokio::task::spawn_blocking(move || execute_desktop_command(&state.core, command, args))
-            .await
-            .map_err(|_| ApiError {
-                status: StatusCode::SERVICE_UNAVAILABLE,
-                code: "DESKTOP_COMMAND_WORKER_FAILED",
-                message: "desktop command worker failed".to_owned(),
-                request_id: error_request_id.clone(),
-            })?
-            .map_err(|error| map_core_error(error, error_request_id))?;
+    let core = state.core.clone();
+    let result = tokio::task::spawn_blocking(move || execute_desktop_command(&core, command, args))
+        .await
+        .map_err(|_| ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "DESKTOP_COMMAND_WORKER_FAILED",
+            message: "desktop command worker failed".to_owned(),
+            request_id: error_request_id.clone(),
+        })?
+        .map_err(|error| map_core_error(error, error_request_id))?;
+    let result = if command == DesktopCommand::GetCalendarMonth {
+        let month = serde_json::from_value::<CalendarMonth>(result).map_err(|_| ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "CALENDAR_RESPONSE_INVALID",
+            message: "calendar response could not be decoded".to_owned(),
+            request_id: request_id.0.clone(),
+        })?;
+        let crypto = expense_api::expense_crypto(&state, &request_id)?;
+        let expense_occurrences = month
+            .expense_occurrences
+            .into_iter()
+            .map(|item| expense_api::decrypt_occurrence(item, crypto, &request_id))
+            .collect::<Result<Vec<_>, _>>()?;
+        serde_json::to_value(CalendarMonthDto {
+            month: month.month,
+            month_start: month.month_start,
+            month_end: month.month_end,
+            events: month.events,
+            occurrences: month.occurrences,
+            expense_occurrences,
+        })
+        .map_err(|_| ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "CALENDAR_RESPONSE_INVALID",
+            message: "calendar response could not be encoded".to_owned(),
+            request_id: request_id.0.clone(),
+        })?
+    } else {
+        result
+    };
     if serde_json::to_vec(&result)
         .map_err(|_| ApiError {
             status: StatusCode::INTERNAL_SERVER_ERROR,

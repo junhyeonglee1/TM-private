@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import type { ReactNode } from "react";
 
 import type {
   CreateTaskInput,
@@ -53,6 +54,7 @@ interface TodayPageProps {
   stockScreen: LatestStockScreen | null;
   stockScreenError: string | null;
   stockScreenLoading: boolean;
+  expenseDueCards?: ReactNode;
 }
 
 const friendlyDate = (date: string): string =>
@@ -78,6 +80,7 @@ export function TodayPage({
   stockScreen,
   stockScreenError,
   stockScreenLoading,
+  expenseDueCards,
 }: TodayPageProps) {
   const total = view.planned.length + view.inProgress.length + view.completed.length;
   const progress = total ? Math.round((view.completed.length / total) * 100) : 0;
@@ -96,6 +99,8 @@ export function TodayPage({
           <div><strong>{view.completed.length}</strong><span> / {total} 완료</span></div>
         </div>
       </header>
+
+      {expenseDueCards}
 
       <section className="panel task-report" aria-labelledby="task-report-heading" aria-busy={reportLoading}>
         <div className="panel__header task-report__header">

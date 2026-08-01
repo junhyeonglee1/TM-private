@@ -23,6 +23,23 @@ const state = {
   calendarMonth: null,
   selectedCalendarDate: null,
   editingCalendarEvent: null,
+  expenseMonth: null,
+  expenseSummary: null,
+  expenseReport: null,
+  expenseReportRetryNeeded: false,
+  expenseSources: [],
+  expenseTransactions: [],
+  recurringMatchTransactions: [],
+  expenseTransactionsNextCursor: null,
+  expenseTransactionsTotal: 0,
+  expenseReviews: [],
+  expenseReviewsNextCursor: null,
+  recurringExpenses: [],
+  recurringExpenseOccurrences: [],
+  editingRecurringExpense: null,
+  recurringRegistrationReview: null,
+  recurringRegistrationCreated: null,
+  selectedRecurringExpenseId: null,
   stockWatchlist: [],
   stockCatalog: null,
   selectedStockCandidate: null,
@@ -36,6 +53,7 @@ const state = {
   stockScreenLoadGeneration: 0,
   stockScreenResultGeneration: 0
 };
+const pendingExpenseMutationKeys = new Map();
 const costRefreshIntervalMs = 5 * 60 * 1000;
 const defaultApiHardLimitMicrousd = 20_000_000;
 const defaultCloudHardLimitMicrousd = 30_000_000;
@@ -238,6 +256,7 @@ function showApp(device) {
   startCostRefresh();
   void loadTaskReport();
   void loadStockScreen();
+  void loadExpenseDueBrief();
 }
 
 async function boot() {
@@ -321,6 +340,7 @@ function selectTab(tab) {
   document.querySelectorAll(".tab-panel").forEach((panel) => panel.classList.add("hidden"));
   byId(`tab-${tab}`).classList.remove("hidden");
   if (tab === "calendar") void loadCalendar();
+  if (tab === "expenses") void loadExpenses();
   if (tab === "stocks") {
     void loadStockCatalog();
     void loadStockWatchlist();
@@ -1193,6 +1213,1266 @@ function appendAssistant(message, role) {
   log.scrollTop = log.scrollHeight;
 }
 
+const expenseCategoryLabels = {
+  food: "식비",
+  delivery: "배달",
+  cafe: "카페",
+  groceries: "장보기",
+  housing_utilities: "주거/공과금",
+  transportation: "교통",
+  ott_subscriptions: "OTT/구독",
+  shopping: "쇼핑",
+  health: "건강",
+  leisure: "여가",
+  education: "교육",
+  travel: "여행",
+  insurance_finance_tax: "보험/금융/세금",
+  gifts_dues: "선물/회비",
+  refund_income: "환불/수입",
+  transfer_settlement: "이체/정산",
+  other: "기타",
+  unconfirmed: "미확인"
+};
+
+const expenseKindLabels = {
+  purchase: "구매",
+  refund: "환불",
+  card_payment: "카드대금",
+  wallet_topup: "지갑충전",
+  internal_transfer: "내 계좌이동",
+  settlement_received: "정산받음",
+  settlement_sent: "정산보냄",
+  fee: "수수료",
+  external_transfer: "외부 송금",
+  unknown_p2p: "미확인 송금",
+  manual_recurring: "수동 정기지출"
+};
+
+const editableExpenseKindLabels = Object.fromEntries(
+  Object.entries(expenseKindLabels).filter(([value]) =>
+    !["external_transfer", "unknown_p2p", "manual_recurring"].includes(value))
+);
+
+const expenseSourceLabels = {
+  kb_card_usage_v1: "KB 신용카드",
+  kb_account_history_v1: "KB 계좌·체크카드",
+  kakaopay_money_v1: "카카오페이머니"
+};
+
+const expenseReviewReasonLabels = {
+  unknown_p2p: "송금 목적 확인",
+  ambiguous_mirror: "중복·이체 여부 확인",
+  recurring_match_candidate: "정기지출 거래 연결 후보",
+  recurring_registration_candidate: "정기지출 등록 후보",
+  category_confirmation: "구매 카테고리 확인",
+  import_rejected: "가져오기 거부 행 확인"
+};
+
+const recurringOccurrenceLabels = {
+  scheduled: "예정",
+  due_today: "오늘 납부",
+  due_soon: "7일 이내",
+  overdue: "기한 경과",
+  paid: "납부 완료",
+  matched: "거래 연결"
+};
+
+function formatExpenseMoney(amountMinor, currency) {
+  const zeroDecimal = currency === "KRW" || currency === "JPY";
+  const amount = zeroDecimal ? Number(amountMinor) : Number(amountMinor) / 100;
+  try {
+    return new Intl.NumberFormat("ko-KR", {
+      style: "currency",
+      currency,
+      maximumFractionDigits: zeroDecimal ? 0 : 2
+    }).format(amount);
+  } catch {
+    return `${amount.toLocaleString("ko-KR")} ${currency}`;
+  }
+}
+
+const expenseFactMetricLabels = {
+  net_personal_spend: "순 개인지출",
+  gross_purchase: "총구매",
+  refunds: "환불",
+  settlement_received: "정산받음",
+  settlement_sent: "정산보냄",
+  fees: "수수료",
+  unconfirmed_outflow: "미확인 외부 유출",
+  recurring_expected: "정기지출 예정",
+  recurring_paid: "정기지출 납부",
+  recurring_remaining: "정기지출 잔여"
+};
+
+function expenseFactMetricLabel(metric) {
+  const delta = metric.startsWith("delta.");
+  const normalized = delta ? metric.slice("delta.".length) : metric;
+  const label = normalized.startsWith("category.")
+    ? (expenseCategoryLabels[normalized.slice("category.".length)] || "카테고리")
+    : (expenseFactMetricLabels[normalized] || "집계값");
+  return delta ? `전월 대비 ${label}` : label;
+}
+
+function expenseFactCitations(report, factIds) {
+  const facts = new Map((report.facts || []).map((fact) => [fact.factId, fact]));
+  return factIds.flatMap((factId) => {
+    const fact = facts.get(factId);
+    return fact
+      ? [`${expenseFactMetricLabel(fact.metric)} ${formatExpenseMoney(fact.amountMinor, fact.currency)}`]
+      : [];
+  });
+}
+
+function expenseMonthLabel(month) {
+  const [year, monthNumber] = month.split("-").map(Number);
+  return `${year}년 ${monthNumber}월`;
+}
+
+function shiftSeoulDate(date, days) {
+  const [year, month, day] = date.split("-").map(Number);
+  const value = new Date(Date.UTC(year, month - 1, day));
+  value.setUTCDate(value.getUTCDate() + days);
+  return value.toISOString().slice(0, 10);
+}
+
+async function loadExpenseDueBrief() {
+  const root = byId("expense-due-brief-content");
+  const today = todaySeoul();
+  const month = today.slice(0, 7);
+  try {
+    const months = Array.from({ length: 14 }, (_, index) => shiftMonth(month, index - 12));
+    const groups = await Promise.allSettled(months.map((value) => api(expenseQuery("/api/v1/expenses/recurring/occurrences", { month: value }))));
+    const all = groups.flatMap((result) => result.status === "fulfilled" ? result.value : []);
+    const partialHistory = groups.some((result) => result.status === "rejected");
+    const cutoff = shiftSeoulDate(today, 7);
+    const unpaid = all.filter((item) => !["paid", "matched"].includes(item.status));
+    const buckets = [
+      ["오늘 납부", unpaid.filter((item) => item.dueDate === today)],
+      ["7일 이내", unpaid.filter((item) => item.dueDate > today && item.dueDate <= cutoff)],
+      ["기한 경과", unpaid.filter((item) => item.dueDate < today)],
+      ["금액 변동", all.filter((item) => item.amountChanged && item.dueDate.startsWith(`${month}-`))]
+    ];
+    clear(root);
+    root.append(text("p", `지난 12개월 미납과 다음 달까지 확인합니다.${partialHistory ? " 일부 월은 불러오지 못했습니다." : ""}`, "muted"));
+    buckets.forEach(([label, items]) => {
+      const card = text("button", "", "expense-due-card"); card.type = "button";
+      card.append(text("span", label), text("strong", String(items.length)));
+      if (items[0]) card.append(text("small", `${items[0].name} · ${items[0].dueDate}`));
+      card.addEventListener("click", () => {
+        state.selectedRecurringExpenseId = items[0]?.recurringExpenseId || null;
+        selectTab("expenses");
+      });
+      root.append(card);
+    });
+  } catch (error) {
+    clear(root);
+    root.append(text("p", `납부 일정을 불러오지 못했습니다: ${error.message}`, "empty"));
+  }
+}
+
+function expenseQuery(path, params) {
+  const query = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== null && value !== undefined && value !== "") query.set(key, String(value));
+  });
+  return `${path}?${query.toString()}`;
+}
+
+async function loadExpenses(month = state.expenseMonth || todaySeoul().slice(0, 7)) {
+  if (state.expenseMonth !== month) state.expenseReportRetryNeeded = false;
+  state.expenseMonth = month;
+  byId("expense-month-label").textContent = "불러오는 중…";
+  loadingList(byId("expense-transactions-list"));
+  loadingList(byId("expense-reviews-list"));
+  loadingList(byId("expense-recurring-list"));
+  loadingList(byId("expense-occurrences-list"));
+  state.expenseReviewsNextCursor = null;
+  show("expense-reviews-more", false);
+  try {
+    const transactionMonths = [shiftMonth(month, -1), month, shiftMonth(month, 1)];
+    const [summary, sources, transactionPage, recurringTransactionPages, reviewPage, recurring, occurrences, report] = await Promise.all([
+      api(expenseQuery("/api/v1/expenses/summary", { month })),
+      api("/api/v1/expenses/sources"),
+      api(expenseQuery("/api/v1/expenses/transactions", { month, limit: 100 })),
+      Promise.all(transactionMonths.map((transactionMonth) =>
+        api(expenseQuery("/api/v1/expenses/transactions", { month: transactionMonth, limit: 100 })))),
+      api(expenseQuery("/api/v1/expenses/reviews", { month, status: "pending", limit: 100 })),
+      api("/api/v1/expenses/recurring"),
+      api(expenseQuery("/api/v1/expenses/recurring/occurrences", { month })),
+      api(expenseQuery("/api/v1/expenses/reports/latest", { month })).catch(() => null)
+    ]);
+    state.expenseSummary = summary;
+    state.expenseSources = sources;
+    state.expenseReport = report;
+    state.expenseTransactions = transactionPage.items;
+    state.recurringMatchTransactions = [...new Map(recurringTransactionPages
+      .flatMap((page) => page.items)
+      .map((transaction) => [transaction.id, transaction])).values()];
+    state.expenseTransactionsNextCursor = transactionPage.nextCursor;
+    state.expenseReviews = reviewPage.items;
+    state.expenseReviewsNextCursor = reviewPage.nextCursor;
+    state.recurringExpenses = recurring;
+    state.recurringExpenseOccurrences = occurrences;
+    renderExpenses();
+    if (state.selectedRecurringExpenseId) {
+      const selected = state.recurringExpenses.find((item) => item.id === state.selectedRecurringExpenseId);
+      state.selectedRecurringExpenseId = null;
+      selectExpenseView("recurring");
+      if (selected) openRecurringExpenseForm(selected);
+    }
+  } catch (error) {
+    byId("expense-month-label").textContent = expenseMonthLabel(month);
+    clear(byId("expense-summary"));
+    byId("expense-summary").append(text("p", `지출을 불러오지 못했습니다: ${error.message}`, "empty"));
+    ["expense-transactions-list", "expense-reviews-list", "expense-recurring-list", "expense-occurrences-list"]
+      .forEach((id) => listError(byId(id), error));
+  }
+}
+
+function renderExpenses() {
+  byId("expense-month-label").textContent = expenseMonthLabel(state.expenseMonth);
+  renderExpenseSummary();
+  renderExpenseTransactions();
+  renderExpenseReviews();
+  renderRecurringExpenses();
+}
+
+function renderExpenseSummary() {
+  const root = byId("expense-summary");
+  clear(root);
+  const summary = state.expenseSummary;
+  if (!summary) return root.append(text("p", "월간 요약이 없습니다.", "empty"));
+  const heading = text("div", "", "expense-summary-heading");
+  const title = text("div");
+  title.append(text("h2", "월간 요약"));
+  title.append(text("span", `${summary.status === "confirmed" ? "확정" : summary.status === "provisional" ? "잠정" : "불완전"} · 출처 ${summary.completeness.coveredSourceCount}/${summary.completeness.activeSourceCount}`));
+  heading.append(title, text("strong", `미확인 ${summary.completeness.pendingReviewCount}건`, `expense-report-status ${summary.status}`));
+  root.append(heading);
+  const totals = text("div", "", "expense-currency-list");
+  summary.currencies.forEach((currency) => {
+    const card = text("article", "", "expense-currency-card");
+    card.append(text("span", currency.currency));
+    card.append(text("strong", `순 개인지출 ${formatExpenseMoney(currency.netPersonalSpendMinor, currency.currency)}`));
+    const metrics = text("div", "", "expense-mini-metrics");
+    metrics.append(
+      text("span", `총구매 ${formatExpenseMoney(currency.grossPurchaseMinor, currency.currency)}`),
+      text("span", `환불 ${formatExpenseMoney(currency.refundsMinor, currency.currency)}`),
+      text("span", `고정비 잔여 ${formatExpenseMoney(currency.recurringRemainingMinor, currency.currency)}`),
+      text("span", `미확인 유출 ${formatExpenseMoney(currency.unconfirmedOutflowMinor, currency.currency)}`)
+    );
+    card.append(metrics);
+    totals.append(card);
+  });
+  if (!summary.currencies.length) totals.append(text("p", "이 달에 집계된 지출이 없습니다.", "empty"));
+  root.append(totals);
+  const dailyList = text("div", "", "expense-daily-list");
+  const dailyCurrencies = [...new Set([
+    ...summary.currencies.map((item) => item.currency),
+    ...summary.daily.map((item) => item.currency)
+  ])].sort();
+  dailyCurrencies.forEach((currency) => {
+    const series = text("article", "", "expense-daily-series");
+    const seriesHeading = text("div", "", "expense-daily-heading");
+    seriesHeading.append(text("strong", `${currency} 일별 순지출`), text("small", "환율 합산 없음"));
+    series.append(seriesHeading);
+    const byDate = new Map(summary.daily.filter((item) => item.currency === currency).map((item) => [item.date, item.amountMinor]));
+    const daysInMonth = Number(summary.monthEnd.slice(8, 10));
+    const points = Array.from({ length: daysInMonth }, (_, index) => {
+      const day = index + 1;
+      const date = `${summary.month}-${String(day).padStart(2, "0")}`;
+      return { day, date, amountMinor: byDate.get(date) || 0 };
+    });
+    const maximum = Math.max(1, ...points.map((point) => Math.abs(point.amountMinor)));
+    const chart = text("div", "", "expense-daily-chart");
+    chart.setAttribute("role", "img");
+    chart.setAttribute("aria-label", `${currency} 일별 순지출 막대 차트`);
+    points.forEach((point) => {
+      const bar = text("span", "", point.amountMinor < 0 ? "expense-daily-bar negative" : "expense-daily-bar");
+      bar.setAttribute("aria-label", `${point.date} ${formatExpenseMoney(point.amountMinor, currency)}`);
+      bar.title = `${point.date} · ${formatExpenseMoney(point.amountMinor, currency)}`;
+      const fill = text("i");
+      fill.style.height = `${point.amountMinor === 0 ? 1 : Math.max(5, Math.abs(point.amountMinor) / maximum * 100)}%`;
+      bar.append(fill, text("small", point.day === 1 || point.day === daysInMonth || point.day % 5 === 0 ? point.day : ""));
+      chart.append(bar);
+    });
+    series.append(chart);
+    dailyList.append(series);
+  });
+  root.append(dailyList);
+  const categories = text("div", "", "expense-category-chips");
+  summary.categories.slice(0, 8).forEach((item) => categories.append(text("span", `${expenseCategoryLabels[item.category] || item.category} ${formatExpenseMoney(item.amountMinor, item.currency)}`)));
+  root.append(categories);
+  if (summary.recurringCandidates) root.append(text("p", `반복 거래 ${summary.recurringCandidates}건을 정기지출 후보로 검토할 수 있습니다.`, "expense-candidate-note"));
+  renderExpenseSources(root);
+  renderMobileExpenseReport(root);
+}
+
+function renderExpenseSources(root) {
+  const panel = text("section", "", "expense-sources-card");
+  panel.append(text("h3", "데이터 출처"), text("p", "활성 출처와 확정 리포트에 꼭 필요한 출처를 별도로 관리합니다.", "muted"));
+  const list = text("div", "", "expense-source-list");
+  state.expenseSources.forEach((source) => {
+    const form = text("form", "", "expense-source-item");
+    const name = text("div");
+    name.append(
+      text("strong", expenseSourceLabels[source.adapter] || source.adapter),
+      text("small", source.coverageStart && source.coverageEnd ? `${source.coverageStart}–${source.coverageEnd}` : "기간 정보 없음")
+    );
+    const active = document.createElement("input"); active.type = "checkbox"; active.checked = source.isActive;
+    const activeLabel = text("label", "", "expense-checkbox"); activeLabel.append(active, document.createTextNode(" 활성"));
+    const required = document.createElement("input"); required.type = "checkbox"; required.checked = source.requiredForCompleteReport;
+    const requiredLabel = text("label", "", "expense-checkbox"); requiredLabel.append(required, document.createTextNode(" 확정 리포트 필수"));
+    const save = text("button", "설정 저장", "secondary"); save.type = "submit";
+    form.append(name, activeLabel, requiredLabel, save);
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const body = { requiredForCompleteReport: required.checked, isActive: active.checked };
+      setBusy(save, true, "설정 저장");
+      try {
+        const updated = await expenseMutation(`/api/v1/expenses/sources/${encodeURIComponent(source.id)}`, {
+          method: "PATCH",
+          operation: "expense-source-update",
+          version: source.version,
+          resource: source.id,
+          body
+        });
+        state.expenseSources = state.expenseSources.map((item) => item.id === updated.id ? updated : item);
+        toast("지출 출처 설정을 변경했습니다.");
+        await loadExpenses();
+      } catch (error) {
+        toast(`${error.message} 최신 출처 상태를 다시 불러와 주세요.`);
+      } finally {
+        setBusy(save, false, "설정 저장");
+      }
+    });
+    list.append(form);
+  });
+  if (!state.expenseSources.length) list.append(text("p", "가져온 지출 출처가 없습니다.", "empty"));
+  panel.append(list);
+  root.append(panel);
+}
+
+function renderMobileExpenseReport(root) {
+  const report = state.expenseReport;
+  const panel = text("section", "", "expense-ai-card");
+  const heading = text("div", "", "expense-ai-heading");
+  const title = text("div");
+  title.append(text("strong", "AI 지출 해설"), text("small", "수동 호출만 · 업체·상대방·개별 거래 미전송"));
+  const generate = text("button", state.expenseReportRetryNeeded ? "같은 요청 다시 확인" : report ? "다시 생성" : "AI 해설 생성", "primary"); generate.type = "button";
+  generate.addEventListener("click", () => void generateMobileExpenseReport(generate, false));
+  heading.append(title, generate);
+  if (state.expenseReportRetryNeeded) {
+    const newRequest = text("button", "새 AI 요청으로 다시 시도 (새 횟수·최대 $0.05가 발생할 수 있음)", "secondary expense-ai-new-request");
+    newRequest.type = "button";
+    newRequest.addEventListener("click", () => void generateMobileExpenseReport(newRequest, true));
+    heading.append(newRequest);
+  }
+  panel.append(heading, text("p", "요청당 최대 $0.05 예약 · 서울 기준 월 8회 · 지출 AI 월 $1 hard stop", "expense-ai-limit"));
+  if (report) {
+    const result = text("div", "", "expense-ai-result");
+    result.append(text("h3", report.title), text("p", report.summary));
+    [...report.observations, ...report.alerts].forEach((item) => {
+      const observation = text("article");
+      const citations = expenseFactCitations(report, item.factIds);
+      observation.append(text("small", citations.length ? citations.join(" · ") : "확정 집계 근거"), text("strong", item.text));
+      result.append(observation);
+    });
+    if (report.nextMonthChecks.length) {
+      result.append(text("h4", "다음 달 확인"));
+      const list = document.createElement("ul");
+      report.nextMonthChecks.forEach((item) => list.append(text("li", item)));
+      result.append(list);
+    }
+    const feedback = text("div", "", "expense-ai-feedback");
+    feedback.append(text("span", report.helpful === null ? "이 해설이 도움됐나요?" : "평가가 저장되었습니다."));
+    [[true, "도움됨"], [false, "도움 안 됨"]].forEach(([helpful, label]) => {
+      const button = text("button", label, "secondary"); button.type = "button";
+      button.setAttribute("aria-pressed", String(report.helpful === helpful));
+      button.addEventListener("click", () => void rateMobileExpenseReport(Boolean(helpful), button));
+      feedback.append(button);
+    });
+    result.append(feedback);
+    panel.append(result);
+  } else {
+    panel.append(text("p", "기본 집계는 AI 호출 없이 항상 표시됩니다.", "empty"));
+  }
+  root.append(panel);
+}
+
+async function generateMobileExpenseReport(button, newRequest) {
+  const restingLabel = newRequest
+    ? "새 AI 요청으로 다시 시도 (새 횟수·최대 $0.05가 발생할 수 있음)"
+    : state.expenseReportRetryNeeded ? "같은 요청 다시 확인" : "AI 해설 생성";
+  setBusy(button, true, restingLabel);
+  if (newRequest) discardExpenseMutation("expense-report-generate", state.expenseMonth);
+  try {
+    const body = { month: state.expenseMonth };
+    state.expenseReport = await expenseMutation("/api/v1/expenses/reports", {
+      operation: "expense-report-generate",
+      resource: state.expenseMonth,
+      body,
+      aiConfirmation: "expense-report"
+    });
+    state.expenseReportRetryNeeded = false;
+    renderExpenseSummary();
+    toast("집계 데이터로 AI 지출 해설을 만들었습니다.");
+  } catch (error) {
+    state.expenseReportRetryNeeded = true;
+    renderExpenseSummary();
+    toast(`${error.message} 기본 집계는 계속 사용할 수 있으며 같은 요청 다시 확인은 새 횟수를 사용하지 않습니다.`);
+  }
+}
+
+async function rateMobileExpenseReport(helpful, button) {
+  const report = state.expenseReport;
+  if (!report) return;
+  setBusy(button, true, helpful ? "도움됨" : "도움 안 됨");
+  try {
+    const body = { helpful };
+    state.expenseReport = await expenseMutation(`/api/v1/expenses/reports/${encodeURIComponent(report.reportId)}/feedback`, {
+      operation: "expense-report-feedback",
+      resource: report.reportId,
+      body
+    });
+    renderExpenseSummary();
+    toast("AI 해설 평가를 저장했습니다.");
+  } catch (error) {
+    toast(error.message);
+    setBusy(button, false, helpful ? "도움됨" : "도움 안 됨");
+  }
+}
+
+async function loadMoreExpenseTransactions(button) {
+  if (!state.expenseTransactionsNextCursor) return;
+  setBusy(button, true, "거래 더 보기");
+  try {
+    const page = await api(expenseQuery("/api/v1/expenses/transactions", {
+      month: state.expenseMonth,
+      cursor: state.expenseTransactionsNextCursor,
+      limit: 50
+    }));
+    state.expenseTransactions.push(...page.items);
+    state.expenseTransactionsNextCursor = page.nextCursor;
+    renderExpenseTransactions();
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    setBusy(button, false, "거래 더 보기");
+  }
+}
+
+function renderExpenseTransactions() {
+  const list = byId("expense-transactions-list");
+  clear(list);
+  byId("expense-transactions-count").textContent = `${state.expenseTransactions.length}건`;
+  state.expenseTransactions.forEach((item) => {
+    const card = text("article", "", `item-card expense-transaction ${item.status}`);
+    const heading = text("div", "", "expense-card-heading");
+    const title = text("div");
+    title.append(text("strong", item.merchant || item.counterparty || "표시 이름 없음"));
+    title.append(text("small", `${item.postedDate} · ${expenseKindLabels[item.kind] || item.kind}`));
+    heading.append(title, text("strong", formatExpenseMoney(item.amountMinor, item.currency)));
+    card.append(heading);
+    card.append(text("p", `${expenseCategoryLabels[item.category] || item.category} · ${item.sourceKind || "수동"} · ${item.status}`));
+    if (item.exclusionReason) card.append(text("small", item.exclusionReason, "expense-exclusion"));
+    if (item.kind === "manual_recurring") {
+      card.append(text("small", "수동 납부 기록은 정기지출 발생 건에서 관리합니다."));
+    } else {
+      renderExpenseTransactionOverride(item, card);
+    }
+    list.append(card);
+  });
+  if (!state.expenseTransactions.length) list.append(text("p", "이 달에 표시할 거래가 없습니다.", "empty"));
+  show("expense-transactions-more", Boolean(state.expenseTransactionsNextCursor));
+}
+
+function renderExpenseTransactionOverride(item, card) {
+  const toggle = text("button", "재분류·제외 해제", "secondary"); toggle.type = "button";
+  const form = text("form", "", "expense-transaction-override hidden");
+  const kind = expenseSelect(editableExpenseKindLabels, editableExpenseKindLabels[item.kind] ? item.kind : "purchase");
+  const category = expenseSelect(expenseCategoryLabels, item.category);
+  const kindLabel = text("label", "새 처리"); kindLabel.append(kind);
+  const categoryLabel = text("label", "새 카테고리"); categoryLabel.append(category);
+  const duplicate = document.createElement("select");
+  const notDuplicate = text("option", "중복 아님"); notDuplicate.value = ""; duplicate.append(notDuplicate);
+  const related = document.createElement("select");
+  const notRelated = text("option", "연결하지 않음"); notRelated.value = ""; related.append(notRelated);
+  const relatedCandidates = state.recurringMatchTransactions.filter((candidate) =>
+    candidate.id !== item.id
+      && candidate.currency === item.currency
+      && candidate.status === "confirmed"
+      && !candidate.isProvisional
+      && ["purchase", "refund"].includes(candidate.kind));
+  const duplicateCandidates = state.recurringMatchTransactions.filter((candidate) =>
+    candidate.id !== item.id
+      && candidate.currency === item.currency
+      && candidate.amountMinor === item.amountMinor
+      && candidate.status === "confirmed"
+      && !candidate.isProvisional
+      && !candidate.duplicateOfEventId);
+  relatedCandidates.forEach((candidate) => {
+    const label = `${candidate.postedDate} · ${candidate.merchant || candidate.counterparty || "표시 이름 없음"} · ${formatExpenseMoney(candidate.amountMinor, candidate.currency)}`;
+    const relatedOption = text("option", label); relatedOption.value = candidate.id; related.append(relatedOption);
+  });
+  duplicateCandidates.forEach((candidate) => {
+    const label = `${candidate.postedDate} · ${candidate.merchant || candidate.counterparty || "표시 이름 없음"} · ${formatExpenseMoney(candidate.amountMinor, candidate.currency)}`;
+    const duplicateOption = text("option", label); duplicateOption.value = candidate.id; duplicate.append(duplicateOption);
+  });
+  if (item.duplicateOfEventId && !duplicateCandidates.some((candidate) => candidate.id === item.duplicateOfEventId)) {
+    const currentDuplicate = text("option", "현재 중복 대상"); currentDuplicate.value = item.duplicateOfEventId; duplicate.append(currentDuplicate);
+  }
+  if (item.relatedEventId && !relatedCandidates.some((candidate) => candidate.id === item.relatedEventId)) {
+    const currentRelated = text("option", "현재 연결 거래"); currentRelated.value = item.relatedEventId; related.append(currentRelated);
+  }
+  duplicate.value = item.duplicateOfEventId || "";
+  related.value = item.relatedEventId || "";
+  const duplicateLabel = text("label", "중복 대상 (선택)"); duplicateLabel.append(duplicate);
+  const relatedLabel = text("label", "정산·연결 대상 (선택)"); relatedLabel.append(related);
+  const personal = document.createElement("input");
+  personal.type = "number"; personal.min = "1"; personal.max = String(Math.abs(item.amountMinor)); personal.step = "1"; personal.placeholder = "전체 금액";
+  personal.value = item.personalAmountMinor === null ? "" : String(item.personalAmountMinor);
+  const personalLabel = text("label", "내 부담액 (minor unit·선택)"); personalLabel.append(personal);
+  const clearPersonal = document.createElement("input"); clearPersonal.type = "checkbox";
+  const clearRelated = document.createElement("input"); clearRelated.type = "checkbox";
+  const clearPersonalLabel = item.personalAmountMinor === null ? null : text("label", "", "expense-checkbox");
+  if (clearPersonalLabel) clearPersonalLabel.append(clearPersonal, document.createTextNode(` 기존 내 부담액 ${formatExpenseMoney(item.personalAmountMinor, item.currency)} 명시적으로 해제`));
+  const clearRelatedLabel = item.relatedEventId ? text("label", "", "expense-checkbox") : null;
+  if (clearRelatedLabel) clearRelatedLabel.append(clearRelated, document.createTextNode(" 기존 정산 연결 명시적으로 해제"));
+  const syncAlternatives = () => {
+    const settlementKind = ["settlement_received", "settlement_sent"].includes(kind.value);
+    related.disabled = !settlementKind || Boolean(duplicate.value) || clearRelated.checked;
+    personal.disabled = kind.value !== "purchase" || Boolean(duplicate.value) || clearPersonal.checked;
+  };
+  kind.addEventListener("change", () => {
+    if (!["settlement_received", "settlement_sent"].includes(kind.value)) related.value = item.relatedEventId || "";
+    if (kind.value !== "purchase") personal.value = item.personalAmountMinor === null ? "" : String(item.personalAmountMinor);
+    syncAlternatives();
+  });
+  duplicate.addEventListener("change", () => {
+    if (duplicate.value) {
+      related.value = ""; personal.value = "";
+      clearRelated.checked = Boolean(item.relatedEventId);
+      clearPersonal.checked = item.personalAmountMinor !== null;
+    }
+    syncAlternatives();
+  });
+  related.addEventListener("change", () => {
+    clearRelated.checked = false;
+    if (related.value) {
+      duplicate.value = ""; personal.value = "";
+      clearPersonal.checked = item.personalAmountMinor !== null;
+    }
+    syncAlternatives();
+  });
+  personal.addEventListener("input", () => {
+    clearPersonal.checked = false;
+    if (personal.value) {
+      duplicate.value = ""; related.value = "";
+      clearRelated.checked = Boolean(item.relatedEventId);
+    }
+    syncAlternatives();
+  });
+  clearPersonal.addEventListener("change", () => {
+    personal.value = clearPersonal.checked ? "" : item.personalAmountMinor === null ? "" : String(item.personalAmountMinor);
+    syncAlternatives();
+  });
+  clearRelated.addEventListener("change", () => {
+    related.value = clearRelated.checked ? "" : item.relatedEventId || "";
+    syncAlternatives();
+  });
+  syncAlternatives();
+  const createRule = document.createElement("input"); createRule.type = "checkbox";
+  const rule = item.merchant
+    ? text("label", "", "expense-checkbox")
+    : text("small", "업체 정보가 없는 송금·이체는 자동 분류 규칙을 만들 수 없습니다.");
+  if (item.merchant) rule.append(createRule, document.createTextNode(" 앞으로 같은 업체에 적용"));
+  const actions = text("div", "", "expense-form-actions");
+  const cancel = text("button", "재분류 취소", "secondary"); cancel.type = "button";
+  const save = text("button", "재분류 저장", "primary"); save.type = "submit";
+  actions.append(cancel, save);
+  form.append(
+    text("p", item.status === "excluded"
+      ? "구매·환불·정산으로 다시 분류하면 자동 제외를 해제할 수 있습니다."
+      : "제외 사유를 포함해 분류 결정을 다시 저장할 수 있습니다."),
+    kindLabel,
+    categoryLabel,
+    duplicateLabel,
+    relatedLabel,
+    personalLabel,
+    ...(clearPersonalLabel ? [clearPersonalLabel] : []),
+    ...(clearRelatedLabel ? [clearRelatedLabel] : []),
+    rule,
+    actions
+  );
+  toggle.addEventListener("click", () => {
+    form.classList.remove("hidden");
+    toggle.classList.add("hidden");
+  });
+  cancel.addEventListener("click", () => {
+    discardExpenseMutation("expense-transaction-override", item.id);
+    form.classList.add("hidden");
+    toggle.classList.remove("hidden");
+  });
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const body = {
+      kind: kind.value,
+      category: category.value,
+      duplicateOfEventId: duplicate.value || null,
+      relatedEventId: clearRelated.checked || related.value === (item.relatedEventId || "") ? null : related.value || null,
+      personalAmountMinor: clearPersonal.checked || personal.value === (item.personalAmountMinor === null ? "" : String(item.personalAmountMinor)) ? null : personal.value === "" ? null : Number(personal.value),
+      clearPersonalAmount: clearPersonal.checked,
+      clearRelatedEvent: clearRelated.checked,
+      createRule: item.merchant ? createRule.checked : false
+    };
+    setBusy(save, true, "재분류 저장");
+    try {
+      await expenseMutation(`/api/v1/expenses/transactions/${encodeURIComponent(item.id)}`, {
+        method: "PATCH",
+        operation: "expense-transaction-override",
+        version: item.version,
+        resource: item.id,
+        body
+      });
+      toast(item.status === "excluded" ? "자동 제외를 해제하거나 새 분류로 저장했습니다." : "거래 분류를 변경했습니다.");
+      await loadExpenses();
+    } catch (error) {
+      toast(`${error.message} 자동으로 다시 시도하지 않았습니다.`);
+    } finally {
+      setBusy(save, false, "재분류 저장");
+    }
+  });
+  card.append(toggle, form);
+}
+
+function expenseSelect(options, selected) {
+  const select = document.createElement("select");
+  Object.entries(options).forEach(([value, label]) => {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    option.selected = value === selected;
+    select.append(option);
+  });
+  return select;
+}
+
+function renderExpenseReviews() {
+  const list = byId("expense-reviews-list");
+  clear(list);
+  byId("expense-reviews-count").textContent = `${state.expenseReviews.length}건`;
+  state.expenseReviews.forEach((review) => {
+    const transaction = review.transaction;
+    const heading = text("div", "", "expense-card-heading");
+    const title = text("div");
+    title.append(text("strong", transaction.merchant || transaction.counterparty || "표시 이름 없음"));
+    title.append(text("small", `${transaction.postedDate} · ${expenseReviewReasonLabels[review.reason] || review.reason}`));
+    heading.append(title, text("strong", formatExpenseMoney(transaction.amountMinor, transaction.currency)));
+
+    if (review.reason === "recurring_match_candidate") {
+      const card = text("article", "", "item-card expense-review-card expense-review-card--candidate");
+      const occurrence = review.recurringExpenseId
+        ? state.recurringExpenseOccurrences.find((item) => item.recurringExpenseId === review.recurringExpenseId)
+        : null;
+      const matched = occurrence && ["paid", "matched"].includes(occurrence.status);
+      card.append(heading);
+      card.append(text(
+        "p",
+        occurrence
+          ? `${occurrence.name}의 ${occurrence.dueDate} 발생 건과 조건이 일치합니다.`
+          : "연결할 정기지출 발생 건을 다시 불러와 주세요."
+      ));
+      const autoMatch = document.createElement("input");
+      autoMatch.type = "checkbox";
+      autoMatch.checked = false;
+      autoMatch.disabled = !occurrence || Boolean(matched);
+      const autoMatchLabel = text("label", "", "expense-checkbox");
+      autoMatchLabel.append(autoMatch, document.createTextNode(" 앞으로 고신뢰 거래도 자동 연결"));
+      card.append(autoMatchLabel, text("small", "처음 연결을 확인하면 업체·결제수단을 안전하게 학습하며, 자동 연결은 별도로 동의한 경우에만 켭니다.", "expense-payment-learning"));
+      const actions = text("div", "", "expense-form-actions");
+      const reject = text("button", "이번에는 연결하지 않음", "secondary");
+      reject.type = "button";
+      reject.addEventListener("click", () => void resolveRecurringCandidateReview(review, reject, "이번에는 연결하지 않음"));
+      const connect = text("button", "정기지출에 연결", "primary");
+      connect.type = "button";
+      connect.disabled = !occurrence || Boolean(matched);
+      connect.addEventListener("click", () => {
+        if (occurrence) void matchRecurringOccurrence(occurrence, transaction.id, autoMatch.checked, connect, "정기지출에 연결");
+      });
+      actions.append(reject, connect);
+      card.append(actions);
+      list.append(card);
+      return;
+    }
+
+    if (review.reason === "recurring_registration_candidate") {
+      const card = text("article", "", "item-card expense-review-card expense-review-card--candidate");
+      card.append(
+        heading,
+        text("p", "반복 간격과 금액이 안정적인 거래입니다. 거래 정보로 정기지출 입력을 채운 뒤 내용을 확인하세요.")
+      );
+      const actions = text("div", "", "expense-form-actions");
+      const reject = text("button", "등록하지 않음", "secondary");
+      reject.type = "button";
+      reject.addEventListener("click", () => void resolveRecurringCandidateReview(review, reject, "등록하지 않음"));
+      const register = text("button", "정기지출로 등록", "primary");
+      register.type = "button";
+      register.addEventListener("click", () => {
+        selectExpenseView("recurring");
+        openRecurringExpenseForm(null, review);
+      });
+      actions.append(reject, register);
+      card.append(actions);
+      list.append(card);
+      return;
+    }
+
+    const form = text("form", "", "item-card expense-review-card");
+    form.append(heading);
+    const kind = expenseSelect(
+      editableExpenseKindLabels,
+      editableExpenseKindLabels[review.suggestedKind] ? review.suggestedKind : "purchase"
+    );
+    const category = expenseSelect(expenseCategoryLabels, review.suggestedCategory || "other");
+    const kindLabel = text("label", "처리"); kindLabel.append(kind);
+    const categoryLabel = text("label", "카테고리"); categoryLabel.append(category);
+    let duplicateEvent = null;
+    let duplicateLabel = null;
+    if (review.reason === "ambiguous_mirror") {
+      duplicateEvent = document.createElement("select");
+      const notDuplicate = text("option", "중복 아님");
+      notDuplicate.value = "";
+      duplicateEvent.append(notDuplicate);
+      const candidates = state.recurringMatchTransactions.filter((item) =>
+        item.id !== transaction.id
+        && item.currency === transaction.currency
+        && item.amountMinor === transaction.amountMinor
+        && item.status === "confirmed"
+        && !item.isProvisional
+        && !item.duplicateOfEventId
+      );
+      const suggestedMissing = review.suggestedDuplicateOfEventId
+        && !candidates.some((item) => item.id === review.suggestedDuplicateOfEventId);
+      if (suggestedMissing) {
+        const suggested = text("option", "제안된 동일 거래");
+        suggested.value = review.suggestedDuplicateOfEventId;
+        duplicateEvent.append(suggested);
+      }
+      candidates.forEach((item) => {
+        const option = text("option", `${item.postedDate} · ${item.merchant || item.counterparty || "표시 이름 없음"} · ${formatExpenseMoney(item.amountMinor, item.currency)}`);
+        option.value = item.id;
+        duplicateEvent.append(option);
+      });
+      duplicateEvent.value = review.suggestedDuplicateOfEventId || "";
+      duplicateLabel = text("label", "중복 대상");
+      duplicateLabel.append(duplicateEvent, text("small", "서버 제안을 수락하거나 같은 금액·통화의 다른 거래를 선택합니다."));
+    }
+    const relatedEvent = document.createElement("select");
+    const noRelatedEvent = text("option", "연결하지 않음"); noRelatedEvent.value = ""; relatedEvent.append(noRelatedEvent);
+    state.recurringMatchTransactions
+      .filter((item) => item.id !== transaction.id
+        && item.currency === transaction.currency
+        && item.status === "confirmed"
+        && !item.isProvisional
+        && ["purchase", "refund"].includes(item.kind))
+      .forEach((item) => {
+        const option = text("option", `${item.postedDate} · ${item.merchant || item.counterparty || "표시 이름 없음"} · ${formatExpenseMoney(item.amountMinor, item.currency)}`);
+        option.value = item.id;
+        relatedEvent.append(option);
+      });
+    const relatedLabel = text("label", "정산·연결 대상 (선택)"); relatedLabel.append(relatedEvent);
+    const personalAmount = document.createElement("input");
+    personalAmount.type = "number"; personalAmount.min = "1"; personalAmount.max = String(Math.abs(transaction.amountMinor)); personalAmount.step = "1"; personalAmount.placeholder = "전체 금액";
+    const syncAlternativeDecision = () => {
+      const duplicated = Boolean(duplicateEvent?.value);
+      relatedEvent.disabled = duplicated || !["settlement_received", "settlement_sent"].includes(kind.value);
+      personalAmount.disabled = duplicated || kind.value !== "purchase";
+    };
+    kind.addEventListener("change", () => {
+      if (!["settlement_received", "settlement_sent"].includes(kind.value)) relatedEvent.value = "";
+      if (kind.value !== "purchase") personalAmount.value = "";
+      syncAlternativeDecision();
+    });
+    duplicateEvent?.addEventListener("change", () => {
+      if (duplicateEvent?.value) {
+        relatedEvent.value = "";
+        personalAmount.value = "";
+      }
+      syncAlternativeDecision();
+    });
+    relatedEvent.addEventListener("change", () => {
+      if (relatedEvent.value) {
+        personalAmount.value = "";
+        if (duplicateEvent) duplicateEvent.value = "";
+      }
+      syncAlternativeDecision();
+    });
+    personalAmount.addEventListener("input", () => {
+      if (personalAmount.value) {
+        relatedEvent.value = "";
+        if (duplicateEvent) duplicateEvent.value = "";
+      }
+      syncAlternativeDecision();
+    });
+    syncAlternativeDecision();
+    relatedLabel.append(text("small", "정산 처리에는 앞뒤 달의 확정 구매·환불만 표시합니다."));
+    const personalAmountLabel = text("label", "내 부담액 (minor unit·선택)"); personalAmountLabel.append(personalAmount, text("small", "구매 처리에서만 지정하며 중복·연결 대상과 함께 저장할 수 없습니다."));
+    const createRule = document.createElement("input"); createRule.type = "checkbox";
+    const ruleLabel = transaction.merchant
+      ? text("label", "", "expense-checkbox")
+      : text("small", "업체 정보가 없는 송금·이체는 자동 분류 규칙을 만들 수 없습니다.");
+    if (transaction.merchant) ruleLabel.append(createRule, document.createTextNode(" 앞으로 같은 업체에 적용"));
+    const save = text("button", "결정 저장", "primary"); save.type = "submit";
+    form.append(kindLabel, categoryLabel);
+    if (duplicateLabel) form.append(duplicateLabel);
+    form.append(relatedLabel, personalAmountLabel, ruleLabel, save);
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      setBusy(save, true, "결정 저장");
+      try {
+        const body = {
+          kind: kind.value,
+          category: category.value,
+          duplicateOfEventId: duplicateEvent?.value || null,
+          relatedEventId: relatedEvent.value || null,
+          personalAmountMinor: personalAmount.value === "" ? null : Number(personalAmount.value),
+          createRule: transaction.merchant ? createRule.checked : false
+        };
+        await expenseMutation(`/api/v1/expenses/reviews/${encodeURIComponent(review.id)}/resolve`, {
+          operation: "expense-review-resolve",
+          version: review.version,
+          resource: review.id,
+          body
+        });
+        toast("거래 검토 결정을 저장했습니다.");
+        await loadExpenses();
+      } catch (error) {
+        toast(`${error.message} 자동으로 다시 시도하지 않았습니다.`);
+      } finally {
+        setBusy(save, false, "결정 저장");
+      }
+    });
+    list.append(form);
+  });
+  if (!state.expenseReviews.length) list.append(text("p", "확인할 거래가 없습니다.", "empty"));
+  show("expense-reviews-more", Boolean(state.expenseReviewsNextCursor));
+}
+
+async function loadMoreExpenseReviews(button) {
+  if (!state.expenseReviewsNextCursor) return;
+  setBusy(button, true, "검토 더 보기");
+  try {
+    const page = await api(expenseQuery("/api/v1/expenses/reviews", {
+      month: state.expenseMonth,
+      status: "pending",
+      cursor: state.expenseReviewsNextCursor,
+      limit: 100
+    }));
+    const merged = new Map(state.expenseReviews.map((review) => [review.id, review]));
+    page.items.forEach((review) => merged.set(review.id, review));
+    state.expenseReviews = [...merged.values()];
+    state.expenseReviewsNextCursor = page.nextCursor;
+    renderExpenseReviews();
+  } catch (error) {
+    toast(`${error.message} 자동으로 다시 시도하지 않았습니다.`);
+  } finally {
+    setBusy(button, false, "검토 더 보기");
+  }
+}
+
+async function resolveRecurringCandidateReview(review, button, label) {
+  setBusy(button, true, label);
+  try {
+    const body = {
+      kind: "purchase",
+      category: review.suggestedCategory || (review.transaction.category === "unconfirmed" ? "other" : review.transaction.category),
+      duplicateOfEventId: null,
+      relatedEventId: null,
+      personalAmountMinor: null,
+      createRule: false
+    };
+    await expenseMutation(`/api/v1/expenses/reviews/${encodeURIComponent(review.id)}/resolve`, {
+      operation: "expense-review-resolve",
+      version: review.version,
+      resource: review.id,
+      body
+    });
+    toast("거래 검토 결정을 저장했습니다.");
+    await loadExpenses();
+  } catch (error) {
+    toast(`${error.message} 자동으로 다시 시도하지 않았습니다.`);
+  } finally {
+    setBusy(button, false, label);
+  }
+}
+
+function renderRecurringExpenses() {
+  const occurrences = byId("expense-occurrences-list");
+  clear(occurrences);
+  state.recurringExpenseOccurrences.forEach((occurrence) => {
+    const card = text("article", "", `item-card expense-occurrence ${occurrence.status}`);
+    const heading = text("div", "", "expense-card-heading");
+    const title = text("div");
+    title.append(text("strong", occurrence.name));
+    title.append(text("small", `${occurrence.dueDate} · ${recurringOccurrenceLabels[occurrence.status] || occurrence.status}${occurrence.amountChanged ? " · 금액 변동" : ""}`));
+    heading.append(title, text("strong", formatExpenseMoney(occurrence.actualAmountMinor ?? occurrence.expectedAmountMinor, occurrence.currency)));
+    card.append(heading);
+    if (!["paid", "matched"].includes(occurrence.status)) {
+      const actions = text("div", "", "expense-occurrence-actions");
+      const paid = text("button", "납부 완료", "secondary"); paid.type = "button";
+      paid.addEventListener("click", () => void confirmRecurringPaid(occurrence, paid));
+      const connect = text("button", "거래 연결", "secondary"); connect.type = "button";
+      const matchForm = text("form", "", "expense-match-form hidden");
+      const selectLabel = text("label", "이 달의 실제 거래");
+      const transaction = document.createElement("select");
+      transaction.required = true;
+      const placeholder = text("option", "연결할 거래를 선택하세요");
+      placeholder.value = "";
+      transaction.append(placeholder);
+      const candidates = state.recurringMatchTransactions
+        .filter((item) => item.currency === occurrence.currency
+          && item.status !== "excluded"
+          && !item.isProvisional
+          && ["purchase", "external_transfer", "unknown_p2p"].includes(item.kind)
+          && Math.abs(Date.parse(`${item.postedDate}T00:00:00Z`) - Date.parse(`${occurrence.dueDate}T00:00:00Z`)) <= 5 * 86_400_000)
+        .sort((left, right) => Number(Boolean(right.pendingReviewId)) - Number(Boolean(left.pendingReviewId))
+          || left.postedDate.localeCompare(right.postedDate)
+          || left.id.localeCompare(right.id));
+      candidates.forEach((item) => {
+        const option = text("option", `${item.postedDate} · ${item.merchant || item.counterparty || "표시 이름 없음"} · ${formatExpenseMoney(item.amountMinor, item.currency)}${item.pendingReviewId ? " · 확인 필요" : ""}`);
+        option.value = item.id;
+        transaction.append(option);
+      });
+      selectLabel.append(transaction, text("small", "같은 통화의 제외되지 않은 거래만 표시합니다."));
+      const autoMatch = document.createElement("input"); autoMatch.type = "checkbox"; autoMatch.checked = false;
+      const autoMatchLabel = text("label", "", "expense-checkbox");
+      autoMatchLabel.append(autoMatch, document.createTextNode(" 이 연결을 확인했고 이후 고신뢰 거래도 자동 연결"));
+      const submit = text("button", "거래 연결 확인", "primary"); submit.type = "submit";
+      submit.disabled = true;
+      transaction.addEventListener("change", () => { submit.disabled = !transaction.value; });
+      matchForm.append(selectLabel, autoMatchLabel, text("small", "처음 동의한 연결에서 업체·결제수단을 안전하게 학습합니다.", "expense-payment-learning"), submit);
+      matchForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        await matchRecurringOccurrence(occurrence, transaction.value, autoMatch.checked, submit);
+      });
+      connect.addEventListener("click", () => matchForm.classList.toggle("hidden"));
+      actions.append(paid, connect);
+      card.append(actions, matchForm);
+    }
+    occurrences.append(card);
+  });
+  if (!state.recurringExpenseOccurrences.length) occurrences.append(text("p", "이 달에 예정된 정기지출이 없습니다.", "empty"));
+
+  const items = byId("expense-recurring-list");
+  clear(items);
+  state.recurringExpenses.forEach((item) => {
+    const button = text("button", "", "item-card expense-recurring-item");
+    button.type = "button";
+    const body = text("span");
+    body.append(text("strong", item.name));
+    body.append(text("small", `${expenseCategoryLabels[item.category] || item.category} · ${item.intervalMonths === 1 ? "매월" : `${item.intervalMonths}개월마다`} · ${item.status}`));
+    button.append(body, text("strong", formatExpenseMoney(item.amountMinor, item.currency)));
+    button.addEventListener("click", () => openRecurringExpenseForm(item));
+    items.append(button);
+  });
+  if (!state.recurringExpenses.length) items.append(text("p", "등록한 정기지출이 없습니다.", "empty"));
+}
+
+async function confirmRecurringPaid(occurrence, button) {
+  setBusy(button, true, "납부 완료");
+  try {
+    const today = todaySeoul();
+    const body = { amountMinor: null, paidDate: occurrence.dueDate < today ? occurrence.dueDate : today };
+    await expenseMutation(`/api/v1/expenses/recurring/occurrences/${encodeURIComponent(occurrence.occurrenceKey)}/confirm-paid`, {
+      operation: "recurring-expense-confirm-paid",
+      version: occurrence.version,
+      resource: occurrence.occurrenceKey,
+      body
+    });
+    toast("납부 완료를 기록했습니다.");
+    await loadExpenses();
+  } catch (error) {
+    toast(`${error.message} 자동으로 다시 시도하지 않았습니다.`);
+  } finally {
+    setBusy(button, false, "납부 완료");
+  }
+}
+
+async function matchRecurringOccurrence(occurrence, eventId, enableFutureAutoMatch, button, buttonLabel = "거래 연결 확인") {
+  if (!eventId) return;
+  setBusy(button, true, buttonLabel);
+  try {
+    const body = { eventId, enableFutureAutoMatch };
+    await expenseMutation(`/api/v1/expenses/recurring/occurrences/${encodeURIComponent(occurrence.occurrenceKey)}/match`, {
+      operation: "recurring-expense-match",
+      version: occurrence.version,
+      resource: occurrence.occurrenceKey,
+      body
+    });
+    toast(enableFutureAutoMatch
+      ? "거래를 연결하고 업체·결제수단의 이후 자동 연결을 켰습니다."
+      : "실제 거래를 정기지출에 연결했습니다.");
+    await loadExpenses();
+  } catch (error) {
+    toast(`${error.message} 자동으로 다시 시도하지 않았습니다.`);
+  } finally {
+    setBusy(button, false, buttonLabel);
+  }
+}
+
+function selectExpenseView(view) {
+  document.querySelectorAll("[data-expense-view]").forEach((button) => {
+    if (button.dataset.expenseView === view) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
+  });
+  document.querySelectorAll(".expense-view").forEach((panel) => panel.classList.add("hidden"));
+  byId(`expense-view-${view}`).classList.remove("hidden");
+}
+
+function populateExpenseCategories() {
+  const select = byId("expense-recurring-category");
+  if (select.options.length) return;
+  Object.entries(expenseCategoryLabels).filter(([value]) => value !== "unconfirmed").forEach(([value, label]) => {
+    const option = document.createElement("option"); option.value = value; option.textContent = label; select.append(option);
+  });
+}
+
+function recurringCategoryFromReview(review) {
+  const suggested = review?.suggestedCategory;
+  if (suggested && suggested !== "unconfirmed") return suggested;
+  const current = review?.transaction?.category;
+  return current && current !== "unconfirmed" ? current : "other";
+}
+
+function openRecurringExpenseForm(item = null, review = null) {
+  populateExpenseCategories();
+  state.editingRecurringExpense = item;
+  state.recurringRegistrationReview = review;
+  state.recurringRegistrationCreated = null;
+  const transaction = review?.transaction || null;
+  const displayName = transaction?.merchant || transaction?.counterparty || "정기지출";
+  byId("expense-recurring-form-title").textContent = review ? "반복 거래 후보 등록" : item ? "정기지출 편집" : "정기지출 추가";
+  byId("expense-recurring-name").value = item?.name || (review ? displayName : "");
+  byId("expense-recurring-category").value = item?.category || (review ? recurringCategoryFromReview(review) : "ott_subscriptions");
+  byId("expense-recurring-merchant").value = item?.vendor || transaction?.merchant || "";
+  byId("expense-recurring-amount").value = item?.amountMinor ?? transaction?.amountMinor ?? "";
+  byId("expense-recurring-currency").value = item?.currency || transaction?.currency || "KRW";
+  byId("expense-recurring-amount-type").value = item?.amountKind || "fixed";
+  byId("expense-recurring-interval").value = item?.intervalMonths || 1;
+  byId("expense-recurring-payment-method").value = item?.paymentMethodFingerprint || transaction?.paymentMethodFingerprint || "";
+  byId("expense-recurring-due-rule").value = item?.dueRule || "specific_day";
+  byId("expense-recurring-due-day").value = item?.dueDay || Number((transaction?.postedDate || todaySeoul()).slice(8, 10));
+  byId("expense-recurring-start").value = item?.startDate || transaction?.postedDate || todaySeoul();
+  byId("expense-recurring-end").value = item?.endDate || "";
+  byId("expense-recurring-reminder").value = item?.reminderDays ?? 7;
+  byId("expense-recurring-status").value = item?.status || "active";
+  byId("expense-recurring-note").value = item?.memo || (review ? "반복 거래 후보에서 등록" : "");
+  byId("expense-recurring-auto-match").checked = Boolean(item?.autoMatchEnabled);
+  byId("expense-recurring-auto-match").disabled = !item?.autoMatchEnabled;
+  byId("expense-recurring-payment-method-note").textContent = byId("expense-recurring-payment-method").value
+    ? "가져온 거래의 결제수단을 내부 식별값으로 연결합니다. 원문 카드·계좌번호는 표시하거나 저장하지 않습니다."
+    : "첫 실제 거래 연결을 확인하면 업체·결제수단을 안전하게 학습합니다. 원문 카드·계좌번호는 표시하거나 저장하지 않습니다.";
+  show("expense-recurring-registration-note", Boolean(review));
+  byId("expense-recurring-registration-note").textContent = review
+    ? "거래의 업체·금액·통화·결제일·결제수단을 내부에서 채웠습니다. 내용을 확인한 뒤 저장하면 후보 검토도 함께 완료됩니다."
+    : "";
+  show("expense-recurring-delete", Boolean(item));
+  show("expense-recurring-form", true);
+  updateRecurringSaveLabel();
+  updateRecurringDueFields();
+  byId("expense-recurring-form").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function closeRecurringExpenseForm() {
+  const item = state.editingRecurringExpense;
+  const review = state.recurringRegistrationReview;
+  if (item) {
+    discardExpenseMutation("recurring-expense-update", item.id);
+    discardExpenseMutation("recurring-expense-delete", item.id);
+  } else {
+    discardExpenseMutation("recurring-expense-create", review ? `registration:${review.id}` : "recurring-form");
+  }
+  if (review) discardExpenseMutation("expense-review-resolve", review.id);
+  state.editingRecurringExpense = null;
+  state.recurringRegistrationReview = null;
+  state.recurringRegistrationCreated = null;
+  show("expense-recurring-form", false);
+}
+
+function updateRecurringSaveLabel() {
+  const button = byId("expense-recurring-save");
+  button.textContent = state.recurringRegistrationReview
+    ? state.recurringRegistrationCreated ? "검토 완료 다시 시도" : "등록하고 검토 완료"
+    : "저장";
+}
+
+function updateRecurringDueFields() {
+  const specific = byId("expense-recurring-due-rule").value === "specific_day";
+  show("expense-recurring-due-day-field", specific);
+  byId("expense-recurring-due-day").required = specific;
+}
+
+function recurringExpenseBody(includeEffectiveMonth) {
+  const paymentMethodFingerprint = byId("expense-recurring-payment-method").value.trim();
+  const name = byId("expense-recurring-name").value.trim();
+  const vendor = byId("expense-recurring-merchant").value.trim();
+  const memo = byId("expense-recurring-note").value.trim();
+  if (name.length > 120 || vendor.length > 200 || memo.length > 500) {
+    throw new Error("이름 120자, 업체 200자, 메모 500자 이내로 입력해 주세요.");
+  }
+  const body = {
+    name,
+    category: byId("expense-recurring-category").value,
+    vendor: vendor || null,
+    amountMinor: Number(byId("expense-recurring-amount").value),
+    currency: byId("expense-recurring-currency").value.trim().toUpperCase(),
+    paymentMethodFingerprint: paymentMethodFingerprint || null,
+    startDate: byId("expense-recurring-start").value,
+    endDate: byId("expense-recurring-end").value || null,
+    memo: memo || null,
+    reminderDays: Number(byId("expense-recurring-reminder").value),
+    amountKind: byId("expense-recurring-amount-type").value,
+    intervalMonths: Number(byId("expense-recurring-interval").value),
+    dueRule: byId("expense-recurring-due-rule").value,
+    dueDay: byId("expense-recurring-due-rule").value === "specific_day" ? Number(byId("expense-recurring-due-day").value) : null,
+    status: byId("expense-recurring-status").value
+  };
+  if (includeEffectiveMonth) {
+    const currentMonth = todaySeoul().slice(0, 7);
+    body.effectiveFromMonth = `${currentMonth}-01`;
+    body.autoMatchEnabled = byId("expense-recurring-auto-match").checked;
+  }
+  return body;
+}
+
+function sameRecurringExpenseInput(item, input) {
+  return item.name === input.name
+    && item.category === input.category
+    && item.vendor === input.vendor
+    && item.amountMinor === input.amountMinor
+    && item.currency === input.currency
+    && item.paymentMethodFingerprint === input.paymentMethodFingerprint
+    && item.startDate === input.startDate
+    && item.endDate === input.endDate
+    && item.memo === input.memo
+    && item.reminderDays === input.reminderDays
+    && item.amountKind === input.amountKind
+    && item.intervalMonths === input.intervalMonths
+    && item.dueRule === input.dueRule
+    && item.dueDay === input.dueDay
+    && item.status === input.status;
+}
+
+document.querySelectorAll("[data-expense-view]").forEach((button) => {
+  button.addEventListener("click", () => selectExpenseView(button.dataset.expenseView));
+});
+byId("expense-due-open").addEventListener("click", () => selectTab("expenses"));
+byId("expense-refresh").addEventListener("click", () => void loadExpenses());
+byId("expense-prev").addEventListener("click", () => void loadExpenses(shiftMonth(state.expenseMonth || todaySeoul().slice(0, 7), -1)));
+byId("expense-next").addEventListener("click", () => void loadExpenses(shiftMonth(state.expenseMonth || todaySeoul().slice(0, 7), 1)));
+byId("expense-transactions-more").addEventListener("click", (event) => void loadMoreExpenseTransactions(event.currentTarget));
+byId("expense-reviews-more").addEventListener("click", (event) => void loadMoreExpenseReviews(event.currentTarget));
+byId("expense-recurring-add").addEventListener("click", () => openRecurringExpenseForm());
+byId("expense-recurring-form-close").addEventListener("click", closeRecurringExpenseForm);
+byId("expense-recurring-due-rule").addEventListener("change", updateRecurringDueFields);
+
+byId("expense-recurring-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const item = state.editingRecurringExpense;
+  const registrationReview = state.recurringRegistrationReview;
+  const button = byId("expense-recurring-save");
+  const restingLabel = registrationReview
+    ? state.recurringRegistrationCreated ? "검토 완료 다시 시도" : "등록하고 검토 완료"
+    : "저장";
+  setBusy(button, true, restingLabel);
+  try {
+    const body = recurringExpenseBody(Boolean(item));
+    if (registrationReview && !item) {
+      const latest = await api("/api/v1/expenses/recurring");
+      let registered = state.recurringRegistrationCreated
+        || latest.find((candidate) => sameRecurringExpenseInput(candidate, body))
+        || null;
+      if (!registered) {
+        registered = await expenseMutation("/api/v1/expenses/recurring", {
+          operation: "recurring-expense-create",
+          resource: `registration:${registrationReview.id}`,
+          body
+        });
+      }
+      state.recurringRegistrationCreated = registered;
+      updateRecurringSaveLabel();
+      try {
+        const resolution = {
+          kind: "purchase",
+          category: body.category,
+          duplicateOfEventId: null,
+          relatedEventId: null,
+          personalAmountMinor: null,
+          createRule: false
+        };
+        await expenseMutation(`/api/v1/expenses/reviews/${encodeURIComponent(registrationReview.id)}/resolve`, {
+          operation: "expense-review-resolve",
+          version: registrationReview.version,
+          resource: registrationReview.id,
+          body: resolution
+        });
+      } catch (error) {
+        byId("expense-recurring-registration-note").textContent = "정기지출 항목은 등록되었습니다. 후보 검토 완료만 다시 시도하면 중복 항목을 만들지 않습니다.";
+        toast(`${error.message} 등록한 항목은 유지했으며 검토 완료만 다시 시도할 수 있습니다.`);
+        await loadExpenses();
+        if (!state.expenseReviews.some((review) => review.id === registrationReview.id)) {
+          closeRecurringExpenseForm();
+          toast("정기지출을 등록하고 후보 검토를 완료했습니다.");
+        }
+        return;
+      }
+      closeRecurringExpenseForm();
+      toast("정기지출을 등록하고 후보 검토를 완료했습니다.");
+      await loadExpenses();
+      return;
+    }
+    await expenseMutation(item ? `/api/v1/expenses/recurring/${encodeURIComponent(item.id)}` : "/api/v1/expenses/recurring", {
+      method: item ? "PATCH" : "POST",
+      operation: item ? "recurring-expense-update" : "recurring-expense-create",
+      version: item?.version ?? null,
+      resource: item?.id ?? "recurring-form",
+      body
+    });
+    closeRecurringExpenseForm();
+    toast(item ? "정기지출을 변경했습니다." : "정기지출을 등록했습니다.");
+    await loadExpenses();
+  } catch (error) {
+    toast(`${error.message} 자동으로 다시 시도하지 않았습니다.`);
+  } finally {
+    const label = state.recurringRegistrationReview
+      ? state.recurringRegistrationCreated ? "검토 완료 다시 시도" : "등록하고 검토 완료"
+      : "저장";
+    setBusy(button, false, label);
+  }
+});
+
+byId("expense-recurring-delete").addEventListener("click", async (event) => {
+  const item = state.editingRecurringExpense;
+  if (!item || !window.confirm(`‘${item.name}’ 정기지출을 삭제할까요?`)) return;
+  const button = event.currentTarget;
+  setBusy(button, true, "삭제");
+  try {
+    await expenseMutation(`/api/v1/expenses/recurring/${encodeURIComponent(item.id)}`, {
+      method: "DELETE",
+      operation: "recurring-expense-delete",
+      version: item.version,
+      resource: item.id
+    });
+    closeRecurringExpenseForm();
+    toast("정기지출을 삭제했습니다.");
+    await loadExpenses();
+  } catch (error) {
+    toast(`${error.message} 자동으로 다시 시도하지 않았습니다.`);
+  } finally {
+    setBusy(button, false, "삭제");
+  }
+});
+
 async function loadCalendar(month = state.calendarMonth || todaySeoul().slice(0, 7)) {
   state.calendarMonth = month;
   if (!state.selectedCalendarDate || !state.selectedCalendarDate.startsWith(`${month}-`)) {
@@ -1216,7 +2496,15 @@ function renderCalendar() {
   const leading = (new Date(Date.UTC(year, monthNumber - 1, 1)).getUTCDay() + 6) % 7;
   const totalCells = Math.ceil((leading + lastDay) / 7) * 7;
   const occurrencesByDate = new Map();
-  state.calendar.occurrences.forEach((occurrence) => {
+  const calendarOccurrences = state.calendar.occurrences.map((occurrence) => ({ ...occurrence, isExpense: false }));
+  const expenseOccurrences = (state.calendar.expenseOccurrences || []).map((occurrence) => ({
+    ...occurrence,
+    date: occurrence.dueDate,
+    title: occurrence.name,
+    kind: "expense",
+    isExpense: true
+  }));
+  [...calendarOccurrences, ...expenseOccurrences].forEach((occurrence) => {
     const values = occurrencesByDate.get(occurrence.date) || [];
     values.push(occurrence);
     occurrencesByDate.set(occurrence.date, values);
@@ -1258,7 +2546,16 @@ function renderCalendarAgenda() {
   const list = byId("calendar-agenda-list");
   clear(list);
   const events = new Map(state.calendar.events.map((event) => [event.id, event]));
-  const occurrences = state.calendar.occurrences.filter((occurrence) => occurrence.date === date);
+  const occurrences = [
+    ...state.calendar.occurrences.map((occurrence) => ({ ...occurrence, isExpense: false })),
+    ...(state.calendar.expenseOccurrences || []).map((occurrence) => ({
+      ...occurrence,
+      date: occurrence.dueDate,
+      title: occurrence.name,
+      kind: "expense",
+      isExpense: true
+    }))
+  ].filter((occurrence) => occurrence.date === date);
   if (!occurrences.length) {
     list.append(text("p", "등록된 일정이 없습니다.", "empty"));
     return;
@@ -1268,11 +2565,17 @@ function renderCalendarAgenda() {
     button.type = "button";
     const body = text("span", "");
     body.append(text("strong", occurrence.title));
-    const source = events.get(occurrence.eventId);
+    const source = occurrence.isExpense ? null : events.get(occurrence.eventId);
     const time = occurrence.eventTime ? occurrence.eventTime.slice(0, 5) : "하루 종일";
-    body.append(text("small", `${time} · ${recurrenceText(source || occurrence)}`));
+    body.append(text("small", occurrence.isExpense
+      ? `정기지출 · ${recurringOccurrenceLabels[occurrence.status] || occurrence.status}${occurrence.amountChanged ? " · 금액 변동" : ""}`
+      : `${time} · ${recurrenceText(source || occurrence)}`));
     button.append(body);
     if (source) button.addEventListener("click", () => openCalendarForm(source));
+    if (occurrence.isExpense) button.addEventListener("click", () => {
+      state.selectedRecurringExpenseId = occurrence.recurringExpenseId;
+      selectTab("expenses");
+    });
     list.append(button);
   });
 }
@@ -1418,14 +2721,53 @@ const taskStatusTransitions = {
   cancelled: ["inbox", "todo"]
 };
 
-function mutationHeaders(operation, version = null) {
+function mutationHeaders(operation, version = null, idempotencyKey = crypto.randomUUID()) {
   const headers = {
-    "idempotency-key": crypto.randomUUID(),
+    "idempotency-key": idempotencyKey,
     "x-tm-confirm-mutation": operation
   };
   if (version === null) headers["if-none-match"] = "*";
   else headers["if-match"] = `"${version}"`;
   return headers;
+}
+
+function expenseMutationFingerprint(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(expenseMutationFingerprint).join(",")}]`;
+  return `{${Object.keys(value).sort().map((key) =>
+    `${JSON.stringify(key)}:${expenseMutationFingerprint(value[key])}`).join(",")}}`;
+}
+
+function expenseMutationAction(operation, resource) {
+  return `${operation}:${resource}`;
+}
+
+function discardExpenseMutation(operation, resource) {
+  pendingExpenseMutationKeys.delete(expenseMutationAction(operation, resource));
+}
+
+async function expenseMutation(path, {
+  method = "POST",
+  operation,
+  version = null,
+  resource,
+  body,
+  aiConfirmation = null
+}) {
+  const action = expenseMutationAction(operation, resource);
+  const fingerprint = expenseMutationFingerprint(body ?? null);
+  let pending = pendingExpenseMutationKeys.get(action);
+  if (!pending || pending.fingerprint !== fingerprint) {
+    pending = { fingerprint, key: crypto.randomUUID() };
+    pendingExpenseMutationKeys.set(action, pending);
+  }
+  const headers = mutationHeaders(operation, version, pending.key);
+  if (aiConfirmation) headers["x-tm-confirm-ai-call"] = aiConfirmation;
+  const result = await api(path, { method, headers, body });
+  if (pendingExpenseMutationKeys.get(action)?.key === pending.key) {
+    pendingExpenseMutationKeys.delete(action);
+  }
+  return result;
 }
 
 function activeProject(projectId) {

@@ -16,6 +16,7 @@ use url::Url;
 use crate::{
     ApiEnvelope, ApiError, AppState, AuthenticatedSession, AuthenticatedSubject, RequestId,
     auth::{DEVICE_TOKEN_PREFIX, generate_pairing_code, generate_secret, sha256_hex},
+    expense_api,
 };
 
 pub(super) const DEVICE_COOKIE: &str = "__Host-tm_device";
@@ -95,6 +96,9 @@ pub(super) fn is_public_path(path: &str) -> bool {
 }
 
 pub(super) fn device_route_allowed(method: &Method, path: &str) -> bool {
+    if expense_api::route_allowed_for_device(method, path) {
+        return true;
+    }
     if matches!(
         path,
         "/api/v1/auth/status" | "/api/v1/device/self" | "/api/v1/costs/status"

@@ -17,7 +17,20 @@ interface CalendarPageProps {
   onCreate: (input: CreateCalendarEventInput) => Promise<CalendarEvent>;
   onUpdate: (eventId: string, input: UpdateCalendarEventInput) => Promise<CalendarEvent>;
   onDelete: (eventId: string, expectedVersion: number) => Promise<void>;
+  onOpenExpense: (recurringExpenseId: string) => void;
   onNotify: (message: string, type?: "success" | "error") => void;
+}
+
+interface CalendarDisplayOccurrence {
+  key: string;
+  title: string;
+  date: string;
+  eventTime: string | null;
+  variant: CalendarEventKind | "expense";
+  calendarOccurrence: CalendarMonth["occurrences"][number] | null;
+  recurringExpenseId: string | null;
+  amountChanged: boolean;
+  status: string | null;
 }
 
 interface FormState {
@@ -86,6 +99,7 @@ export function CalendarPage({
   onCreate,
   onUpdate,
   onDelete,
+  onOpenExpense,
   onNotify,
 }: CalendarPageProps) {
   const [month, setMonth] = useState(today.slice(0, 7));
@@ -116,11 +130,40 @@ export function CalendarPage({
   }, [month, selectedDate]);
 
   const occurrencesByDate = useMemo(() => {
-    const result = new Map<string, CalendarMonth["occurrences"]>();
+    const result = new Map<string, CalendarDisplayOccurrence[]>();
     for (const occurrence of data?.occurrences ?? []) {
       const entries = result.get(occurrence.date) ?? [];
-      entries.push(occurrence);
+      entries.push({
+        key: occurrence.occurrenceKey,
+        title: occurrence.title,
+        date: occurrence.date,
+        eventTime: occurrence.eventTime,
+        variant: occurrence.kind,
+        calendarOccurrence: occurrence,
+        recurringExpenseId: null,
+        amountChanged: false,
+        status: null,
+      });
       result.set(occurrence.date, entries);
+    }
+    for (const occurrence of data?.expenseOccurrences ?? []) {
+      const entries = result.get(occurrence.dueDate) ?? [];
+      entries.push({
+        key: occurrence.occurrenceKey,
+        title: occurrence.name,
+        date: occurrence.dueDate,
+        eventTime: null,
+        variant: "expense",
+        calendarOccurrence: null,
+        recurringExpenseId: occurrence.recurringExpenseId,
+        amountChanged: occurrence.amountChanged,
+        status: occurrence.status,
+      });
+      result.set(occurrence.dueDate, entries);
+    }
+    for (const entries of result.values()) {
+      entries.sort((left, right) => (left.eventTime ?? "").localeCompare(right.eventTime ?? "")
+        || left.title.localeCompare(right.title, "ko-KR"));
     }
     return result;
   }, [data]);
@@ -243,7 +286,7 @@ export function CalendarPage({
                   <strong>{Number(date.slice(8, 10))}</strong>
                   <span className="calendar-day__events">
                     {(occurrencesByDate.get(date) ?? []).slice(0, 3).map((occurrence) => (
-                      <i className={`calendar-event-dot calendar-event-dot--${occurrence.kind}`} key={occurrence.occurrenceKey}>{occurrence.title}</i>
+                      <i className={`calendar-event-dot calendar-event-dot--${occurrence.variant}`} key={occurrence.key}>{occurrence.title}</i>
                     ))}
                     {(occurrencesByDate.get(date)?.length ?? 0) > 3 && <small>+{(occurrencesByDate.get(date)?.length ?? 0) - 3}</small>}
                   </span>
@@ -261,11 +304,14 @@ export function CalendarPage({
           <div className="calendar-agenda__list">
             {selectedOccurrences.length === 0 && <p className="calendar-empty">등록된 일정이 없습니다.</p>}
             {selectedOccurrences.map((occurrence) => {
-              const source = eventById(occurrence.eventId);
+              const source = occurrence.calendarOccurrence
+                ? eventById(occurrence.calendarOccurrence.eventId)
+                : undefined;
               return (
-                <article className={`calendar-agenda-item calendar-agenda-item--${occurrence.kind}`} key={occurrence.occurrenceKey}>
-                  <div><span>{occurrence.eventTime ? occurrence.eventTime.slice(0, 5) : "하루 종일"}</span><strong>{occurrence.title}</strong><small>{recurrenceLabel({ recurrence: occurrence.recurrence, dayOfMonth: source?.dayOfMonth ?? null })}</small></div>
+                <article className={`calendar-agenda-item calendar-agenda-item--${occurrence.variant}`} key={occurrence.key}>
+                  <div><span>{occurrence.eventTime ? occurrence.eventTime.slice(0, 5) : "하루 종일"}</span><strong>{occurrence.title}</strong><small>{occurrence.calendarOccurrence ? recurrenceLabel({ recurrence: occurrence.calendarOccurrence.recurrence, dayOfMonth: source?.dayOfMonth ?? null }) : `정기지출 · ${occurrence.status === "overdue" ? "기한 경과" : occurrence.status === "due_today" ? "오늘 납부" : occurrence.status === "due_soon" ? "7일 이내" : occurrence.status === "scheduled" ? "예정" : "납부 확인"}${occurrence.amountChanged ? " · 금액 변동" : ""}`}</small></div>
                   {source && <button aria-label={`${occurrence.title} 편집`} className="icon-button icon-button--small" onClick={() => openEdit(source)} type="button"><Icon name="more" size={15} /></button>}
+                  {occurrence.recurringExpenseId && <button aria-label={`${occurrence.title} 정기지출 열기`} className="icon-button icon-button--small" onClick={() => onOpenExpense(occurrence.recurringExpenseId as string)} type="button"><Icon name="chevron" size={15} /></button>}
                 </article>
               );
             })}

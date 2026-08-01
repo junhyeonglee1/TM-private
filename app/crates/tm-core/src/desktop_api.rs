@@ -13,10 +13,12 @@ use crate::{
     ChangeRequest, ChangeRequestKind, ChecklistMutationInput, CreateCalendarEventInput,
     CreateChangeRequestInput, CreateNoteAggregateInput, CreateNoteInput, CreateProjectInput,
     CreateTaskAggregateInput, CreateTaskInput, CreateWorkLogInput, EndSessionInput, EntityLink,
-    EntityType, Error, LinkTargetType, ListStockScreenResultsInput, Note, NoteLinksInput, NoteType,
-    Result, SearchHit, SessionStatus, StartSessionInput, Task, TaskDayEntry, TaskDayStatus,
-    TaskPatch, TaskStatus, TmCore, TrashEntityType, UpdateCalendarEventInput,
-    UpdateChangeRequestInput, UpdateTaskAggregateInput, UpsertStockWatchlistItemInput, WorkSession,
+    EntityType, Error, ExpenseMutationRequest, ExpenseReviewFilter, ExpenseReviewStatus,
+    ExpenseTransactionFilter, LinkTargetType, ListStockScreenResultsInput, NormalizedExpenseImport,
+    Note, NoteLinksInput, NoteType, Result, SearchHit, SessionStatus, StartSessionInput, Task,
+    TaskDayEntry, TaskDayStatus, TaskPatch, TaskStatus, TmCore, TrashEntityType,
+    UpdateCalendarEventInput, UpdateChangeRequestInput, UpdateTaskAggregateInput,
+    UpsertStockWatchlistItemInput, WorkSession,
 };
 
 const DESKTOP_ACTOR: &str = "desktop-user";
@@ -27,6 +29,13 @@ const DESKTOP_ACTOR: &str = "desktop-user";
 pub enum DesktopCommand {
     GetAppSnapshot,
     GetCalendarMonth,
+    GetExpenseSummary,
+    ListExpenseTransactions,
+    ListExpenseReviews,
+    ListRecurringExpenses,
+    GetRecurringExpenseOccurrences,
+    PreviewExpenseImport,
+    ExecuteExpenseMutation,
     CreateCalendarEvent,
     UpdateCalendarEvent,
     DeleteCalendarEvent,
@@ -69,6 +78,11 @@ impl DesktopCommand {
             self,
             Self::GetAppSnapshot
                 | Self::GetCalendarMonth
+                | Self::GetExpenseSummary
+                | Self::ListExpenseTransactions
+                | Self::ListExpenseReviews
+                | Self::ListRecurringExpenses
+                | Self::GetRecurringExpenseOccurrences
                 | Self::GetStockWatchlist
                 | Self::GetLatestStockScreen
                 | Self::ListStockScreenResults
@@ -81,6 +95,13 @@ impl DesktopCommand {
         match self {
             Self::GetAppSnapshot => "get_app_snapshot",
             Self::GetCalendarMonth => "get_calendar_month",
+            Self::GetExpenseSummary => "get_expense_summary",
+            Self::ListExpenseTransactions => "list_expense_transactions",
+            Self::ListExpenseReviews => "list_expense_reviews",
+            Self::ListRecurringExpenses => "list_recurring_expenses",
+            Self::GetRecurringExpenseOccurrences => "get_recurring_expense_occurrences",
+            Self::PreviewExpenseImport => "preview_expense_import",
+            Self::ExecuteExpenseMutation => "execute_expense_mutation",
             Self::CreateCalendarEvent => "create_calendar_event",
             Self::UpdateCalendarEvent => "update_calendar_event",
             Self::DeleteCalendarEvent => "delete_calendar_event",
@@ -261,6 +282,10 @@ struct InputArg<T> {
     input: T,
 }
 
+const fn default_expense_page_size() -> u32 {
+    50
+}
+
 fn parse_args<T: for<'de> Deserialize<'de>>(args: Value) -> Result<T> {
     serde_json::from_value(args).map_err(|error| {
         Error::InvalidInput(format!("desktop command arguments are invalid: {error}"))
@@ -320,6 +345,73 @@ pub fn execute_desktop_command(
             let month = parse_month(&args.month)?;
             serde_json::to_value(core.calendar_month(month.year(), month.month())?)
                 .map_err(Into::into)
+        }
+        DesktopCommand::GetExpenseSummary => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Args {
+                month: String,
+            }
+            let args: Args = parse_args(args)?;
+            serde_json::to_value(core.get_expense_month_summary(parse_month(&args.month)?)?)
+                .map_err(Into::into)
+        }
+        DesktopCommand::ListExpenseTransactions => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase", deny_unknown_fields)]
+            struct Args {
+                month: String,
+                cursor: Option<String>,
+                #[serde(default = "default_expense_page_size")]
+                limit: u32,
+            }
+            let args: Args = parse_args(args)?;
+            serde_json::to_value(core.list_expense_transactions(ExpenseTransactionFilter {
+                month_start: parse_month(&args.month)?,
+                cursor: args.cursor,
+                limit: args.limit,
+            })?)
+            .map_err(Into::into)
+        }
+        DesktopCommand::ListExpenseReviews => {
+            #[derive(Deserialize)]
+            #[serde(rename_all = "camelCase", deny_unknown_fields)]
+            struct Args {
+                month: Option<String>,
+                status: Option<ExpenseReviewStatus>,
+                cursor: Option<String>,
+                #[serde(default = "default_expense_page_size")]
+                limit: u32,
+            }
+            let args: Args = parse_args(args)?;
+            serde_json::to_value(core.list_expense_reviews(ExpenseReviewFilter {
+                month_start: args.month.as_deref().map(parse_month).transpose()?,
+                status: args.status,
+                cursor: args.cursor,
+                limit: args.limit,
+            })?)
+            .map_err(Into::into)
+        }
+        DesktopCommand::ListRecurringExpenses => {
+            serde_json::to_value(core.list_recurring_expenses()?).map_err(Into::into)
+        }
+        DesktopCommand::GetRecurringExpenseOccurrences => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Args {
+                month: String,
+            }
+            let args: Args = parse_args(args)?;
+            serde_json::to_value(core.recurring_expense_occurrences(parse_month(&args.month)?)?)
+                .map_err(Into::into)
+        }
+        DesktopCommand::PreviewExpenseImport => {
+            let args: InputArg<NormalizedExpenseImport> = parse_args(args)?;
+            serde_json::to_value(core.preview_expense_import(&args.input)?).map_err(Into::into)
+        }
+        DesktopCommand::ExecuteExpenseMutation => {
+            let args: InputArg<ExpenseMutationRequest> = parse_args(args)?;
+            serde_json::to_value(core.execute_expense_mutation(args.input)?).map_err(Into::into)
         }
         DesktopCommand::CreateCalendarEvent => {
             let args: InputArg<CreateCalendarEventInput> = parse_args(args)?;
@@ -1266,6 +1358,13 @@ mod tests {
         let commands = [
             DesktopCommand::GetAppSnapshot,
             DesktopCommand::GetCalendarMonth,
+            DesktopCommand::GetExpenseSummary,
+            DesktopCommand::ListExpenseTransactions,
+            DesktopCommand::ListExpenseReviews,
+            DesktopCommand::ListRecurringExpenses,
+            DesktopCommand::GetRecurringExpenseOccurrences,
+            DesktopCommand::PreviewExpenseImport,
+            DesktopCommand::ExecuteExpenseMutation,
             DesktopCommand::CreateCalendarEvent,
             DesktopCommand::UpdateCalendarEvent,
             DesktopCommand::DeleteCalendarEvent,
@@ -1384,6 +1483,7 @@ mod tests {
         let core = crate::TmCore::open(TmHome::new(temporary.path()))?;
         assert!(DesktopCommand::GetLatestStockScreen.is_read_only());
         assert!(DesktopCommand::ListStockScreenResults.is_read_only());
+        assert!(!DesktopCommand::PreviewExpenseImport.is_read_only());
         assert!(!DesktopCommand::UpsertStockWatchlistItem.is_read_only());
 
         let latest =

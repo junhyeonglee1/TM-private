@@ -5,7 +5,7 @@ use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params, 
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Error, Result, TmCore,
+    Error, RecurringExpenseOccurrence, Result, TmCore,
     database::{new_id, now_utc},
     error::{invalid, not_found},
 };
@@ -158,6 +158,8 @@ pub struct CalendarMonth {
     pub month_end: NaiveDate,
     pub events: Vec<CalendarEvent>,
     pub occurrences: Vec<CalendarOccurrence>,
+    /// Virtual payment occurrences; these are never copied into `calendar_events`.
+    pub expense_occurrences: Vec<RecurringExpenseOccurrence>,
 }
 
 impl TmCore {
@@ -311,12 +313,14 @@ impl TmCore {
         let month_end = last_day_of_month(year, month)?;
         let events = self.list_calendar_events(false)?;
         let occurrences = occurrences_for_month(&events, month_start, month_end);
+        let expense_occurrences = self.recurring_expense_occurrences(month_start)?;
         Ok(CalendarMonth {
             month: format!("{year:04}-{month:02}"),
             month_start,
             month_end,
             events,
             occurrences,
+            expense_occurrences,
         })
     }
 

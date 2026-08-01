@@ -20,7 +20,7 @@ use crate::{
         Database, SCHEMA_VERSION, database_lock, now_utc, register_runtime_functions,
         validate_schema_semantics,
     },
-    export::EXPORTED_TABLES,
+    migration::MANIFEST_TABLES,
 };
 
 const DATABASE_BACKUP_LIMIT: usize = 30;
@@ -155,21 +155,37 @@ pub(crate) fn restore_database(
     let mut destination = Connection::open(database_path)?;
     destination.busy_timeout(Duration::from_secs(15))?;
     register_runtime_functions(&destination)?;
-    {
-        let backup = Backup::new(&source, &mut destination)?;
-        backup.run_to_completion(128, Duration::from_millis(10), None)?;
-    }
-    destination.execute_batch("PRAGMA foreign_keys = ON;")?;
-    let restored_version: i64 =
-        destination.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    Database::migrate(&mut destination, restored_version)?;
-    merge_delivery_ledger(&destination, &delivery_ledger)?;
-    merge_change_request_ledger(&mut destination, &change_request_ledger)?;
-    merge_scheduler_ledger(&destination, Path::new(&safety_backup.path))?;
-    merge_device_auth_ledger(&destination, Path::new(&safety_backup.path))?;
-    destination.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+    let apply_result = (|| -> Result<()> {
+        {
+            let backup = Backup::new(&source, &mut destination)?;
+            backup.run_to_completion(128, Duration::from_millis(10), None)?;
+        }
+        destination.execute_batch("PRAGMA foreign_keys = ON;")?;
+        let restored_version: i64 =
+            destination.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        Database::migrate(&mut destination, restored_version)?;
+        merge_delivery_ledger(&destination, &delivery_ledger)?;
+        merge_change_request_ledger(&mut destination, &change_request_ledger)?;
+        merge_scheduler_ledger(&destination, Path::new(&safety_backup.path))?;
+        merge_device_auth_ledger(&destination, Path::new(&safety_backup.path))?;
+        merge_expense_ledger(&destination, Path::new(&safety_backup.path))?;
+        destination.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        Ok(())
+    })();
     drop(destination);
-    validate_database(database_path, true)?;
+    let apply_result = apply_result.and_then(|()| validate_database(database_path, true));
+    if let Err(error) = apply_result {
+        let rollback =
+            overwrite_database_from_backup(database_path, Path::new(&safety_backup.path));
+        let _ = FileExt::unlock(&backup_lock);
+        let _ = FileExt::unlock(&maintenance_lock);
+        return match rollback {
+            Ok(()) => Err(error),
+            Err(rollback_error) => Err(Error::Invariant(format!(
+                "restore failed ({error}) and the pre-restore safety rollback also failed ({rollback_error})"
+            ))),
+        };
+    }
     retain_newest(
         backup_directory,
         "sqlite3",
@@ -179,6 +195,22 @@ pub(crate) fn restore_database(
     FileExt::unlock(&backup_lock)?;
     FileExt::unlock(&maintenance_lock)?;
     Ok(safety_backup)
+}
+
+fn overwrite_database_from_backup(database_path: &Path, backup_path: &Path) -> Result<()> {
+    let source = Connection::open_with_flags(
+        backup_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_FULL_MUTEX,
+    )?;
+    let mut destination = Connection::open(database_path)?;
+    destination.busy_timeout(Duration::from_secs(15))?;
+    {
+        let backup = Backup::new(&source, &mut destination)?;
+        backup.run_to_completion(128, Duration::from_millis(10), None)?;
+    }
+    destination.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+    drop(destination);
+    validate_database(database_path, true)
 }
 
 pub(crate) fn create_source_snapshot(
@@ -340,7 +372,7 @@ fn has_complete_migration_manifest(
 }
 
 fn has_complete_schema_tables(connection: &Connection) -> rusqlite::Result<bool> {
-    for table in EXPORTED_TABLES {
+    for table in MANIFEST_TABLES {
         let exists: bool = connection.query_row(
             "SELECT EXISTS(
                 SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1
@@ -1101,6 +1133,166 @@ fn merge_device_auth_ledger(connection: &Connection, preserved_database: &Path) 
     merge_result?;
     detach_result?;
     Ok(())
+}
+
+fn merge_expense_ledger(connection: &Connection, preserved_database: &Path) -> Result<()> {
+    connection.execute(
+        "ATTACH DATABASE ?1 AS expense_preserved",
+        [preserved_database.to_string_lossy().as_ref()],
+    )?;
+    let merge_result = (|| -> Result<()> {
+        connection.execute_batch("BEGIN IMMEDIATE;")?;
+        for table in [
+            "expense_crypto_metadata",
+            "expense_sources",
+            "expense_import_batches",
+            "expense_import_preview_sessions",
+            "expense_raw_rows",
+            "expense_postings",
+            "expense_events",
+            "expense_event_postings",
+            "expense_allocations",
+            "recurring_expense_items",
+            "recurring_expense_versions",
+            "recurring_expense_occurrences",
+            "expense_reviews",
+            "expense_rules",
+            "expense_month_reports",
+            "expense_ai_reports",
+            "expense_ai_feedback",
+            "expense_ai_request_bindings",
+            "expense_ai_attempts",
+            "expense_mutation_receipts",
+        ] {
+            let (columns, primary_key) = expense_table_columns(connection, table)?;
+            let table_name = quote_sql_identifier(table);
+            let column_list = columns
+                .iter()
+                .map(|column| quote_sql_identifier(column))
+                .collect::<Vec<_>>()
+                .join(", ");
+            if matches!(
+                table,
+                "expense_allocations"
+                    | "expense_rules"
+                    | "expense_month_reports"
+                    | "expense_ai_attempts"
+            ) {
+                // These tables are mutable projections of user decisions or durable
+                // attempt state. The pre-restore safety backup is the authoritative
+                // newer snapshot; replacing the restored copy also preserves deletes.
+                connection.execute_batch(&format!(
+                    "DELETE FROM main.{table_name};
+                     INSERT INTO main.{table_name}({column_list})
+                     SELECT {column_list} FROM expense_preserved.{table_name};"
+                ))?;
+            } else if matches!(
+                table,
+                "expense_sources"
+                    | "expense_import_preview_sessions"
+                    | "expense_events"
+                    | "recurring_expense_items"
+                    | "recurring_expense_occurrences"
+                    | "expense_reviews"
+                    | "expense_ai_feedback"
+            ) {
+                let conflict_target = primary_key
+                    .iter()
+                    .map(|column| quote_sql_identifier(column))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let updates = columns
+                    .iter()
+                    .filter(|column| !primary_key.contains(column))
+                    .map(|column| {
+                        let quoted = quote_sql_identifier(column);
+                        format!("{quoted} = excluded.{quoted}")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if primary_key.is_empty() || updates.is_empty() {
+                    return Err(Error::Invariant(format!(
+                        "expense merge table lacks a usable primary key: {table}"
+                    )));
+                }
+                connection.execute_batch(&format!(
+                    "INSERT INTO main.{table_name}({column_list})
+                     SELECT {column_list} FROM expense_preserved.{table_name} WHERE true
+                     ON CONFLICT({conflict_target}) DO UPDATE SET {updates};"
+                ))?;
+            } else {
+                connection.execute_batch(&format!(
+                    "INSERT OR IGNORE INTO main.{table_name}({column_list})
+                     SELECT {column_list} FROM expense_preserved.{table_name};"
+                ))?;
+                let equality = columns
+                    .iter()
+                    .map(|column| {
+                        let quoted = quote_sql_identifier(column);
+                        format!("current.{quoted} IS preserved.{quoted}")
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" AND ");
+                let missing: bool = connection.query_row(
+                    &format!(
+                        "SELECT EXISTS(
+                            SELECT 1 FROM expense_preserved.{table_name} AS preserved
+                            WHERE NOT EXISTS(
+                                SELECT 1 FROM main.{table_name} AS current
+                                WHERE {equality}
+                            )
+                         )"
+                    ),
+                    [],
+                    |row| row.get(0),
+                )?;
+                if missing {
+                    return Err(Error::Conflict(format!(
+                        "restore contains a conflicting immutable expense row in {table}"
+                    )));
+                }
+            }
+        }
+        connection.execute_batch("COMMIT;")?;
+        Ok(())
+    })();
+    if merge_result.is_err() {
+        let _ = connection.execute_batch("ROLLBACK;");
+    }
+    let detach_result = connection.execute_batch("DETACH DATABASE expense_preserved;");
+    merge_result?;
+    detach_result?;
+    Ok(())
+}
+
+fn expense_table_columns(
+    connection: &Connection,
+    table: &str,
+) -> Result<(Vec<String>, Vec<String>)> {
+    let mut statement = connection.prepare(&format!(
+        "PRAGMA main.table_info({})",
+        quote_sql_identifier(table)
+    ))?;
+    let mut rows = statement.query([])?;
+    let mut columns = Vec::new();
+    let mut primary_key = Vec::new();
+    while let Some(row) = rows.next()? {
+        let name = row.get::<_, String>(1)?;
+        let position = row.get::<_, i64>(5)?;
+        columns.push(name.clone());
+        if position > 0 {
+            primary_key.push((position, name));
+        }
+    }
+    primary_key.sort_by_key(|(position, _)| *position);
+    Ok((
+        columns,
+        primary_key.into_iter().map(|(_, name)| name).collect(),
+    ))
+}
+
+fn quote_sql_identifier(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
 }
 
 #[derive(Debug, Default)]

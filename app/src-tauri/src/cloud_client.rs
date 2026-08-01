@@ -11,7 +11,7 @@ use std::{
     process::{Command, Stdio},
 };
 
-use reqwest::{Method, StatusCode, Url};
+use reqwest::{Method, StatusCode, Url, header};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tm_core::TmHome;
@@ -347,6 +347,390 @@ impl CloudClient {
             .ok_or_else(|| "TM cloud response did not contain data".to_owned())
     }
 
+    pub(crate) async fn expense_feature(&self, command: &str, args: Value) -> CloudResult<Value> {
+        if self.mode != DataMode::Cloud {
+            return Err("TM expense features require cloud mode".to_owned());
+        }
+
+        let idempotency_key = optional_expense_idempotency_key(&args)?;
+        let mut query = Vec::<(&'static str, String)>::new();
+        let mut path = Vec::<String>::new();
+        let mut confirmation = None;
+        let mut expected_version = None;
+        let mut create_precondition = false;
+        let mut body = None;
+        let method = match command {
+            "get_expense_summary" => {
+                path.extend(["expenses".to_owned(), "summary".to_owned()]);
+                query.push(("month", required_month(&args, "month")?.to_owned()));
+                Method::GET
+            }
+            "list_expense_sources" => {
+                path.extend(["expenses".to_owned(), "sources".to_owned()]);
+                Method::GET
+            }
+            "update_expense_source" => {
+                let source_id = required_expense_id(&args, "sourceId")?;
+                let input = required_object(&args, "input")?;
+                path.extend([
+                    "expenses".to_owned(),
+                    "sources".to_owned(),
+                    source_id.to_owned(),
+                ]);
+                confirmation = Some("expense-source-update");
+                expected_version = Some(required_version(input, "expectedVersion")?);
+                body = Some(copy_object_fields(
+                    input,
+                    &["requiredForCompleteReport", "isActive"],
+                )?);
+                Method::PATCH
+            }
+            "list_expense_transactions" => {
+                let input = required_object(&args, "input")?;
+                path.extend(["expenses".to_owned(), "transactions".to_owned()]);
+                query.push(("month", required_month(input, "month")?.to_owned()));
+                append_optional_page_query(input, &mut query)?;
+                Method::GET
+            }
+            "override_expense_transaction" => {
+                let event_id = required_expense_id(&args, "eventId")?;
+                let input = required_object(&args, "input")?;
+                path.extend([
+                    "expenses".to_owned(),
+                    "transactions".to_owned(),
+                    event_id.to_owned(),
+                ]);
+                confirmation = Some("expense-transaction-override");
+                expected_version = Some(required_version(input, "expectedVersion")?);
+                body = Some(copy_object_fields(
+                    input,
+                    &[
+                        "kind",
+                        "category",
+                        "duplicateOfEventId",
+                        "relatedEventId",
+                        "personalAmountMinor",
+                        "clearPersonalAmount",
+                        "clearRelatedEvent",
+                        "createRule",
+                    ],
+                )?);
+                Method::PATCH
+            }
+            "list_expense_reviews" => {
+                let input = required_object(&args, "input")?;
+                path.extend(["expenses".to_owned(), "reviews".to_owned()]);
+                if let Some(month) = optional_month(input, "month")? {
+                    query.push(("month", month.to_owned()));
+                }
+                if let Some(status) = optional_enum(input, "status", &["pending", "resolved"])? {
+                    query.push(("status", status.to_owned()));
+                }
+                append_optional_page_query(input, &mut query)?;
+                Method::GET
+            }
+            "resolve_expense_review" => {
+                let review_id = required_expense_id(&args, "reviewId")?;
+                let input = required_object(&args, "input")?;
+                path.extend([
+                    "expenses".to_owned(),
+                    "reviews".to_owned(),
+                    review_id.to_owned(),
+                    "resolve".to_owned(),
+                ]);
+                confirmation = Some("expense-review-resolve");
+                expected_version = Some(required_version(input, "expectedVersion")?);
+                body = Some(copy_object_fields(
+                    input,
+                    &[
+                        "kind",
+                        "category",
+                        "duplicateOfEventId",
+                        "relatedEventId",
+                        "personalAmountMinor",
+                        "createRule",
+                    ],
+                )?);
+                Method::POST
+            }
+            "list_recurring_expenses" => {
+                path.extend(["expenses".to_owned(), "recurring".to_owned()]);
+                Method::GET
+            }
+            "list_recurring_expense_occurrences" => {
+                path.extend([
+                    "expenses".to_owned(),
+                    "recurring".to_owned(),
+                    "occurrences".to_owned(),
+                ]);
+                query.push(("month", required_month(&args, "month")?.to_owned()));
+                Method::GET
+            }
+            "create_recurring_expense" => {
+                let input = required_object(&args, "input")?;
+                path.extend(["expenses".to_owned(), "recurring".to_owned()]);
+                confirmation = Some("recurring-expense-create");
+                create_precondition = true;
+                body = Some(copy_recurring_fields(input, false)?);
+                Method::POST
+            }
+            "update_recurring_expense" => {
+                let item_id = required_expense_id(&args, "recurringExpenseId")?;
+                let input = required_object(&args, "input")?;
+                path.extend([
+                    "expenses".to_owned(),
+                    "recurring".to_owned(),
+                    item_id.to_owned(),
+                ]);
+                confirmation = Some("recurring-expense-update");
+                expected_version = Some(required_version(input, "expectedVersion")?);
+                body = Some(copy_recurring_fields(input, true)?);
+                Method::PATCH
+            }
+            "delete_recurring_expense" => {
+                let item_id = required_expense_id(&args, "recurringExpenseId")?;
+                path.extend([
+                    "expenses".to_owned(),
+                    "recurring".to_owned(),
+                    item_id.to_owned(),
+                ]);
+                confirmation = Some("recurring-expense-delete");
+                expected_version = Some(required_version(&args, "expectedVersion")?);
+                Method::DELETE
+            }
+            "confirm_recurring_expense_paid" => {
+                let occurrence_key = required_expense_id(&args, "occurrenceKey")?;
+                path.extend([
+                    "expenses".to_owned(),
+                    "recurring".to_owned(),
+                    "occurrences".to_owned(),
+                    occurrence_key.to_owned(),
+                    "confirm-paid".to_owned(),
+                ]);
+                confirmation = Some("recurring-expense-confirm-paid");
+                expected_version = Some(required_version(&args, "expectedVersion")?);
+                body = Some(copy_object_fields(&args, &["amountMinor", "paidDate"])?);
+                Method::POST
+            }
+            "match_recurring_expense_occurrence" => {
+                let occurrence_key = required_expense_id(&args, "occurrenceKey")?;
+                path.extend([
+                    "expenses".to_owned(),
+                    "recurring".to_owned(),
+                    "occurrences".to_owned(),
+                    occurrence_key.to_owned(),
+                    "match".to_owned(),
+                ]);
+                confirmation = Some("recurring-expense-match");
+                expected_version = Some(required_version(&args, "expectedVersion")?);
+                body = Some(copy_object_fields(
+                    &args,
+                    &["eventId", "enableFutureAutoMatch"],
+                )?);
+                Method::POST
+            }
+            "generate_expense_report" => {
+                path.extend(["expenses".to_owned(), "reports".to_owned()]);
+                confirmation = Some("expense-report-generate");
+                create_precondition = true;
+                body = Some(serde_json::json!({
+                    "month": required_month(&args, "month")?,
+                }));
+                Method::POST
+            }
+            "latest_expense_report" => {
+                path.extend([
+                    "expenses".to_owned(),
+                    "reports".to_owned(),
+                    "latest".to_owned(),
+                ]);
+                query.push(("month", required_month(&args, "month")?.to_owned()));
+                Method::GET
+            }
+            "rate_expense_report" => {
+                let report_id = required_expense_id(&args, "reportId")?;
+                let helpful = args
+                    .get("helpful")
+                    .and_then(Value::as_bool)
+                    .ok_or_else(|| "TM expense report feedback must be a boolean".to_owned())?;
+                path.extend([
+                    "expenses".to_owned(),
+                    "reports".to_owned(),
+                    report_id.to_owned(),
+                    "feedback".to_owned(),
+                ]);
+                confirmation = Some("expense-report-feedback");
+                create_precondition = true;
+                body = Some(serde_json::json!({ "helpful": helpful }));
+                Method::POST
+            }
+            _ => return Err("TM expense feature command is not allowed".to_owned()),
+        };
+
+        self.send_expense_request(
+            method,
+            &path,
+            &query,
+            confirmation,
+            (command == "generate_expense_report").then_some("expense-report"),
+            idempotency_key,
+            create_precondition,
+            expected_version,
+            body,
+        )
+        .await
+    }
+
+    pub(crate) async fn import_expenses(
+        &self,
+        body: Value,
+        preview_session_id: &str,
+    ) -> CloudResult<Value> {
+        if self.mode != DataMode::Cloud {
+            return Err("TM expense imports require cloud mode".to_owned());
+        }
+        let encoded = serde_json::to_vec(&body)
+            .map_err(|_| "TM normalized expense import could not be encoded".to_owned())?;
+        if encoded.len() > 8 * 1024 * 1024 {
+            return Err("TM normalized expense import exceeded the 8 MiB safety limit".to_owned());
+        }
+        self.send_expense_request(
+            Method::POST,
+            &["expenses".to_owned(), "imports".to_owned()],
+            &[],
+            Some("expense-import"),
+            None,
+            Some(format!("desktop-expense-import:{preview_session_id}")),
+            true,
+            None,
+            Some(body),
+        )
+        .await
+    }
+
+    pub(crate) async fn preview_expenses(&self, body: Value) -> CloudResult<Value> {
+        if self.mode != DataMode::Cloud {
+            return Err("TM expense import preview requires cloud mode".to_owned());
+        }
+        let encoded = serde_json::to_vec(&body)
+            .map_err(|_| "TM expense import preview could not be encoded".to_owned())?;
+        if encoded.len() > 8 * 1024 * 1024 {
+            return Err("TM expense import preview exceeded the 8 MiB safety limit".to_owned());
+        }
+        self.send_expense_request(
+            Method::POST,
+            &[
+                "expenses".to_owned(),
+                "imports".to_owned(),
+                "preview".to_owned(),
+            ],
+            &[],
+            Some("expense-import-preview"),
+            None,
+            None,
+            true,
+            None,
+            Some(body),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn send_expense_request(
+        &self,
+        method: Method,
+        path_segments: &[String],
+        query: &[(&str, String)],
+        confirmation: Option<&str>,
+        ai_confirmation: Option<&str>,
+        idempotency_key: Option<String>,
+        create_precondition: bool,
+        expected_version: Option<u64>,
+        body: Option<Value>,
+    ) -> CloudResult<Value> {
+        let token = load_token_from_os_store()?;
+        if !valid_token(&token) {
+            return Err("TM cloud credential has an invalid format".to_owned());
+        }
+        let mut endpoint = self
+            .base_url
+            .clone()
+            .ok_or_else(|| "TM cloud HTTPS base URL is not configured".to_owned())?;
+        {
+            let mut segments = endpoint
+                .path_segments_mut()
+                .map_err(|()| "TM cloud expense endpoint could not be constructed".to_owned())?;
+            segments.clear();
+            segments.extend(["api", "v1"]);
+            for segment in path_segments {
+                segments.push(segment);
+            }
+        }
+        if !query.is_empty() {
+            let mut pairs = endpoint.query_pairs_mut();
+            for (name, value) in query {
+                pairs.append_pair(name, value);
+            }
+        }
+
+        let mut request = self
+            .http
+            .request(method, endpoint)
+            .bearer_auth(&token)
+            .timeout(Duration::from_secs(55));
+        if let Some(value) = confirmation {
+            request = request.header("x-tm-confirm-mutation", value).header(
+                "idempotency-key",
+                idempotency_key.unwrap_or_else(|| format!("desktop:{}", uuid::Uuid::now_v7())),
+            );
+        }
+        if let Some(value) = ai_confirmation {
+            request = request.header("x-tm-confirm-ai-call", value);
+        }
+        if create_precondition {
+            request = request.header(header::IF_NONE_MATCH, "*");
+        }
+        if let Some(version) = expected_version {
+            request = request.header(header::IF_MATCH, format!("\"{version}\""));
+        }
+        if let Some(value) = body {
+            request = request.json(&value);
+        }
+
+        let response = request
+            .send()
+            .await
+            .map_err(|_| "TM cloud server could not be reached over HTTPS".to_owned())?;
+        let status = response.status();
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
+        {
+            return Err("TM cloud response exceeded the safety limit".to_owned());
+        }
+        let request_id = response
+            .headers()
+            .get("x-request-id")
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned);
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|_| "TM cloud response could not be read".to_owned())?;
+        if bytes.len() > MAX_RESPONSE_BYTES {
+            return Err("TM cloud response exceeded the safety limit".to_owned());
+        }
+        let payload: Value = serde_json::from_slice(&bytes)
+            .map_err(|_| "TM cloud response was not valid JSON".to_owned())?;
+        if !status.is_success() {
+            return Err(response_error(status, &payload, request_id.as_deref()));
+        }
+        payload
+            .get("data")
+            .cloned()
+            .ok_or_else(|| "TM cloud response did not contain data".to_owned())
+    }
+
     pub(crate) async fn cost_status(&self) -> CloudResult<Value> {
         if self.mode != DataMode::Cloud {
             return Err("TM cost status requires cloud mode".to_owned());
@@ -397,6 +781,167 @@ impl CloudClient {
             .cloned()
             .ok_or_else(|| "TM cloud response did not contain data".to_owned())
     }
+}
+
+fn required_object<'a>(args: &'a Value, field: &str) -> CloudResult<&'a Value> {
+    args.get(field)
+        .filter(|value| value.is_object())
+        .ok_or_else(|| format!("TM expense field must be an object: {field}"))
+}
+
+fn optional_expense_idempotency_key(args: &Value) -> CloudResult<Option<String>> {
+    let Some(value) = args.get("idempotencyKey") else {
+        return Ok(None);
+    };
+    let value = value
+        .as_str()
+        .and_then(|value| value.strip_prefix("desktop-expense:"))
+        .and_then(|value| {
+            let parsed = uuid::Uuid::parse_str(value).ok()?;
+            (parsed.hyphenated().to_string() == value).then_some(value)
+        })
+        .ok_or_else(|| "TM expense idempotency key is invalid".to_owned())?;
+    Ok(Some(format!("desktop-expense:{value}")))
+}
+
+fn required_month<'a>(args: &'a Value, field: &str) -> CloudResult<&'a str> {
+    let value = args
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|value| valid_month(value))
+        .ok_or_else(|| format!("TM expense month is invalid: {field}"))?;
+    Ok(value)
+}
+
+fn optional_month<'a>(args: &'a Value, field: &str) -> CloudResult<Option<&'a str>> {
+    match args.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) if valid_month(value) => Ok(Some(value)),
+        _ => Err(format!("TM expense month is invalid: {field}")),
+    }
+}
+
+fn valid_month(value: &str) -> bool {
+    if value.len() != 7 || value.as_bytes().get(4) != Some(&b'-') {
+        return false;
+    }
+    let Some(year) = value[..4].parse::<u16>().ok() else {
+        return false;
+    };
+    let Some(month) = value[5..].parse::<u8>().ok() else {
+        return false;
+    };
+    (2000..=2200).contains(&year) && (1..=12).contains(&month)
+}
+
+fn optional_enum<'a>(
+    args: &'a Value,
+    field: &str,
+    allowed: &[&str],
+) -> CloudResult<Option<&'a str>> {
+    match args.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) if allowed.contains(&value.as_str()) => Ok(Some(value)),
+        _ => Err(format!("TM expense field is invalid: {field}")),
+    }
+}
+
+fn append_optional_page_query(
+    input: &Value,
+    query: &mut Vec<(&'static str, String)>,
+) -> CloudResult<()> {
+    if let Some(cursor) = input.get("cursor").filter(|value| !value.is_null()) {
+        let cursor = cursor
+            .as_str()
+            .filter(|value| {
+                !value.is_empty() && value.len() <= 512 && !value.chars().any(char::is_control)
+            })
+            .ok_or_else(|| "TM expense cursor is invalid".to_owned())?;
+        query.push(("cursor", cursor.to_owned()));
+    }
+    if let Some(limit) = input.get("limit").filter(|value| !value.is_null()) {
+        let limit = limit
+            .as_u64()
+            .filter(|value| (1..=100).contains(value))
+            .ok_or_else(|| "TM expense page limit must be between 1 and 100".to_owned())?;
+        query.push(("limit", limit.to_string()));
+    }
+    Ok(())
+}
+
+fn required_expense_id<'a>(args: &'a Value, field: &str) -> CloudResult<&'a str> {
+    args.get(field)
+        .and_then(Value::as_str)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 256
+                && *value != "."
+                && *value != ".."
+                && value.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.')
+                })
+        })
+        .ok_or_else(|| format!("TM expense resource identifier is invalid: {field}"))
+}
+
+fn required_version(args: &Value, field: &str) -> CloudResult<u64> {
+    args.get(field)
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| format!("TM expense resource version is invalid: {field}"))
+}
+
+fn copy_object_fields(input: &Value, allowed: &[&str]) -> CloudResult<Value> {
+    let source = input
+        .as_object()
+        .ok_or_else(|| "TM expense mutation input must be an object".to_owned())?;
+    let mut target = serde_json::Map::new();
+    for field in allowed {
+        if let Some(value) = source.get(*field) {
+            target.insert((*field).to_owned(), value.clone());
+        }
+    }
+    Ok(Value::Object(target))
+}
+
+fn copy_recurring_fields(input: &Value, update: bool) -> CloudResult<Value> {
+    const CREATE_FIELDS: &[&str] = &[
+        "name",
+        "category",
+        "vendor",
+        "amountMinor",
+        "currency",
+        "paymentMethodFingerprint",
+        "startDate",
+        "endDate",
+        "memo",
+        "reminderDays",
+        "amountKind",
+        "intervalMonths",
+        "dueRule",
+        "dueDay",
+        "status",
+    ];
+    const UPDATE_FIELDS: &[&str] = &[
+        "name",
+        "category",
+        "vendor",
+        "amountMinor",
+        "currency",
+        "paymentMethodFingerprint",
+        "startDate",
+        "endDate",
+        "memo",
+        "reminderDays",
+        "amountKind",
+        "intervalMonths",
+        "dueRule",
+        "dueDay",
+        "status",
+        "effectiveFromMonth",
+        "autoMatchEnabled",
+    ];
+    copy_object_fields(input, if update { UPDATE_FIELDS } else { CREATE_FIELDS })
 }
 
 fn required_resource_id<'a>(args: &'a Value, field: &str) -> CloudResult<&'a str> {
@@ -595,7 +1140,10 @@ mod tests {
     use serde_json::json;
     use tempfile::tempdir;
 
-    use super::{materialize_export, valid_command_name, valid_token, validate_base_url};
+    use super::{
+        materialize_export, optional_expense_idempotency_key, valid_command_name, valid_token,
+        validate_base_url,
+    };
 
     #[cfg(windows)]
     use super::CREATE_NO_WINDOW;
@@ -614,6 +1162,31 @@ mod tests {
         assert!(!valid_command_name("../../snapshot"));
         assert!(valid_token(&format!("tm_pat_v1_{}", "A".repeat(43))));
         assert!(!valid_token("secret"));
+    }
+
+    #[test]
+    fn expense_idempotency_key_requires_the_exact_desktop_uuid_shape() {
+        let canonical = "desktop-expense:019f55e2-7d05-7bf0-b7dd-12230168a843";
+        assert_eq!(
+            optional_expense_idempotency_key(&json!({ "idempotencyKey": canonical }))
+                .expect("canonical expense key"),
+            Some(canonical.to_owned())
+        );
+        assert_eq!(
+            optional_expense_idempotency_key(&json!({})).expect("optional key"),
+            None
+        );
+        for invalid in [
+            "019f55e2-7d05-7bf0-b7dd-12230168a843",
+            "desktop-expense:{019f55e2-7d05-7bf0-b7dd-12230168a843}",
+            "desktop-expense:019F55E2-7D05-7BF0-B7DD-12230168A843",
+            "desktop-expense:not-a-uuid",
+        ] {
+            assert!(
+                optional_expense_idempotency_key(&json!({ "idempotencyKey": invalid })).is_err(),
+                "accepted invalid key: {invalid}"
+            );
+        }
     }
 
     #[cfg(windows)]

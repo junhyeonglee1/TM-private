@@ -13,6 +13,74 @@ const archiveMockProject = (
 };
 
 describe("Tauri invoke payload 계약", () => {
+  it("지출 mutation은 응답 유실 재시도에 같은 멱등성 키를 쓰고 성공·명시 취소 뒤 교체한다", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    let fail = true;
+    const transport: CommandTransport = {
+      async invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
+        if (command !== "generate_expense_report") return undefined as T;
+        calls.push(args);
+        if (fail) throw new Error("합성 응답 유실");
+        return {} as T;
+      },
+    };
+    const api = createApi(transport);
+
+    await expect(api.generateExpenseReport("2026-08")).rejects.toThrow("합성 응답 유실");
+    fail = false;
+    await api.generateExpenseReport("2026-08");
+    expect(calls[0].idempotencyKey).toBe(calls[1].idempotencyKey);
+
+    fail = true;
+    await expect(api.generateExpenseReport("2026-08")).rejects.toThrow("합성 응답 유실");
+    const failedKey = calls.at(-1)?.idempotencyKey;
+    api.discardExpenseMutation("generate_expense_report", "2026-08");
+    fail = false;
+    await api.generateExpenseReport("2026-08");
+    expect(calls.at(-1)?.idempotencyKey).not.toBe(failedKey);
+  });
+
+  it("출처 CAS와 거래 override clear 계약을 Tauri camelCase 인자로 전달한다", async () => {
+    const calls: Array<{ command: string; args?: Record<string, unknown> }> = [];
+    const transport: CommandTransport = {
+      async invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+        calls.push({ command, args });
+        return {} as T;
+      },
+    };
+    const api = createApi(transport);
+    await api.updateExpenseSource("source-1", {
+      requiredForCompleteReport: true,
+      isActive: false,
+      expectedVersion: 3,
+    });
+    await api.overrideExpenseTransaction("event-1", {
+      kind: "purchase",
+      category: "food",
+      duplicateOfEventId: null,
+      relatedEventId: null,
+      personalAmountMinor: null,
+      clearPersonalAmount: true,
+      clearRelatedEvent: false,
+      createRule: false,
+      expectedVersion: 4,
+    });
+
+    expect(calls[0]).toMatchObject({
+      command: "update_expense_source",
+      args: { sourceId: "source-1", input: { expectedVersion: 3 } },
+    });
+    expect(calls[1]).toMatchObject({
+      command: "override_expense_transaction",
+      args: {
+        eventId: "event-1",
+        input: { clearPersonalAmount: true, clearRelatedEvent: false, expectedVersion: 4 },
+      },
+    });
+    expect(calls[0].args?.idempotencyKey).toMatch(/^desktop-expense:/);
+    expect(calls[1].args?.idempotencyKey).toMatch(/^desktop-expense:/);
+  });
+
   it("mock snapshot과 null·undefined 프로젝트 Task를 시스템 기타 프로젝트로 정규화한다", async () => {
     const api = createApi(createMemoryTransport());
     const initial = await api.getSnapshot();
