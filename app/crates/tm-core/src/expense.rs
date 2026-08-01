@@ -960,7 +960,8 @@ impl TmCore {
     }
 
     pub fn has_encrypted_expense_payloads(&self) -> Result<bool> {
-        has_encrypted_expense_payloads_in_connection(&self.database.connect()?)
+        let connection = self.database.connect()?;
+        has_encrypted_expense_payloads_in_connection(&connection)
     }
 
     /// Returns a read-only, fail-closed proof used before the first production
@@ -4281,7 +4282,7 @@ fn recurring_item_for_month(
             |row| row.get::<_, String>(0),
         )
         .optional()?
-        .map(|json| serde_json::from_str::<RecurringExpenseItem>(&json).map_err(Into::into))
+        .map(|json| serde_json::from_str::<RecurringExpenseItem>(&json))
         .transpose()?;
     let Some(mut snapshot) = snapshot else {
         return Ok(None);
