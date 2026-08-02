@@ -7615,10 +7615,17 @@ mod tests {
             .as_str()
             .expect("card transaction ID")
             .to_owned();
-        assert_eq!(
-            card_event["paymentMethodFingerprint"],
-            Value::String("aa".repeat(32))
+        let captured_payment_method_fingerprint = card_event["paymentMethodFingerprint"]
+            .as_str()
+            .expect("opaque payment method fingerprint")
+            .to_owned();
+        assert_eq!(captured_payment_method_fingerprint.len(), 64);
+        assert!(
+            captured_payment_method_fingerprint
+                .chars()
+                .all(|character| character.is_ascii_digit() || ('a'..='f').contains(&character))
         );
+        assert_ne!(captured_payment_method_fingerprint, "aa".repeat(32));
 
         let mut learned_recurring_body = recurring_expense_body();
         let learned_recurring = learned_recurring_body
@@ -7730,7 +7737,7 @@ mod tests {
         assert!(learned_item["vendor"].is_null());
         assert_eq!(
             learned_item["paymentMethodFingerprint"],
-            Value::String("aa".repeat(32))
+            Value::String(captured_payment_method_fingerprint)
         );
         assert_eq!(learned_item["autoMatchEnabled"], true);
 
