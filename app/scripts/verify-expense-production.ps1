@@ -97,7 +97,7 @@ function Read-BoundedJson {
         throw "Required deployment evidence has an invalid size: $Path"
     }
     try {
-        return [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
+        return [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8) | ConvertFrom-TmJson
     }
     catch {
         throw "Required deployment evidence is not valid JSON: $Path"
@@ -126,7 +126,7 @@ function Get-RailwayDeployments {
         throw 'Unable to list Railway production deployments.'
     }
     try {
-        return @($result.StandardOutput | ConvertFrom-Json)
+        return @($result.StandardOutput | ConvertFrom-TmJson)
     }
     catch {
         throw 'Railway returned invalid deployment metadata JSON.'
@@ -217,7 +217,7 @@ function Invoke-ExpenseRead {
     $response = Invoke-TmRequest -Client $Client -Uri "$Base$Path" -Token $Token
     Assert-Status $response 200 $Stage
     Assert-NoStore $response $Stage
-    try { return ($response.Body | ConvertFrom-Json).data } catch {
+    try { return ($response.Body | ConvertFrom-TmJson).data } catch {
         throw "$Stage returned invalid JSON. Response body was intentionally suppressed."
     }
 }
@@ -431,7 +431,7 @@ try {
     Assert-Status $ops 200 $stage
     Assert-NoStore $ops $stage
     try {
-        $opsData = ($ops.Body | ConvertFrom-Json).data
+        $opsData = ($ops.Body | ConvertFrom-TmJson).data
     }
     catch {
         throw 'operations-status returned invalid JSON. Response body was intentionally suppressed.'

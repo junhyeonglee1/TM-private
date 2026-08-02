@@ -3,6 +3,41 @@ $script:TmReceiptEntropy = [System.Text.Encoding]::UTF8.GetBytes('TM schema15 ex
 $script:TmOperationsToolchainLockPath = [System.IO.Path]::GetFullPath(
     (Join-Path $PSScriptRoot '..\operations-toolchain.lock.json')
 )
+$script:TmConvertFromJsonSupportsDateKind = $false
+$script:TmConvertFromJsonPlainPreservesDateStrings = $false
+$convertFromJsonCommand = Get-Command ConvertFrom-Json -CommandType Cmdlet -ErrorAction Stop
+$script:TmConvertFromJsonSupportsDateKind = $convertFromJsonCommand.Parameters.ContainsKey('DateKind')
+if (-not $script:TmConvertFromJsonSupportsDateKind) {
+    $dateProbe = ConvertFrom-Json -InputObject '{"value":"2030-01-02T03:04:05.0000000+00:00"}' `
+        -ErrorAction Stop
+    $script:TmConvertFromJsonPlainPreservesDateStrings = $dateProbe.value -is [string]
+}
+
+function ConvertFrom-TmJson {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true, ValueFromPipeline = $true)]
+        [AllowEmptyString()]
+        [string]$InputObject
+    )
+
+    begin {
+        $fragments = [System.Collections.Generic.List[string]]::new()
+    }
+    process {
+        $fragments.Add($InputObject)
+    }
+    end {
+        $json = [string]::Join([Environment]::NewLine, $fragments)
+        if ($script:TmConvertFromJsonSupportsDateKind) {
+            return ConvertFrom-Json -InputObject $json -DateKind String -ErrorAction Stop
+        }
+        if ($script:TmConvertFromJsonPlainPreservesDateStrings) {
+            return ConvertFrom-Json -InputObject $json -ErrorAction Stop
+        }
+        throw 'This PowerShell JSON parser cannot preserve ISO date tokens as strings.'
+    }
+}
 
 function Initialize-TmProtectedData {
     try {
@@ -217,7 +252,7 @@ function Read-TmBoundedJsonFile {
         throw 'The protected release receipt has an invalid size.'
     }
     try {
-        return [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
+        return [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8) | ConvertFrom-TmJson
     }
     catch {
         throw 'The protected release receipt is not valid JSON.'
@@ -372,7 +407,7 @@ function Assert-TmPendingReceiptState {
             $script:TmReceiptEntropy,
             [System.Security.Cryptography.DataProtectionScope]::CurrentUser
         )
-        $state = [System.Text.Encoding]::UTF8.GetString($plain) | ConvertFrom-Json
+        $state = [System.Text.Encoding]::UTF8.GetString($plain) | ConvertFrom-TmJson
     }
     catch {
         throw 'The release receipt pending state is invalid for this Windows user.'
@@ -430,7 +465,7 @@ function Assert-TmConsumedReceiptState {
             $script:TmReceiptEntropy,
             [System.Security.Cryptography.DataProtectionScope]::CurrentUser
         )
-        $state = [System.Text.Encoding]::UTF8.GetString($plain) | ConvertFrom-Json
+        $state = [System.Text.Encoding]::UTF8.GetString($plain) | ConvertFrom-TmJson
     }
     catch {
         throw 'The release receipt consumed state is invalid for this Windows user.'
@@ -475,7 +510,7 @@ function Read-TmOperationsToolchainLock {
         $lock = [System.IO.File]::ReadAllText(
             $script:TmOperationsToolchainLockPath,
             [System.Text.Encoding]::UTF8
-        ) | ConvertFrom-Json
+        ) | ConvertFrom-TmJson
     }
     catch { throw 'The reviewed operations toolchain lock is not valid JSON.' }
     Assert-TmExactJsonProperties $lock @('schemaVersion', 'railwayCli', 'git', 'githubCli') 'toolchain lock'
@@ -706,7 +741,7 @@ function Invoke-TmGhJson {
     )
     $output = & $GhPath @Arguments 2>&1
     if ($LASTEXITCODE -ne 0) { throw $FailureMessage }
-    try { return $output | ConvertFrom-Json } catch { throw $FailureMessage }
+    try { return $output | ConvertFrom-TmJson } catch { throw $FailureMessage }
 }
 
 function Read-TmHashManifest {
@@ -1572,7 +1607,7 @@ function Get-TmVerifiedActionsArtifactEvidence {
             $manifest = Read-TmHashManifest -Root $downloadRoot `
                 -ManifestName $manifestName -RequiredFiles $required -AllowDotPrefix
             $provenancePath = Join-Path $downloadRoot 'container-provenance.json'
-            try { $provenance = [System.IO.File]::ReadAllText($provenancePath) | ConvertFrom-Json } catch {
+            try { $provenance = [System.IO.File]::ReadAllText($provenancePath) | ConvertFrom-TmJson } catch {
                 throw 'STEP 16 container provenance is not valid JSON.'
             }
             Assert-TmExactJsonProperties $provenance @(
@@ -1685,7 +1720,7 @@ function Get-TmVerifiedActionsArtifactEvidence {
                 $supplyChain = [System.IO.File]::ReadAllText(
                     $supplyChainPath,
                     [System.Text.Encoding]::UTF8
-                ) | ConvertFrom-Json
+                ) | ConvertFrom-TmJson
             }
             catch { throw 'STEP 16 container supply-chain lock is not valid JSON.' }
             Assert-TmExactJsonProperties $supplyChain @(
@@ -1727,7 +1762,7 @@ function Get-TmVerifiedActionsArtifactEvidence {
                     [System.IO.File]::ReadAllText(
                         (Join-Path $downloadRoot 'image-inspect.json'),
                         [System.Text.Encoding]::UTF8
-                    ) | ConvertFrom-Json
+                    ) | ConvertFrom-TmJson
                 )
             }
             catch { throw 'STEP 16 image inspection evidence is not valid JSON.' }
@@ -1818,7 +1853,7 @@ function Resolve-TmVerifiedRailwayCli {
         $packageRoot = $file.Directory.Parent.FullName
         $packageJsonPath = Join-Path $packageRoot 'package.json'
         if (-not (Test-Path -LiteralPath $packageJsonPath -PathType Leaf)) { continue }
-        try { $package = [System.IO.File]::ReadAllText($packageJsonPath) | ConvertFrom-Json } catch { continue }
+        try { $package = [System.IO.File]::ReadAllText($packageJsonPath) | ConvertFrom-TmJson } catch { continue }
         $version = [Version]::new()
         if ([string]$package.name -cne [string]$lock.railwayCli.packageName -or
             -not [Version]::TryParse([string]$package.version, [ref]$version) -or
@@ -2041,6 +2076,10 @@ function Invoke-TmReleaseEvidenceGuardSelfTest {
         }
         Add-TmReceiptIntegrityProof $receipt
         Write-TmJsonNoBom -Value $receipt -Path $receiptPath
+        $receipt = Read-TmBoundedJsonFile -Path $receiptPath
+        if ($receipt.createdAtUtc -isnot [string] -or $receipt.expiresAtUtc -isnot [string]) {
+            throw 'Release receipt self-test did not preserve ISO date tokens as strings.'
+        }
         Assert-TmReceiptIntegrityProof $receipt
         $null = New-TmPendingReceiptState -StateKind approval -ReceiptId $receipt.approvalId `
             -ReceiptPath $receiptPath -ExpiresAtUtc $receipt.expiresAtUtc -StateRoot (Join-Path $root 'state')

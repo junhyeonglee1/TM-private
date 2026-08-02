@@ -87,7 +87,7 @@ function Invoke-TmOperationsStatus {
             throw 'Production operations status did not return Cache-Control: no-store.'
         }
         try {
-            $body = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult() | ConvertFrom-Json
+            $body = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult() | ConvertFrom-TmJson
         }
         catch {
             throw 'Production operations status returned invalid JSON.'
@@ -521,8 +521,8 @@ function Invoke-ExpenseKeyGuardSelfTest {
     $schema15Json = @'
 {"overallStatus":"critical","alerts":[{"severity":"critical","code":"EXPENSE_CRYPTO_NOT_READY"}],"objectives":{"backupFreshnessTargetHours":24},"database":{"ok":true,"schemaVersion":15},"controls":{"incidentMode":"normal","expenseLedgerEmpty":true,"expenseKeyInitialized":false,"expenseKeyInitializationAllowed":true,"expenseCryptoReady":false,"expenseKeyFingerprint":null},"remoteBackup":{"status":"succeeded","checkedAt":"","snapshotId":"snapshot-15","databaseSha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","databaseByteSize":1,"schemaVersion":15,"integrityCheck":"ok","migrationLedgerComplete":true,"requiredTablesComplete":true,"schemaSemanticsValidated":true}}
 '@
-    $schema14 = $schema14Json | ConvertFrom-Json
-    $schema15 = $schema15Json | ConvertFrom-Json
+    $schema14 = $schema14Json | ConvertFrom-TmJson
+    $schema15 = $schema15Json | ConvertFrom-TmJson
     $now = [DateTimeOffset]::UtcNow.ToString('o')
     $schema14.remoteBackup.checkedAt = $now
     $schema15.remoteBackup.checkedAt = $now
@@ -532,19 +532,19 @@ function Invoke-ExpenseKeyGuardSelfTest {
         throw 'Guard self-test did not accept valid first-time bootstrap proofs.'
     }
 
-    $badBackup = $schema14Json | ConvertFrom-Json
+    $badBackup = $schema14Json | ConvertFrom-TmJson
     $badBackup.remoteBackup.checkedAt = $now
     $badBackup.remoteBackup.status = 'pending'
     Assert-GuardThrows { Get-ExpenseKeyProof $badBackup } 'verified matching remote backup'
-    $stringBoolean = $schema15Json | ConvertFrom-Json
+    $stringBoolean = $schema15Json | ConvertFrom-TmJson
     $stringBoolean.remoteBackup.checkedAt = $now
     $stringBoolean.controls.expenseLedgerEmpty = 'false'
     Assert-GuardThrows { Get-ExpenseKeyProof $stringBoolean } 'non-Boolean expenseLedgerEmpty'
-    $impossible = $schema15Json | ConvertFrom-Json
+    $impossible = $schema15Json | ConvertFrom-TmJson
     $impossible.remoteBackup.checkedAt = $now
     $impossible.controls.expenseCryptoReady = $true
     Assert-GuardThrows { Get-ExpenseKeyProof $impossible } 'impossible expense crypto readiness state'
-    $fingerprintWhileUnavailable = $schema15Json | ConvertFrom-Json
+    $fingerprintWhileUnavailable = $schema15Json | ConvertFrom-TmJson
     $fingerprintWhileUnavailable.remoteBackup.checkedAt = $now
     $fingerprintWhileUnavailable.controls.expenseKeyFingerprint = 'tm_exp_kfp_v1_' + ('a' * 64)
     Assert-GuardThrows {

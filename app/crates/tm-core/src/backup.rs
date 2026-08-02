@@ -391,7 +391,7 @@ fn has_complete_migration_manifest(
 }
 
 fn has_complete_schema_tables(connection: &Connection, version: i64) -> rusqlite::Result<bool> {
-    let tables = match version {
+    let tables: Option<&[&str]> = match version {
         14 => MANIFEST_TABLES
             .get(..SCHEMA_14_MANIFEST_TABLE_COUNT)
             .filter(|tables| {
@@ -399,7 +399,7 @@ fn has_complete_schema_tables(connection: &Connection, version: i64) -> rusqlite
                     && MANIFEST_TABLES.get(SCHEMA_14_MANIFEST_TABLE_COUNT)
                         == Some(&"expense_crypto_metadata")
             }),
-        SCHEMA_VERSION => Some(MANIFEST_TABLES),
+        SCHEMA_VERSION => Some(MANIFEST_TABLES.as_slice()),
         _ => Some(&[]),
     };
     let Some(tables) = tables else {

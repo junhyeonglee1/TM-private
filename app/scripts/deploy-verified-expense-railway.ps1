@@ -82,7 +82,7 @@ function Read-BoundedJson {
         throw "Required JSON proof has an invalid size: $Path"
     }
     try {
-        return [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
+        return [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8) | ConvertFrom-TmJson
     }
     catch {
         throw "Required JSON proof is not valid JSON: $Path"
@@ -303,7 +303,7 @@ function Invoke-TmOperationsStatus {
             throw 'Production operations status did not return Cache-Control: no-store.'
         }
         try {
-            $body = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult() | ConvertFrom-Json
+            $body = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult() | ConvertFrom-TmJson
         }
         catch {
             throw 'Production operations status returned invalid JSON.'
@@ -573,7 +573,7 @@ function Get-RailwayDeployments {
         throw 'Unable to list Railway production deployments.'
     }
     try {
-        return @($result.StandardOutput | ConvertFrom-Json)
+        return @($result.StandardOutput | ConvertFrom-TmJson)
     }
     catch {
         throw 'Railway returned invalid deployment metadata JSON.'
@@ -682,7 +682,7 @@ function Get-DeploymentIdFromUpload {
         $text = [string]$line
         if ([string]::IsNullOrWhiteSpace($text) -or $text.Length -gt 1048576) { continue }
         try {
-            $value = $text | ConvertFrom-Json
+            $value = $text | ConvertFrom-TmJson
         }
         catch {
             # NDJSON may include a small number of non-result diagnostic lines. Only JSON deploymentId fields count.
