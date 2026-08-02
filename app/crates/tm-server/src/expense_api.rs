@@ -713,7 +713,7 @@ pub(super) async fn resolve_review(
         &request_id,
     )?;
     let expected_version = required_expected_version(&preconditions, &request_id)?;
-    let (review, replayed) = execute_expense_mutation(
+    let (review, replayed): (ExpenseReview, bool) = execute_expense_mutation(
         state.core.clone(),
         &request_id,
         &session,
@@ -787,7 +787,7 @@ pub(super) async fn create_recurring(
         &preconditions.idempotency_key,
         &request_id,
     )?;
-    let (item, replayed) = execute_expense_mutation(
+    let (item, replayed): (RecurringExpenseItem, bool) = execute_expense_mutation(
         state.core.clone(),
         &request_id,
         &session,
@@ -831,7 +831,7 @@ pub(super) async fn update_recurring(
         &preconditions.idempotency_key,
         &request_id,
     )?;
-    let (item, replayed) = execute_expense_mutation(
+    let (item, replayed): (RecurringExpenseItem, bool) = execute_expense_mutation(
         state.core.clone(),
         &request_id,
         &session,
@@ -934,7 +934,7 @@ pub(super) async fn confirm_recurring_paid(
         amount_minor: body.amount_minor,
         paid_date: body.paid_date,
     };
-    let (item, replayed) = execute_expense_mutation(
+    let (item, replayed): (RecurringExpenseOccurrence, bool) = execute_expense_mutation(
         state.core.clone(),
         &request_id,
         &session,
@@ -980,7 +980,7 @@ pub(super) async fn match_recurring(
         event_id: body.event_id,
         enable_future_auto_match: body.enable_future_auto_match,
     };
-    let (item, replayed) = execute_expense_mutation(
+    let (item, replayed): (RecurringExpenseOccurrence, bool) = execute_expense_mutation(
         state.core.clone(),
         &request_id,
         &session,

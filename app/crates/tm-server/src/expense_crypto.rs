@@ -223,7 +223,8 @@ impl ExpenseCrypto {
         message.extend_from_slice(field.as_bytes());
         message.push(0);
         message.extend_from_slice(normalized.as_bytes());
-        encode_hex(&hmac_sha256(&**self.key, &message))
+        let digest = hmac_sha256(&**self.key, &message);
+        encode_hex(&digest[..])
     }
 }
 

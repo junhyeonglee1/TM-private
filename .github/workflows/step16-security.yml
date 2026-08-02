@@ -20,9 +20,13 @@ jobs:
   source-and-container:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    env:
+      TM_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.TM_SOURCE_SHA }}
 
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -103,7 +107,7 @@ jobs:
           provenance="${RUNNER_TEMP}/tm-step16-container-provenance"
           rm -rf "${context}" "${provenance}"
           mkdir -p "${context}" "${provenance}"
-          git archive --format=tar --output="${archive}" "${GITHUB_SHA}:app"
+          git archive --format=tar --output="${archive}" "${TM_SOURCE_SHA}:app"
           tar -xf "${archive}" -C "${context}"
           source_archive_sha256="$(sha256sum "${archive}" | cut -d ' ' -f 1)"
           echo "context=${context}" >> "${GITHUB_OUTPUT}"
@@ -128,7 +132,7 @@ jobs:
           docker build \
             --pull \
             --platform linux/amd64 \
-            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.revision=${TM_SOURCE_SHA}" \
             --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
             --file "${TM_STEP16_CONTEXT}/Dockerfile" \
             --tag tm-server:step16 \
@@ -145,7 +149,7 @@ jobs:
             -DockerfilePath (Join-Path $env:TM_STEP16_CONTEXT 'Dockerfile') `
             -PolicyPath (Join-Path $env:TM_STEP16_CONTEXT 'container-supply-chain.lock.json') `
             -ImageReference 'tm-server:step16' `
-            -CommitSha $env:GITHUB_SHA `
+            -CommitSha $env:TM_SOURCE_SHA `
             -Repository $env:GITHUB_REPOSITORY `
             -SourceArchiveSha256 $env:TM_SOURCE_ARCHIVE_SHA256 `
             -WorkflowRunId $env:GITHUB_RUN_ID `

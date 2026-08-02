@@ -323,7 +323,14 @@ pub(crate) fn parse_expense_file(
     }
 
     let mut total_rows = 0_usize;
-    let mut parsed_candidate = None;
+    let mut parsed_candidate: Option<(
+        ExpenseAdapter,
+        String,
+        NaiveDate,
+        NaiveDate,
+        usize,
+        Vec<ParsedExpenseRow>,
+    )> = None;
     for sheet_name in sheet_names {
         let range = workbook
             .worksheet_range(&sheet_name)
