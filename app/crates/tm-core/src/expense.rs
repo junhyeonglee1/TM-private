@@ -1227,13 +1227,12 @@ impl TmCore {
             })
             .transpose()?
             .flatten()
+            && saved_sha256 != input.normalized_sha256
         {
-            if saved_sha256 != input.normalized_sha256 {
-                return Err(Error::Conflict(
-                    "expense file fingerprint was replayed with different normalized content"
-                        .to_owned(),
-                ));
-            }
+            return Err(Error::Conflict(
+                "expense file fingerprint was replayed with different normalized content"
+                    .to_owned(),
+            ));
         }
 
         let mut new_count = 0_u32;
@@ -2227,9 +2226,7 @@ fn import_expenses_in_transaction(
         )?;
 
         let duplicate_or_mirror = mark_duplicate_or_mirror(transaction, &event_id, row)?;
-        if duplicate_or_mirror {
-            excluded_count = excluded_count.saturating_add(1);
-        } else if event_status == ExpenseEventStatus::Excluded {
+        if duplicate_or_mirror || event_status == ExpenseEventStatus::Excluded {
             excluded_count = excluded_count.saturating_add(1);
         }
 
@@ -2984,15 +2981,15 @@ fn recompute_settlement_personal_allocation(
             "settlement allocations exceed the related purchase amount ({amount_minor})"
         )));
     }
-    if let Some((personal_amount, source)) = personal_allocation(transaction, event_id)? {
-        if source == "user" {
-            if i128::from(personal_amount) > calculated {
-                return Err(invalid(format!(
-                    "personal amount and linked settlements exceed the purchase amount ({amount_minor})"
-                )));
-            }
-            return Ok(());
+    if let Some((personal_amount, source)) = personal_allocation(transaction, event_id)?
+        && source == "user"
+    {
+        if i128::from(personal_amount) > calculated {
+            return Err(invalid(format!(
+                "personal amount and linked settlements exceed the purchase amount ({amount_minor})"
+            )));
         }
+        return Ok(());
     }
     if calculated == 0 {
         // Allocation rows are strictly positive.  A linked, fully reimbursed
@@ -4688,12 +4685,12 @@ fn match_recurring_in_transaction(
         let event_vendor = event.merchant.as_ref().ok_or_else(|| {
             invalid("future auto-match requires an encrypted transaction merchant")
         })?;
-        if let Some(vendor) = current.vendor.as_ref() {
-            if vendor.blind_index != event_vendor.blind_index {
-                return Err(invalid(
-                    "matched transaction merchant does not match the recurring vendor",
-                ));
-            }
+        if let Some(vendor) = current.vendor.as_ref()
+            && vendor.blind_index != event_vendor.blind_index
+        {
+            return Err(invalid(
+                "matched transaction merchant does not match the recurring vendor",
+            ));
         }
         let event_payment_method = event.payment_method_fingerprint.as_ref().ok_or_else(|| {
             invalid("future auto-match requires a transaction payment method fingerprint")
