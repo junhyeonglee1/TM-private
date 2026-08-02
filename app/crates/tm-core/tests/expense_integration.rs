@@ -439,6 +439,93 @@ fn schema_fifteen_imports_reconciles_and_summarizes_without_plaintext() -> Resul
 }
 
 #[test]
+fn overlapping_statement_content_is_deduplicated_only_within_the_same_source() -> Result<()> {
+    let (_temporary, core) = fixture()?;
+    let date = NaiveDate::from_ymd_opt(2026, 8, 3).expect("valid date");
+    let source_fingerprint = digest('o');
+    let mut original_row = row(
+        &source_fingerprint,
+        "original-stable-key",
+        1,
+        date,
+        ExpenseEventKind::Purchase,
+        ExpenseDirection::Debit,
+        4_500,
+        Some(ExpenseCategory::Cafe),
+        'r',
+    );
+    original_row.merchant = None;
+    original_row.external_reference_fingerprint = None;
+    let original = NormalizedExpenseImport {
+        adapter: ExpenseImportAdapter::KbCardUsageV1,
+        source_kind: ExpenseSourceKind::Card,
+        source_fingerprint: source_fingerprint.clone(),
+        file_sha256: digest('1'),
+        normalized_sha256: digest('2'),
+        coverage_start: date,
+        coverage_end: date,
+        rejected_count: 0,
+        rows: vec![original_row],
+    };
+    let original_result = preview_and_import(&core, original.clone())?;
+    assert_eq!(original_result.new_count, 1);
+    assert_eq!(original_result.duplicate_count, 0);
+
+    let mut overlap = original;
+    overlap.file_sha256 = digest('3');
+    overlap.normalized_sha256 = digest('4');
+    overlap.rows[0].stable_key = "overlap-stable-key".to_owned();
+    overlap.rows[0].source_row_number = 99;
+    let overlap_preview = core.preview_expense_import(&overlap)?;
+    assert_eq!(overlap_preview.new_count, 0);
+    assert_eq!(overlap_preview.duplicate_count, 1);
+    let overlap_result = core.import_expenses(&overlap_preview.session_id, overlap)?;
+    assert_eq!(overlap_result.new_count, 0);
+    assert_eq!(overlap_result.duplicate_count, 1);
+
+    let other_source_fingerprint = digest('p');
+    let mut other_source_row = row(
+        &other_source_fingerprint,
+        "other-source-stable-key",
+        1,
+        date,
+        ExpenseEventKind::Purchase,
+        ExpenseDirection::Debit,
+        4_500,
+        Some(ExpenseCategory::Cafe),
+        'r',
+    );
+    other_source_row.merchant = None;
+    other_source_row.external_reference_fingerprint = None;
+    let other_source = NormalizedExpenseImport {
+        adapter: ExpenseImportAdapter::KbCardUsageV1,
+        source_kind: ExpenseSourceKind::Card,
+        source_fingerprint: other_source_fingerprint,
+        file_sha256: digest('5'),
+        normalized_sha256: digest('6'),
+        coverage_start: date,
+        coverage_end: date,
+        rejected_count: 0,
+        rows: vec![other_source_row],
+    };
+    let other_source_preview = core.preview_expense_import(&other_source)?;
+    assert_eq!(other_source_preview.new_count, 1);
+    assert_eq!(other_source_preview.duplicate_count, 0);
+    let other_source_result =
+        core.import_expenses(&other_source_preview.session_id, other_source)?;
+    assert_eq!(other_source_result.new_count, 1);
+    assert_eq!(other_source_result.duplicate_count, 0);
+
+    let transactions = core.list_expense_transactions(ExpenseTransactionFilter {
+        month_start: NaiveDate::from_ymd_opt(2026, 8, 1).expect("valid month"),
+        cursor: None,
+        limit: 50,
+    })?;
+    assert_eq!(transactions.items.len(), 2);
+    Ok(())
+}
+
+#[test]
 fn preview_receipts_are_atomic_single_use_and_bind_the_redacted_content() -> Result<()> {
     let (temporary, core) = fixture()?;
     let input = july_import();

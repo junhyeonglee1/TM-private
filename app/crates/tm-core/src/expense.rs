@@ -1265,19 +1265,34 @@ impl TmCore {
                 duplicate_count = duplicate_count.saturating_add(1);
                 continue;
             }
-            let content_duplicate =
+            let same_source_content_duplicate = source_id
+                .as_deref()
+                .map(|source_id| {
+                    connection.query_row(
+                        "SELECT EXISTS(
+                            SELECT 1 FROM expense_raw_rows
+                            WHERE source_id = ?1 AND row_sha256 = ?2
+                         )",
+                        params![source_id, row.row_sha256],
+                        |record| record.get::<_, bool>(0),
+                    )
+                })
+                .transpose()?
+                .unwrap_or(false);
+            let trusted_reference_duplicate =
                 if let Some(reference) = row.external_reference_fingerprint.as_deref() {
                     connection.query_row(
                         "SELECT EXISTS(
-                        SELECT 1 FROM expense_postings
-                        WHERE external_reference_fingerprint = ?1
-                     )",
+                            SELECT 1 FROM expense_postings
+                            WHERE external_reference_fingerprint = ?1
+                         )",
                         [reference],
                         |record| record.get::<_, bool>(0),
                     )?
                 } else {
                     false
                 };
+            let content_duplicate = same_source_content_duplicate || trusted_reference_duplicate;
             if content_duplicate {
                 duplicate_count = duplicate_count.saturating_add(1);
                 continue;
@@ -2096,7 +2111,21 @@ fn import_expenses_in_transaction(
                     row.stable_key
                 )));
             }
-            None => new_rows.push(row),
+            None => {
+                let same_source_content_duplicate = transaction.query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM expense_raw_rows
+                        WHERE source_id = ?1 AND row_sha256 = ?2
+                     )",
+                    params![source_id, row.row_sha256],
+                    |record| record.get::<_, bool>(0),
+                )?;
+                if same_source_content_duplicate {
+                    duplicate_count = duplicate_count.saturating_add(1);
+                } else {
+                    new_rows.push(row);
+                }
+            }
         }
     }
 

@@ -373,6 +373,8 @@ CREATE INDEX idx_expense_import_batches_source_created
 CREATE INDEX idx_expense_import_preview_expiry
     ON expense_import_preview_sessions(expires_at, consumed_at);
 CREATE INDEX idx_expense_raw_rows_batch ON expense_raw_rows(batch_id, source_row_number);
+CREATE INDEX idx_expense_raw_rows_source_digest
+    ON expense_raw_rows(source_id, row_sha256);
 CREATE INDEX idx_expense_postings_date ON expense_postings(posted_date DESC, id DESC);
 CREATE INDEX idx_expense_postings_merchant
     ON expense_postings(merchant_blind_index, payment_method_fingerprint, posted_date);
