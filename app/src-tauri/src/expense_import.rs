@@ -2908,12 +2908,47 @@ mod tests {
         let mut bytes = compound.into_inner().into_inner();
         let sector_size = 512_usize;
         bytes[40..44].copy_from_slice(&0_u32.to_le_bytes());
-        assert_eq!(u16::from_le_bytes(bytes[26..28].try_into().unwrap()), 3);
-        assert_eq!(u16::from_le_bytes(bytes[30..32].try_into().unwrap()), 9);
-        assert_eq!(u32::from_le_bytes(bytes[40..44].try_into().unwrap()), 0);
+        assert_eq!(
+            u16::from_le_bytes(
+                bytes[26..28]
+                    .try_into()
+                    .expect("synthetic CFB v3 major version bytes"),
+            ),
+            3
+        );
+        assert_eq!(
+            u16::from_le_bytes(
+                bytes[30..32]
+                    .try_into()
+                    .expect("synthetic CFB v3 sector shift bytes"),
+            ),
+            9
+        );
+        assert_eq!(
+            u32::from_le_bytes(
+                bytes[40..44]
+                    .try_into()
+                    .expect("synthetic CFB v3 directory sector count bytes"),
+            ),
+            0
+        );
         assert_eq!(bytes.len() % sector_size, 0);
-        assert_eq!(u32::from_le_bytes(bytes[44..48].try_into().unwrap()), 1);
-        assert_eq!(u32::from_le_bytes(bytes[72..76].try_into().unwrap()), 0);
+        assert_eq!(
+            u32::from_le_bytes(
+                bytes[44..48]
+                    .try_into()
+                    .expect("synthetic CFB v3 FAT sector count bytes"),
+            ),
+            1
+        );
+        assert_eq!(
+            u32::from_le_bytes(
+                bytes[72..76]
+                    .try_into()
+                    .expect("synthetic CFB v3 DIFAT sector count bytes"),
+            ),
+            0
+        );
 
         let old_fat_sector =
             u32::from_le_bytes(bytes[76..80].try_into().expect("synthetic FAT sector id"));
@@ -3922,7 +3957,11 @@ mod tests {
         ];
         let (mut legacy, marker_offset, _, _) = cfb_with_legacy_terminal_fat_marker(&safe_records);
         assert_eq!(
-            u32::from_le_bytes(legacy[marker_offset..marker_offset + 4].try_into().unwrap()),
+            u32::from_le_bytes(
+                legacy[marker_offset..marker_offset + 4]
+                    .try_into()
+                    .expect("synthetic legacy FAT marker bytes"),
+            ),
             CFB_END_OF_CHAIN
         );
 
@@ -3930,7 +3969,11 @@ mod tests {
             .expect("canonicalize a bounded legacy FAT marker");
 
         assert_eq!(
-            u32::from_le_bytes(legacy[marker_offset..marker_offset + 4].try_into().unwrap()),
+            u32::from_le_bytes(
+                legacy[marker_offset..marker_offset + 4]
+                    .try_into()
+                    .expect("canonical synthetic FAT marker bytes"),
+            ),
             CFB_FAT_SECTOR
         );
     }
