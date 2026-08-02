@@ -1,5 +1,6 @@
 use chrono::{Datelike, NaiveDate};
 use rusqlite::{Connection, params};
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tm_core::{
     ConfirmRecurringPaidInput, CreateRecurringExpenseInput, EncryptedExpenseText, Error,
@@ -82,7 +83,7 @@ fn empty_import(
 }
 
 fn digest(value: char) -> String {
-    value.to_string().repeat(64)
+    format!("{:x}", Sha256::digest(value.to_string().as_bytes()))
 }
 
 fn encrypted(context: &str, field: &str, fingerprint: char) -> EncryptedExpenseText {
@@ -542,8 +543,17 @@ fn expense_amounts_stay_within_the_json_safe_integer_boundary() -> Result<()> {
     let mut aggregate_overflow = valid.clone();
     aggregate_overflow.file_sha256 = digest('4');
     aggregate_overflow.normalized_sha256 = digest('4');
-    aggregate_overflow.rows[0].stable_key = "second-max-safe".to_owned();
-    aggregate_overflow.rows[0].row_sha256 = digest('4');
+    aggregate_overflow.rows[0] = row(
+        &source_fingerprint,
+        "second-max-safe",
+        1,
+        date,
+        ExpenseEventKind::Purchase,
+        ExpenseDirection::Debit,
+        MAX_SAFE_MINOR,
+        Some(ExpenseCategory::Other),
+        '4',
+    );
     let overflow_preview = core.preview_expense_import(&aggregate_overflow)?;
     assert!(matches!(
         core.import_expenses(&overflow_preview.session_id, aggregate_overflow),
@@ -562,9 +572,17 @@ fn expense_amounts_stay_within_the_json_safe_integer_boundary() -> Result<()> {
     let mut invalid = valid.clone();
     invalid.file_sha256 = digest('2');
     invalid.normalized_sha256 = digest('2');
-    invalid.rows[0].stable_key = "unsafe".to_owned();
-    invalid.rows[0].row_sha256 = digest('2');
-    invalid.rows[0].amount_minor = MAX_SAFE_MINOR + 1;
+    invalid.rows[0] = row(
+        &source_fingerprint,
+        "unsafe",
+        1,
+        date,
+        ExpenseEventKind::Purchase,
+        ExpenseDirection::Debit,
+        MAX_SAFE_MINOR + 1,
+        Some(ExpenseCategory::Other),
+        '2',
+    );
     assert!(matches!(
         core.preview_expense_import(&invalid),
         Err(Error::InvalidInput(_))

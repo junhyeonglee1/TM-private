@@ -3313,6 +3313,17 @@ fn resolve_expense_review_in_transaction(
                 _ => unreachable!("settlement kind was checked above"),
             }
             if target_kind == ExpenseEventKind::Purchase {
+                let linked_total = settlement_received
+                    .checked_add(settlement_sent)
+                    .ok_or_else(|| {
+                        Error::Invariant("linked settlement total overflowed".to_owned())
+                    })?;
+                if linked_total > i128::from(target.2) {
+                    return Err(invalid(format!(
+                        "settlement allocations exceed the related purchase amount ({})",
+                        target.2
+                    )));
+                }
                 let calculated_personal =
                     i128::from(target.2) + settlement_sent - settlement_received;
                 if calculated_personal < 0 || calculated_personal > i128::from(target.2) {
@@ -4089,8 +4100,11 @@ fn update_recurring_in_transaction(
     if effective_now {
         return Ok(scheduled);
     }
-    let mut visible = recurring_item_for_month(transaction, recurring_expense_id, effective_month)?
-        .unwrap_or_else(|| scheduled.clone());
+    let mut visible =
+        match recurring_item_for_month(transaction, recurring_expense_id, effective_month)? {
+            Some(visible) => visible,
+            None => query_recurring_item(transaction, recurring_expense_id, true)?,
+        };
     visible.version = scheduled.version;
     visible.updated_at = scheduled.updated_at;
     Ok(visible)
