@@ -304,6 +304,7 @@ else {
         'ConfigurationResultPath',
         'Invoke-TmVerifiedGitText',
         'Invoke-TmBoundedProcess',
+        'ConvertFrom-TmJsonArrayItems',
         'sourceArchiveSha256',
         'Get-DeploymentIdFromUpload',
         'Wait-VerifiedRailwayDeployment',
@@ -437,6 +438,7 @@ if ($expenseVerifier -notmatch "BaseUri = 'https://tm-server-production-5573\.up
     $expenseVerifier -notmatch 'expenseKeyInitializationAllowed' -or
     $expenseVerifier -notmatch 'expenseKeyFingerprint' -or
     $expenseVerifier -notmatch 'expenseRecoveryKeyMatchVerified' -or
+    $expenseVerifier -notmatch 'ConvertFrom-TmJsonArrayItems' -or
     $expenseVerifier -notmatch 'Assert-TmReceiptIntegrityProof \$deploymentResult' -or
     $expenseVerifier -notmatch 'Expand-TmSafeSourceArchive' -or
     $expenseVerifier -match '\$\(\$Response\.Body\)' -or
@@ -478,6 +480,11 @@ if ($windowsBuildWorkflow -match 'Get-ChildItem[\s\S]{0,200}(?:tm|tm-cli)\.exe' 
 }
 if ($windowsBuildWorkflow -notmatch 'deploy-verified-expense-railway\.ps1[\s\S]{0,300}-RunGuardSelfTest') {
     $violations.Add('The Windows workflow does not execute the verified Railway deployment guard self-test.')
+}
+if ($windowsBuildWorkflow -notmatch
+        'Verify production expense deployment guards on Windows PowerShell 5\.1[\s\S]{0,100}shell:\s*powershell' -or
+    $windowsBuildWorkflow -notmatch '\$PSVersionTable\.PSVersion\.Major\s+-ne\s+5') {
+    $violations.Add('The Windows workflow does not exercise the Railway JSON array guard on PowerShell 5.1.')
 }
 
 $expenseDecryptorSource = [System.IO.File]::ReadAllText(

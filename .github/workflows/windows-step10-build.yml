@@ -124,6 +124,18 @@ jobs:
             -Step16RunId 1 `
             -RunGuardSelfTest
 
+      - name: Verify production expense deployment guards on Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          if ($PSVersionTable.PSVersion.Major -ne 5) {
+            throw 'The production deployment regression guard requires Windows PowerShell 5.1.'
+          }
+          .\scripts\deploy-verified-expense-railway.ps1 `
+            -ExpectedHeadSha '0000000000000000000000000000000000000000' `
+            -Step10RunId 1 `
+            -Step16RunId 1 `
+            -RunGuardSelfTest
+
       - name: Parse reviewed PowerShell operations scripts
         shell: pwsh
         run: |

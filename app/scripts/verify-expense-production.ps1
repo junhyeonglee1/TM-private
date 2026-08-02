@@ -126,7 +126,7 @@ function Get-RailwayDeployments {
         throw 'Unable to list Railway production deployments.'
     }
     try {
-        return @($result.StandardOutput | ConvertFrom-TmJson)
+        $result.StandardOutput | ConvertFrom-TmJsonArrayItems
     }
     catch {
         throw 'Railway returned invalid deployment metadata JSON.'

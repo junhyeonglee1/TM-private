@@ -39,6 +39,39 @@ function ConvertFrom-TmJson {
     }
 }
 
+function ConvertFrom-TmJsonArrayItems {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true, ValueFromPipeline = $true)]
+        [AllowEmptyString()]
+        [string]$InputObject
+    )
+
+    begin {
+        $fragments = [System.Collections.Generic.List[string]]::new()
+    }
+    process {
+        $fragments.Add($InputObject)
+    }
+    end {
+        $json = [string]::Join([Environment]::NewLine, $fragments)
+        $trimmed = $json.Trim()
+        if (-not $trimmed.StartsWith('[', [System.StringComparison]::Ordinal) -or
+            -not $trimmed.EndsWith(']', [System.StringComparison]::Ordinal)) {
+            throw 'Expected a top-level JSON array.'
+        }
+
+        $parsed = $json | ConvertFrom-TmJson
+        if ($null -eq $parsed) { return }
+        foreach ($item in @($parsed)) {
+            if ($item -is [System.Array]) {
+                throw 'Nested arrays are not valid top-level JSON array items.'
+            }
+            $PSCmdlet.WriteObject($item, $false)
+        }
+    }
+}
+
 function Initialize-TmProtectedData {
     try {
         [void][System.Security.Cryptography.ProtectedData]
@@ -1950,6 +1983,39 @@ function Invoke-TmReleaseEvidenceGuardSelfTest {
     try {
         $null = Read-TmOperationsToolchainLock
         New-Item -ItemType Directory -Force -Path $root | Out-Null
+
+        $deploymentList = @(
+            '[{"id":"deployment-one","status":"SUCCESS"},{"id":"deployment-two","status":"REMOVED"}]' |
+                ConvertFrom-TmJsonArrayItems
+        )
+        if ($deploymentList.Count -ne 2 -or
+            [string]$deploymentList[0].id -cne 'deployment-one' -or
+            [string]$deploymentList[1].id -cne 'deployment-two') {
+            throw 'Release evidence self-test did not enumerate a top-level JSON array.'
+        }
+        if (@('[]' | ConvertFrom-TmJsonArrayItems).Count -ne 0) {
+            throw 'Release evidence self-test did not preserve an empty top-level JSON array.'
+        }
+        $singleDeployment = @('[{"id":"deployment-only"}]' | ConvertFrom-TmJsonArrayItems)
+        if ($singleDeployment.Count -ne 1 -or
+            [string]$singleDeployment[0].id -cne 'deployment-only') {
+            throw 'Release evidence self-test did not preserve a singleton top-level JSON array.'
+        }
+        $objectRejected = $false
+        try { '{"id":"not-an-array"}' | ConvertFrom-TmJsonArrayItems | Out-Null } catch {
+            $objectRejected = $_.Exception.Message -like '*top-level JSON array*'
+        }
+        if (-not $objectRejected) {
+            throw 'Release evidence self-test accepted a non-array deployment payload.'
+        }
+        $nestedArrayRejected = $false
+        try { '[[{"id":"nested"}]]' | ConvertFrom-TmJsonArrayItems | Out-Null } catch {
+            $nestedArrayRejected = $_.Exception.Message -like '*Nested arrays*'
+        }
+        if (-not $nestedArrayRejected) {
+            throw 'Release evidence self-test accepted a nested deployment array.'
+        }
+
         foreach ($name in @('tm.exe', 'tm-cli.exe', 'tm-office-decryptor.exe')) {
             [System.IO.File]::WriteAllText((Join-Path $root $name), "synthetic-$name")
         }
