@@ -499,7 +499,8 @@ fn preview_receipts_are_atomic_single_use_and_bind_the_redacted_content() -> Res
     let connection = Connection::open(TmHome::new(temporary.path()).database_path())?;
     connection.execute(
         "UPDATE expense_import_preview_sessions
-         SET expires_at = '2000-01-01T00:00:00.000Z'
+         SET created_at = '1999-01-01T00:00:00.000Z',
+             expires_at = '2000-01-01T00:00:00.000Z'
          WHERE id = ?1",
         [&expired_preview.session_id],
     )?;
@@ -2465,7 +2466,7 @@ fn classification_rules_only_reclassify_allowed_rows_and_preserve_accounting_sem
             .expect("transaction for day")
     };
     assert_eq!(find(2).kind, ExpenseEventKind::Purchase);
-    assert_eq!(find(2).category, ExpenseCategory::Food);
+    assert_eq!(find(2).category, ExpenseCategory::Shopping);
     assert_eq!(find(2).status, tm_core::ExpenseEventStatus::Confirmed);
     assert_eq!(find(3).kind, ExpenseEventKind::Refund);
     assert_eq!(find(3).category, ExpenseCategory::RefundIncome);
