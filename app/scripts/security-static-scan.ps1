@@ -439,6 +439,7 @@ if ($expenseVerifier -notmatch "BaseUri = 'https://tm-server-production-5573\.up
     $expenseVerifier -notmatch 'expenseKeyFingerprint' -or
     $expenseVerifier -notmatch 'expenseRecoveryKeyMatchVerified' -or
     $expenseVerifier -notmatch 'ConvertFrom-TmJsonArrayItems' -or
+    $expenseVerifier -notmatch '\[TimeSpan\]::FromMinutes\(5\)' -or
     $expenseVerifier -notmatch 'Assert-TmReceiptIntegrityProof \$deploymentResult' -or
     $expenseVerifier -notmatch 'Expand-TmSafeSourceArchive' -or
     $expenseVerifier -match '\$\(\$Response\.Body\)' -or

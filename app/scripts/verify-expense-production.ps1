@@ -333,6 +333,7 @@ if ([string]$deploymentResult.repository -ne $repository -or
 }
 $activationVerifiedAt = [DateTimeOffset]::MinValue
 $activationDeploymentCreatedAt = [DateTimeOffset]::MinValue
+$maximumActivationClockSkew = [TimeSpan]::FromMinutes(5)
 if (-not [DateTimeOffset]::TryParse(
     [string]$deploymentResult.expenseActivationVerifiedAtUtc,
     [System.Globalization.CultureInfo]::InvariantCulture,
@@ -343,8 +344,8 @@ if (-not [DateTimeOffset]::TryParse(
     [System.Globalization.CultureInfo]::InvariantCulture,
     [System.Globalization.DateTimeStyles]::RoundtripKind,
     [ref]$activationDeploymentCreatedAt
-) -or $activationVerifiedAt.ToUniversalTime() -lt
-        $activationDeploymentCreatedAt.ToUniversalTime()) {
+) -or ($activationDeploymentCreatedAt.ToUniversalTime() -
+        $activationVerifiedAt.ToUniversalTime()) -gt $maximumActivationClockSkew) {
     throw 'The deployment result has no valid expense activation proof timestamp.'
 }
 $sourceArchiveLeaf = [System.IO.Path]::GetFileName([string]$deploymentResult.sourceArchivePath)
