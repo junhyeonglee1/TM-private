@@ -4,9 +4,12 @@ $script:TmOperationsToolchainLockPath = [System.IO.Path]::GetFullPath(
     (Join-Path $PSScriptRoot '..\operations-toolchain.lock.json')
 )
 $script:TmConvertFromJsonSupportsDateKind = $false
+$script:TmConvertFromJsonSupportsNoEnumerate = $false
 $script:TmConvertFromJsonPlainPreservesDateStrings = $false
 $convertFromJsonCommand = Get-Command ConvertFrom-Json -CommandType Cmdlet -ErrorAction Stop
 $script:TmConvertFromJsonSupportsDateKind = $convertFromJsonCommand.Parameters.ContainsKey('DateKind')
+$script:TmConvertFromJsonSupportsNoEnumerate =
+    $convertFromJsonCommand.Parameters.ContainsKey('NoEnumerate')
 if (-not $script:TmConvertFromJsonSupportsDateKind) {
     $dateProbe = ConvertFrom-Json -InputObject '{"value":"2030-01-02T03:04:05.0000000+00:00"}' `
         -ErrorAction Stop
@@ -61,7 +64,16 @@ function ConvertFrom-TmJsonArrayItems {
             throw 'Expected a top-level JSON array.'
         }
 
-        $parsed = $json | ConvertFrom-TmJson
+        $parsed = if ($script:TmConvertFromJsonSupportsNoEnumerate -and
+            $script:TmConvertFromJsonSupportsDateKind) {
+            ConvertFrom-Json -InputObject $json -DateKind String -NoEnumerate -ErrorAction Stop
+        }
+        elseif ($script:TmConvertFromJsonSupportsNoEnumerate) {
+            ConvertFrom-Json -InputObject $json -NoEnumerate -ErrorAction Stop
+        }
+        else {
+            $json | ConvertFrom-TmJson
+        }
         if ($null -eq $parsed) { return }
         foreach ($item in @($parsed)) {
             if ($item -is [System.Array]) {
