@@ -59,7 +59,7 @@ impl ExpenseCrypto {
             key.zeroize();
             let persisted = load_windows_credential()?
                 .ok_or_else(|| "Windows 지출 암호화 키 저장을 확인할 수 없습니다.".to_owned())?;
-            return Self::from_encoded(&persisted);
+            Self::from_encoded(&persisted)
         }
         #[cfg(not(windows))]
         {
