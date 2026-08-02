@@ -417,6 +417,26 @@ impl AppState {
         )
     }
 
+    fn for_database_import(core: TmCore, security: SecurityMonitor) -> Self {
+        // Maintenance import does not read or write encrypted expense fields. Avoid
+        // creating a target-only probe before the source snapshot is restored,
+        // because restore merge-forward would correctly preserve that immutable row
+        // and make an otherwise exact import manifest diverge from its source.
+        Self {
+            core,
+            openai: OpenAiClient::disabled(),
+            expense_crypto: Err(ExpenseCryptoError::MissingKey),
+            expense_crypto_required: false,
+            incident_mode: IncidentMode::Normal,
+            ai_enabled: false,
+            expense_ai_enabled: false,
+            task_report_enabled: false,
+            stock: StockConfig::default(),
+            railway_usage: RailwayUsageClient::disabled(),
+            security,
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn with_controls_and_costs(
         core: TmCore,
@@ -1194,14 +1214,7 @@ pub fn build_cloud_import_router(core: TmCore, auth: AuthConfig) -> Router {
         .route("/api/v1/ops/import", post(import_api::import_database))
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
-        .with_state(AppState::with_controls(
-            core,
-            OpenAiClient::disabled(),
-            IncidentMode::Normal,
-            false,
-            false,
-            security,
-        ))
+        .with_state(AppState::for_database_import(core, security))
         .layer(import_api::body_limit())
         .layer(middleware::from_fn_with_state(
             auth_state,
@@ -6021,8 +6034,8 @@ mod tests {
             .expect("create verified import snapshot");
         let snapshot = fs::read(&dry_run.snapshot_artifact.path).expect("read import snapshot");
 
-        let (target_temporary, target) = test_core();
-        let normal_response = build_cloud_authenticated_router(target.clone(), test_auth_config())
+        let (normal_temporary, normal_target) = test_core();
+        let normal_response = build_cloud_authenticated_router(normal_target, test_auth_config())
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -6035,7 +6048,21 @@ mod tests {
             .expect("call normal-mode import route");
         assert_eq!(normal_response.status(), StatusCode::NOT_FOUND);
 
+        let (target_temporary, target) = test_core();
+        assert_eq!(
+            target
+                .expense_crypto_probe()
+                .expect("query target expense probe before maintenance import"),
+            None
+        );
+
         let maintenance = build_cloud_import_router(target.clone(), test_auth_config());
+        assert_eq!(
+            target
+                .expense_crypto_probe()
+                .expect("maintenance import router must not initialize expense crypto"),
+            None
+        );
         let wrong_confirmation = maintenance
             .clone()
             .oneshot(
@@ -6083,7 +6110,7 @@ mod tests {
             target.list_tasks(false).expect("list imported tasks")[0].title,
             "Imported production task"
         );
-        drop((source_temporary, target_temporary));
+        drop((source_temporary, normal_temporary, target_temporary));
     }
 
     #[tokio::test]
@@ -6163,7 +6190,10 @@ mod tests {
         assert!(stock_script.contains("차트를 보려면 인터넷 연결이 필요합니다."));
         assert!(stock_script.contains("selectedStockCandidate"));
         assert!(stock_script.contains(r#""x-tm-confirm-mutation": operation"#));
-        assert!(stock_script.contains(r#""idempotency-key": crypto.randomUUID()"#));
+        assert!(stock_script.contains(
+            "function mutationHeaders(operation, version = null, idempotencyKey = crypto.randomUUID())"
+        ));
+        assert!(stock_script.contains(r#""idempotency-key": idempotencyKey"#));
         assert!(stock_script.contains(r#"mutationHeaders("project.create")"#));
         assert!(stock_script.contains(r#"mutationHeaders("task.create")"#));
         assert!(stock_script.contains(r#"mutationHeaders("task.update", editing.version)"#));
@@ -6838,6 +6868,7 @@ mod tests {
     async fn expense_import_preview_and_device_scope_are_enforced_by_the_router() {
         let (_temporary, core) = test_core();
         let (cookie, csrf) = install_test_device(&core);
+        load_expense_crypto(&core).expect("initialize expense crypto before seeding report state");
         let saved_report = core
             .save_expense_report(SaveExpenseReportInput {
                 month_start: NaiveDate::from_ymd_opt(2026, 8, 1).expect("valid report month"),
@@ -7511,6 +7542,10 @@ mod tests {
             .as_object_mut()
             .expect("recurring body object")
             .insert("effectiveFromMonth".to_owned(), json!("2026-08-01"));
+        update_body
+            .as_object_mut()
+            .expect("recurring body object")
+            .insert("autoMatchEnabled".to_owned(), json!(false));
         let missing_if_match = router
             .oneshot(
                 Request::builder()
@@ -7775,7 +7810,7 @@ mod tests {
         );
         assert_eq!(
             safe_route_family("/api/v1/expenses/transactions/private-search-value"),
-            "unmatched"
+            "/api/v1/expenses/transactions/{id}"
         );
     }
 
