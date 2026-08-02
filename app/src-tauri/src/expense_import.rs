@@ -2894,8 +2894,21 @@ mod tests {
     }
 
     fn cfb_with_legacy_terminal_fat_marker(records: &[u8]) -> (Vec<u8>, usize, usize, u32) {
-        let mut bytes = cfb_with_workbook(records, None);
+        let mut compound =
+            cfb::CompoundFile::create_with_version(cfb::Version::V3, Cursor::new(Vec::new()))
+                .expect("create synthetic CFB v3");
+        {
+            let mut workbook = compound
+                .create_stream("/Workbook")
+                .expect("create synthetic CFB v3 workbook stream");
+            workbook
+                .write_all(records)
+                .expect("write synthetic CFB v3 BIFF records");
+        }
+        let mut bytes = compound.into_inner().into_inner();
         let sector_size = 512_usize;
+        assert_eq!(u16::from_le_bytes(bytes[26..28].try_into().unwrap()), 3);
+        assert_eq!(u16::from_le_bytes(bytes[30..32].try_into().unwrap()), 9);
         assert_eq!(bytes.len() % sector_size, 0);
         assert_eq!(u32::from_le_bytes(bytes[44..48].try_into().unwrap()), 1);
         assert_eq!(u32::from_le_bytes(bytes[72..76].try_into().unwrap()), 0);
