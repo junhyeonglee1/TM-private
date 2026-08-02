@@ -407,6 +407,16 @@ pub struct BackupInfo {
     pub trigger: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupVerification {
+    pub sha256: String,
+    pub byte_size: u64,
+    pub schema_version: i64,
+    pub integrity_check: String,
+    pub schema_semantics_validated: bool,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AiBudgetPolicy {

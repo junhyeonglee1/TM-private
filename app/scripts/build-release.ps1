@@ -25,64 +25,36 @@ $repository = 'junhyeonglee1/TM-private'
 $expectedHeadBranch = 'agent/step10-cloud-cutover'
 $ExpectedHeadSha = $ExpectedHeadSha.ToLowerInvariant()
 
-$gh = Get-Command gh -ErrorAction SilentlyContinue
-if (-not $gh) {
-    throw 'GitHub CLI is required to retrieve the verified Windows artifact.'
-}
-
 $appRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $tmRoot = (Resolve-Path (Join-Path $appRoot '..')).Path
+. (Join-Path $PSScriptRoot 'expense-release-evidence.ps1')
 $releaseDir = Join-Path $tmRoot 'dist\release'
 $downloadRoot = Join-Path $tmRoot ("dist\stage\github-actions\{0}-{1}" -f $RunId, [Guid]::NewGuid().ToString('N'))
-
-$runJson = & $gh.Source run view $RunId --repo $Repository --json databaseId,workflowName,conclusion,headBranch,headSha 2>&1
-if ($LASTEXITCODE -ne 0) {
-    throw "Unable to inspect GitHub Actions run $RunId. Re-authenticate GitHub CLI and retry."
-}
-$run = $runJson | ConvertFrom-Json
-if ($run.workflowName -ne 'STEP 10 Windows build') {
-    throw "Run $RunId belongs to an unexpected workflow: $($run.workflowName)"
-}
-if ($run.conclusion -ne 'success') {
-    throw "Run $RunId is not successful: $($run.conclusion)"
-}
-if ($run.headBranch -ne $expectedHeadBranch) {
-    throw "Run $RunId belongs to an unexpected branch: $($run.headBranch)"
-}
-if ([string]$run.headSha -ne $ExpectedHeadSha) {
-    throw "Run $RunId does not match the expected source commit."
-}
-
-New-Item -ItemType Directory -Force -Path $downloadRoot | Out-Null
-& $gh.Source run download $RunId --repo $Repository --name 'tm-step10-windows-x64' --dir $downloadRoot
-if ($LASTEXITCODE -ne 0) {
-    throw "Unable to download tm-step10-windows-x64 from run $RunId."
-}
+$gitEvidence = Resolve-TmVerifiedGit
+$null = Assert-TmCanonicalGitState -GitPath ([string]$gitEvidence.path) `
+    -RepositoryRoot $tmRoot -Repository $repository -Branch $expectedHeadBranch `
+    -ExpectedHeadSha $ExpectedHeadSha
+$ghEvidence = Resolve-TmVerifiedGh
+$evidence = Get-TmVerifiedActionsArtifactEvidence -GhPath ([string]$ghEvidence.path) `
+    -Repository $repository -RunId $RunId -ExpectedHeadSha $ExpectedHeadSha `
+    -ExpectedBranch $expectedHeadBranch -ExpectedWorkflowName 'STEP 10 Windows build' `
+    -ExpectedWorkflowPath '.github/workflows/windows-step10-build.yml' `
+    -ArtifactKind step10 -ArtifactName 'tm-step10-windows-x64' `
+    -PayloadDestination $downloadRoot
 
 $requiredFiles = @(
     'tm.exe',
     'tm-cli.exe',
     'tm-office-decryptor.exe'
 )
-$manifestPath = Join-Path $downloadRoot 'SHA256SUMS.txt'
-if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
-    throw 'The artifact does not contain SHA256SUMS.txt.'
-}
-
-$manifest = @{}
-foreach ($line in Get-Content -LiteralPath $manifestPath) {
-    if ($line -notmatch '^([0-9a-fA-F]{64})\s{2}([^\\/:*?"<>|]+)$') {
-        throw 'SHA256SUMS.txt contains an invalid entry.'
-    }
-    $manifest[$Matches[2]] = $Matches[1].ToLowerInvariant()
-}
+$manifest = $evidence.verifiedFileHashes
 
 foreach ($name in $requiredFiles) {
     $path = Join-Path $downloadRoot $name
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         throw "The artifact does not contain $name."
     }
-    if (-not $manifest.ContainsKey($name)) {
+    if (-not $manifest.Contains($name)) {
         throw "SHA256SUMS.txt does not contain $name."
     }
     $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -92,7 +64,7 @@ foreach ($name in $requiredFiles) {
 }
 
 if ($manifest.Count -ne $requiredFiles.Count) {
-    throw 'SHA256SUMS.txt contains an unexpected file entry.'
+    throw 'The verified STEP 10 manifest contains an unexpected file entry.'
 }
 
 New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
@@ -139,11 +111,20 @@ $releaseManifestLines = [string[]]@(
 )
 $provenance = [ordered]@{
     runId = $RunId
-    repository = $Repository
-    workflow = $run.workflowName
-    conclusion = $run.conclusion
-    headBranch = $run.headBranch
-    headSha = $run.headSha
+    runAttempt = [long]$evidence.runAttempt
+    repository = $repository
+    workflow = [string]$evidence.workflowName
+    workflowPath = [string]$evidence.workflowPath
+    event = [string]$evidence.event
+    conclusion = 'success'
+    headBranch = $expectedHeadBranch
+    headSha = [string]$evidence.headSha
+    artifactId = [long]$evidence.artifactId
+    artifactDigest = [string]$evidence.artifactDigest
+    downloadedZipSha256 = [string]$evidence.downloadedZipSha256
+    manifestSha256 = [string]$evidence.manifestSha256
+    gitSha256 = [string]$gitEvidence.sha256
+    githubCliSha256 = [string]$ghEvidence.sha256
     retrievedAtUtc = [DateTime]::UtcNow.ToString('o')
 }
 [System.IO.File]::WriteAllText(

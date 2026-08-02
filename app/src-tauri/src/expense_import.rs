@@ -1,14 +1,19 @@
 use std::{
     collections::HashMap,
     fs,
-    io::{Cursor, Read},
+    io::{Cursor, Read, Seek},
     path::PathBuf,
     sync::Mutex,
     time::{Duration, Instant},
 };
 
-use calamine::{Data, DataType, Range, Reader, open_workbook_auto_from_rs};
+use calamine::{Data, DataType, Range, Reader, Sheets, Xlsx, open_workbook_auto_from_rs};
 use chrono::{NaiveDate, NaiveDateTime};
+use quick_xml::{
+    Reader as XmlReader, XmlVersion,
+    encoding::{Decoder as XmlDecoder, DecodingReader},
+    events::{BytesStart, Event},
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -19,12 +24,18 @@ const MAX_DECRYPTED_BYTES: usize = 40 * 1024 * 1024;
 const MAX_SHEETS: usize = 10;
 const MAX_ROWS: usize = 5_000;
 const MAX_COLUMNS: usize = 100;
+const MAX_RANGE_CELLS: usize = MAX_ROWS * MAX_COLUMNS;
 const MAX_CELL_CHARS: usize = 16_384;
 const MAX_ZIP_ENTRIES: usize = 2_000;
 const MAX_ZIP_ENTRY_BYTES: u64 = 40 * 1024 * 1024;
 const MAX_ZIP_TOTAL_BYTES: u64 = 80 * 1024 * 1024;
 const MAX_ZIP_COMPRESSION_RATIO: u64 = 100;
 const MAX_RELATIONSHIP_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_WORKBOOK_METADATA_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_STYLES_METADATA_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_STYLE_NUMFMTS: usize = MAX_COLUMNS * MAX_SHEETS;
+const MAX_STYLE_CELL_XFS: usize = MAX_ROWS;
+const MAX_BIFF_SST_CONTINUE_RECORDS: usize = 4_096;
 const MAX_CFB_ENTRIES: usize = 2_000;
 const CFB_FREE_SECTOR: u32 = 0xffff_ffff;
 const CFB_END_OF_CHAIN: u32 = 0xffff_fffe;
@@ -322,6 +333,10 @@ pub(crate) fn parse_expense_file(
         return Err("지출 통합문서의 시트 수가 허용 범위를 벗어났습니다.".to_owned());
     }
 
+    if let Sheets::Xlsx(xlsx) = &mut workbook {
+        validate_xlsx_workbook_ranges(xlsx, &sheet_names)?;
+    }
+
     let mut total_rows = 0_usize;
     let mut parsed_candidate: Option<(
         ExpenseAdapter,
@@ -487,6 +502,106 @@ pub(crate) fn verify_source_unchanged(parsed: &ParsedExpenseFile) -> Result<(), 
         return Err(
             "미리보기 이후 지출 원본 파일이 변경됐습니다. 다시 미리보기 하세요.".to_owned(),
         );
+    }
+    Ok(())
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct SheetCellBounds {
+    min_row: Option<u32>,
+    max_row: u32,
+    min_column: Option<u32>,
+    max_column: u32,
+}
+
+impl SheetCellBounds {
+    fn observe(&mut self, row: u32, column: u32) -> Result<(), String> {
+        validate_sheet_position(row, column)?;
+        self.min_row = Some(self.min_row.map_or(row, |current| current.min(row)));
+        self.max_row = self.max_row.max(row);
+        self.min_column = Some(
+            self.min_column
+                .map_or(column, |current| current.min(column)),
+        );
+        self.max_column = self.max_column.max(column);
+        Ok(())
+    }
+
+    fn height(self) -> Result<usize, String> {
+        let Some(min_row) = self.min_row else {
+            return Ok(0);
+        };
+        usize::try_from(self.max_row - min_row + 1)
+            .map_err(|_| "The worksheet row span exceeds the safety limit.".to_owned())
+    }
+
+    fn area(self) -> Result<usize, String> {
+        let Some(min_row) = self.min_row else {
+            return Ok(0);
+        };
+        let min_column = self
+            .min_column
+            .ok_or_else(|| "The worksheet cell bounds are invalid.".to_owned())?;
+        let height = usize::try_from(self.max_row - min_row + 1)
+            .map_err(|_| "The worksheet row span exceeds the safety limit.".to_owned())?;
+        let width = usize::try_from(self.max_column - min_column + 1)
+            .map_err(|_| "The worksheet column span exceeds the safety limit.".to_owned())?;
+        height
+            .checked_mul(width)
+            .ok_or_else(|| "The worksheet cell span overflowed.".to_owned())
+    }
+}
+
+fn validate_sheet_position(row: u32, column: u32) -> Result<(), String> {
+    let row = usize::try_from(row)
+        .map_err(|_| "The worksheet row address exceeds the safety limit.".to_owned())?;
+    let column = usize::try_from(column)
+        .map_err(|_| "The worksheet column address exceeds the safety limit.".to_owned())?;
+    if row >= MAX_ROWS || column >= MAX_COLUMNS {
+        return Err("The worksheet cell address exceeds the safety limit.".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_xlsx_workbook_ranges<RS: Read + Seek>(
+    workbook: &mut Xlsx<RS>,
+    sheet_names: &[String],
+) -> Result<(), String> {
+    let mut total_rows = 0_usize;
+    let mut total_cells = 0_usize;
+    let mut total_dense_cells = 0_usize;
+
+    for sheet_name in sheet_names {
+        let mut reader = workbook
+            .worksheet_cells_reader(sheet_name)
+            .map_err(|_| "The XLSX worksheet cannot be preflighted safely.".to_owned())?;
+        let mut bounds = SheetCellBounds::default();
+        while let Some(cell) = reader
+            .next_cell()
+            .map_err(|_| "The XLSX worksheet cell stream is invalid.".to_owned())?
+        {
+            if cell.get_value().is_empty() {
+                continue;
+            }
+            total_cells = total_cells
+                .checked_add(1)
+                .ok_or_else(|| "The XLSX worksheet cell count overflowed.".to_owned())?;
+            if total_cells > MAX_RANGE_CELLS {
+                return Err("The XLSX worksheet cell count exceeds the safety limit.".to_owned());
+            }
+            let (row, column) = cell.get_position();
+            bounds.observe(row, column)?;
+        }
+
+        total_rows = total_rows
+            .checked_add(bounds.height()?)
+            .ok_or_else(|| "The XLSX worksheet row count overflowed.".to_owned())?;
+        total_dense_cells = total_dense_cells
+            .checked_add(bounds.area()?)
+            .ok_or_else(|| "The XLSX worksheet cell span overflowed.".to_owned())?;
+        if total_rows > MAX_ROWS || total_dense_cells > MAX_RANGE_CELLS {
+            return Err("The XLSX worksheet dimensions exceed the safety limit.".to_owned());
+        }
     }
     Ok(())
 }
@@ -862,30 +977,31 @@ fn validate_xls_container(bytes: &[u8]) -> Result<(), String> {
 fn validate_biff_workbook_stream(bytes: &[u8]) -> Result<(), String> {
     let mut offset = 0_usize;
     let mut saw_bof = false;
+    let mut saw_sst = false;
+    let mut sheet_offsets = Vec::new();
+    let mut workbook_biff_version = None;
+    let mut self_referencing_supbooks = Vec::new();
+    let mut continuation_chain = 0_usize;
     while offset < bytes.len() {
-        let remaining = &bytes[offset..];
-        if remaining.len() < 4 {
-            if remaining.iter().all(|byte| *byte == 0) {
-                break;
+        let Some(record) = read_biff_record(bytes, offset)? else {
+            break;
+        };
+        let record_type = record.record_type;
+        let payload = record.payload;
+
+        if record_type == 0x003c {
+            if payload.is_empty() {
+                return Err("The XLS stream contains an empty continuation record.".to_owned());
             }
-            return Err("The XLS BIFF record header is truncated.".to_owned());
-        }
-        let record_type = u16::from_le_bytes([remaining[0], remaining[1]]);
-        let record_len = usize::from(u16::from_le_bytes([remaining[2], remaining[3]]));
-        if record_type == 0 && record_len == 0 {
-            if remaining.iter().all(|byte| *byte == 0) {
-                break;
+            continuation_chain = continuation_chain
+                .checked_add(1)
+                .ok_or_else(|| "The XLS continuation count overflowed.".to_owned())?;
+            if continuation_chain > MAX_BIFF_SST_CONTINUE_RECORDS {
+                return Err("The XLS stream has too many continuation records.".to_owned());
             }
-            return Err("The XLS BIFF stream contains invalid padding.".to_owned());
+        } else {
+            continuation_chain = 0;
         }
-        let payload_start = offset
-            .checked_add(4)
-            .ok_or_else(|| "The XLS BIFF record offset overflowed.".to_owned())?;
-        let payload_end = payload_start
-            .checked_add(record_len)
-            .filter(|end| *end <= bytes.len())
-            .ok_or_else(|| "The XLS BIFF record is truncated.".to_owned())?;
-        let payload = &bytes[payload_start..payload_end];
 
         if matches!(record_type, 0x0009 | 0x0209 | 0x0409 | 0x0809) {
             if payload.len() < 4 {
@@ -893,8 +1009,15 @@ fn validate_biff_workbook_stream(bytes: &[u8]) -> Result<(), String> {
             }
             saw_bof = true;
             let substream_type = u16::from_le_bytes([payload[2], payload[3]]);
+            let biff_version = normalized_biff_version(
+                u16::from_le_bytes([payload[0], payload[1]]),
+                substream_type,
+            );
             if substream_type == 0x0040 {
                 return Err("XLS macro sheets are not accepted.".to_owned());
+            }
+            if substream_type == 0x0005 && workbook_biff_version.replace(biff_version).is_some() {
+                return Err("The XLS workbook contains duplicate global substreams.".to_owned());
             }
         }
         if record_type == 0x0085 {
@@ -904,29 +1027,1018 @@ fn validate_biff_workbook_stream(bytes: &[u8]) -> Result<(), String> {
             if matches!(payload[5] & 0x0f, 0x01 | 0x06) {
                 return Err("XLS macro or VBA module sheets are not accepted.".to_owned());
             }
+            if sheet_offsets.len() >= MAX_SHEETS {
+                return Err("The XLS workbook sheet count exceeds the safety limit.".to_owned());
+            }
+            let sheet_offset = usize::try_from(u32::from_le_bytes([
+                payload[0], payload[1], payload[2], payload[3],
+            ]))
+            .map_err(|_| "The XLS worksheet offset is invalid.".to_owned())?;
+            if sheet_offsets.contains(&sheet_offset) {
+                return Err("The XLS workbook contains duplicate worksheet offsets.".to_owned());
+            }
+            sheet_offsets.push(sheet_offset);
         }
         if record_type == 0x01ae {
-            if payload.len() < 4 {
+            if payload.len() != 4 || workbook_biff_version.is_none_or(|version| version < 0x0600) {
                 return Err("The XLS SupBook record is invalid.".to_owned());
             }
             let character_count = u16::from_le_bytes([payload[2], payload[3]]);
             if !matches!(character_count, 0x0401 | 0x3a01) {
                 return Err("XLS external workbook links are not accepted.".to_owned());
             }
+            if self_referencing_supbooks.len() >= MAX_SHEETS {
+                return Err("The XLS supporting-link count exceeds the safety limit.".to_owned());
+            }
+            self_referencing_supbooks.push(character_count == 0x0401);
+        }
+        if record_type == 0x0017 {
+            let biff_version = workbook_biff_version.ok_or_else(|| {
+                "The XLS ExternSheet record precedes its workbook BOF.".to_owned()
+            })?;
+            validate_biff_extern_sheet(payload, biff_version, &self_referencing_supbooks)?;
+        }
+        if record_type == 0x00fc {
+            if saw_sst {
+                return Err("The XLS workbook contains duplicate SST records.".to_owned());
+            }
+            saw_sst = true;
+            validate_biff_sst(bytes, payload, record.next_offset)?;
+        }
+        if record_type == 0x013d && (payload.len() % 2 != 0 || payload.len() / 2 > MAX_SHEETS) {
+            return Err("The XLS RRTabId sheet allocation exceeds the safety limit.".to_owned());
         }
         if matches!(
             record_type,
-            0x0017 | 0x0023 | 0x0059 | 0x005a | 0x005d | 0x00d3 | 0x01b8
+            0x0023 | 0x0059 | 0x005a | 0x005d | 0x00d3 | 0x01b8
         ) {
             return Err(
                 "XLS external links, embedded objects, and macro projects are not accepted."
                     .to_owned(),
             );
         }
-        offset = payload_end;
+        offset = record.next_offset;
     }
     if !saw_bof {
         return Err("The XLS workbook stream has no BIFF BOF record.".to_owned());
+    }
+
+    let mut total_rows = 0_usize;
+    let mut total_cells = 0_usize;
+    let mut total_dense_cells = 0_usize;
+    let mut total_formula_cells = 0_usize;
+    let mut total_peak_reserved_cells = 0_usize;
+    for sheet_offset in sheet_offsets {
+        let stats = validate_biff_sheet(bytes, sheet_offset)?;
+        total_rows = total_rows
+            .checked_add(stats.bounds.height()?)
+            .ok_or_else(|| "The XLS worksheet row count overflowed.".to_owned())?;
+        total_cells = total_cells
+            .checked_add(stats.raw_cells)
+            .ok_or_else(|| "The XLS worksheet cell count overflowed.".to_owned())?;
+        total_dense_cells = total_dense_cells
+            .checked_add(stats.bounds.area()?)
+            .and_then(|count| count.checked_add(stats.formula_bounds.area().ok()?))
+            .ok_or_else(|| "The XLS worksheet allocation size overflowed.".to_owned())?;
+        total_formula_cells = total_formula_cells
+            .checked_add(stats.formula_cells)
+            .ok_or_else(|| "The XLS worksheet formula count overflowed.".to_owned())?;
+        total_peak_reserved_cells = total_peak_reserved_cells
+            .checked_add(stats.peak_reserved_cells)
+            .ok_or_else(|| "The XLS worksheet declared size overflowed.".to_owned())?;
+        if total_rows > MAX_ROWS
+            || total_cells > MAX_RANGE_CELLS
+            || total_dense_cells > MAX_RANGE_CELLS.saturating_mul(2)
+            || total_formula_cells > MAX_RANGE_CELLS
+            || total_peak_reserved_cells > MAX_RANGE_CELLS
+        {
+            return Err("The XLS workbook dimensions exceed the safety limit.".to_owned());
+        }
+    }
+    Ok(())
+}
+
+fn validate_biff_extern_sheet(
+    payload: &[u8],
+    biff_version: u16,
+    self_referencing_supbooks: &[bool],
+) -> Result<(), String> {
+    if biff_version < 0x0600 {
+        if payload.len() < 2 {
+            return Err("The legacy XLS ExternSheet record is truncated.".to_owned());
+        }
+        let sheet_name_bytes = usize::from(payload[0]);
+        if sheet_name_bytes == 0
+            || payload[1] != 0x03
+            || payload.len() != sheet_name_bytes.saturating_add(2)
+        {
+            return Err("Legacy XLS external workbook links are not accepted.".to_owned());
+        }
+        return Ok(());
+    }
+
+    if payload.len() < 2 {
+        return Err("The XLS ExternSheet record is truncated.".to_owned());
+    }
+    let reference_count = usize::from(u16::from_le_bytes([payload[0], payload[1]]));
+    let expected_length = reference_count
+        .checked_mul(6)
+        .and_then(|length| length.checked_add(2))
+        .ok_or_else(|| "The XLS ExternSheet allocation overflowed.".to_owned())?;
+    if payload.len() != expected_length || reference_count > MAX_RANGE_CELLS {
+        return Err("The XLS ExternSheet record exceeds the safety limit.".to_owned());
+    }
+    for reference in payload[2..].chunks_exact(6) {
+        let supbook_index = usize::from(u16::from_le_bytes([reference[0], reference[1]]));
+        if self_referencing_supbooks.get(supbook_index) != Some(&true) {
+            return Err("XLS external workbook links are not accepted.".to_owned());
+        }
+    }
+    Ok(())
+}
+
+fn normalized_biff_version(version: u16, substream_type: u16) -> u16 {
+    match version {
+        0x0200 | 0x0002 | 0x0007 | 0x0300 | 0x0400 | 0x0500 => 0x0500,
+        0x0600 => 0x0600,
+        0 if substream_type == 0x1000 => 0x0500,
+        _ => 0x0600,
+    }
+}
+
+fn validate_biff_sst<'a>(
+    bytes: &'a [u8],
+    payload: &'a [u8],
+    mut offset: usize,
+) -> Result<(), String> {
+    if payload.len() < 8 {
+        return Err("The XLS SST record is truncated.".to_owned());
+    }
+    let total = usize::try_from(u32::from_le_bytes([
+        payload[0], payload[1], payload[2], payload[3],
+    ]))
+    .map_err(|_| "The XLS SST total count is invalid.".to_owned())?;
+    let unique = usize::try_from(u32::from_le_bytes([
+        payload[4], payload[5], payload[6], payload[7],
+    ]))
+    .map_err(|_| "The XLS SST unique count is invalid.".to_owned())?;
+    if unique > total || total > MAX_RANGE_CELLS || unique > MAX_RANGE_CELLS {
+        return Err("The XLS SST counts exceed the safety limit.".to_owned());
+    }
+
+    let mut segments = vec![&payload[8..]];
+    let mut data_bytes = payload.len() - 8;
+    let mut continuation_count = 0_usize;
+    while offset < bytes.len() {
+        let Some(record) = read_biff_record(bytes, offset)? else {
+            break;
+        };
+        if record.record_type != 0x003c {
+            break;
+        }
+        if record.payload.is_empty() {
+            return Err("The XLS SST contains an empty continuation record.".to_owned());
+        }
+        continuation_count = continuation_count
+            .checked_add(1)
+            .ok_or_else(|| "The XLS SST continuation count overflowed.".to_owned())?;
+        if continuation_count > MAX_BIFF_SST_CONTINUE_RECORDS {
+            return Err("The XLS SST has too many continuation records.".to_owned());
+        }
+        data_bytes = data_bytes
+            .checked_add(record.payload.len())
+            .ok_or_else(|| "The XLS SST stream size overflowed.".to_owned())?;
+        if data_bytes > MAX_EXPENSE_FILE_BYTES as usize {
+            return Err("The XLS SST stream exceeds the safety limit.".to_owned());
+        }
+        segments.push(record.payload);
+        offset = record.next_offset;
+    }
+
+    let mut cursor = BiffSstCursor::new(segments);
+    for _ in 0..unique {
+        cursor.parse_string()?;
+    }
+    if !cursor.is_exhausted() {
+        return Err("The XLS SST contains more strings than declared.".to_owned());
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct BiffSstCursor<'a> {
+    segments: Vec<&'a [u8]>,
+    segment_index: usize,
+    offset: usize,
+}
+
+impl<'a> BiffSstCursor<'a> {
+    fn new(segments: Vec<&'a [u8]>) -> Self {
+        Self {
+            segments,
+            segment_index: 0,
+            offset: 0,
+        }
+    }
+
+    fn advance_empty_segments(&mut self) {
+        while self
+            .segments
+            .get(self.segment_index)
+            .is_some_and(|segment| self.offset == segment.len())
+        {
+            self.segment_index += 1;
+            self.offset = 0;
+        }
+    }
+
+    fn is_exhausted(&mut self) -> bool {
+        self.advance_empty_segments();
+        self.segment_index == self.segments.len()
+    }
+
+    fn read_header(&mut self, length: usize) -> Result<&'a [u8], String> {
+        let segment = self
+            .segments
+            .get(self.segment_index)
+            .ok_or_else(|| "The XLS SST string header is truncated.".to_owned())?;
+        let end = self
+            .offset
+            .checked_add(length)
+            .filter(|end| *end <= segment.len())
+            .ok_or_else(|| {
+                "The XLS SST string header is split across continuation records.".to_owned()
+            })?;
+        let start = self.offset;
+        self.offset = end;
+        Ok(&segment[start..end])
+    }
+
+    fn read_u8_header(&mut self) -> Result<u8, String> {
+        Ok(self.read_header(1)?[0])
+    }
+
+    fn read_u16_header(&mut self) -> Result<u16, String> {
+        let bytes = self.read_header(2)?;
+        Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
+    }
+
+    fn read_u32_header(&mut self) -> Result<u32, String> {
+        let bytes = self.read_header(4)?;
+        Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
+    fn parse_string(&mut self) -> Result<(), String> {
+        self.advance_empty_segments();
+        let character_count = usize::from(self.read_u16_header()?);
+        if character_count > MAX_CELL_CHARS {
+            return Err("The XLS SST string exceeds the character limit.".to_owned());
+        }
+        let flags = self.read_u8_header()?;
+        let rich_run_count = if flags & 0x08 != 0 {
+            usize::from(self.read_u16_header()?)
+        } else {
+            0
+        };
+        let extension_length = if flags & 0x04 != 0 {
+            usize::try_from(self.read_u32_header()?)
+                .map_err(|_| "The XLS SST extension length is invalid.".to_owned())?
+        } else {
+            0
+        };
+
+        self.read_characters(character_count, flags & 0x01 != 0)?;
+        let rich_run_bytes = rich_run_count
+            .checked_mul(4)
+            .ok_or_else(|| "The XLS SST rich-text run size overflowed.".to_owned())?;
+        self.skip_bytes(rich_run_bytes)?;
+        self.skip_bytes(extension_length)
+    }
+
+    fn read_characters(
+        &mut self,
+        mut remaining_characters: usize,
+        mut high_byte: bool,
+    ) -> Result<(), String> {
+        while remaining_characters > 0 {
+            let segment = self
+                .segments
+                .get(self.segment_index)
+                .ok_or_else(|| "The XLS SST string data is truncated.".to_owned())?;
+            let width = if high_byte { 2 } else { 1 };
+            let available_bytes = segment.len() - self.offset;
+            let available_characters = available_bytes / width;
+            if available_characters == 0 {
+                if available_bytes != 0 {
+                    return Err("The XLS SST string data is split inside a character.".to_owned());
+                }
+                high_byte = self.start_character_continuation()?;
+                continue;
+            }
+            let consumed_characters = available_characters.min(remaining_characters);
+            let consumed_bytes = consumed_characters
+                .checked_mul(width)
+                .ok_or_else(|| "The XLS SST string size overflowed.".to_owned())?;
+            self.offset += consumed_bytes;
+            remaining_characters -= consumed_characters;
+
+            if remaining_characters > 0 {
+                if self.offset != segment.len() {
+                    return Err("The XLS SST string data is split inside a character.".to_owned());
+                }
+                high_byte = self.start_character_continuation()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn start_character_continuation(&mut self) -> Result<bool, String> {
+        let current = self
+            .segments
+            .get(self.segment_index)
+            .ok_or_else(|| "The XLS SST string data is truncated.".to_owned())?;
+        if self.offset != current.len() {
+            return Err("The XLS SST string continuation is invalid.".to_owned());
+        }
+        self.segment_index += 1;
+        self.offset = 0;
+        let option = self
+            .segments
+            .get(self.segment_index)
+            .and_then(|segment| segment.first())
+            .copied()
+            .ok_or_else(|| "The XLS SST continuation option is missing.".to_owned())?;
+        self.offset = 1;
+        Ok(option & 0x01 != 0)
+    }
+
+    fn skip_bytes(&mut self, mut remaining: usize) -> Result<(), String> {
+        while remaining > 0 {
+            self.advance_empty_segments();
+            let segment = self
+                .segments
+                .get(self.segment_index)
+                .ok_or_else(|| "The XLS SST rich or extended data is truncated.".to_owned())?;
+            let available = segment.len() - self.offset;
+            let consumed = available.min(remaining);
+            self.offset += consumed;
+            remaining -= consumed;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BiffRecord<'a> {
+    record_type: u16,
+    payload: &'a [u8],
+    next_offset: usize,
+}
+
+fn read_biff_record(bytes: &[u8], offset: usize) -> Result<Option<BiffRecord<'_>>, String> {
+    let remaining = bytes
+        .get(offset..)
+        .ok_or_else(|| "The XLS BIFF record offset is invalid.".to_owned())?;
+    if remaining.len() < 4 {
+        if remaining.iter().all(|byte| *byte == 0) {
+            return Ok(None);
+        }
+        return Err("The XLS BIFF record header is truncated.".to_owned());
+    }
+    let record_type = u16::from_le_bytes([remaining[0], remaining[1]]);
+    let record_len = usize::from(u16::from_le_bytes([remaining[2], remaining[3]]));
+    if record_type == 0 && record_len == 0 {
+        if remaining.iter().all(|byte| *byte == 0) {
+            return Ok(None);
+        }
+        return Err("The XLS BIFF stream contains invalid padding.".to_owned());
+    }
+    let payload_start = offset
+        .checked_add(4)
+        .ok_or_else(|| "The XLS BIFF record offset overflowed.".to_owned())?;
+    let payload_end = payload_start
+        .checked_add(record_len)
+        .filter(|end| *end <= bytes.len())
+        .ok_or_else(|| "The XLS BIFF record is truncated.".to_owned())?;
+    Ok(Some(BiffRecord {
+        record_type,
+        payload: &bytes[payload_start..payload_end],
+        next_offset: payload_end,
+    }))
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct BiffSheetStats {
+    bounds: SheetCellBounds,
+    formula_bounds: SheetCellBounds,
+    raw_cells: usize,
+    value_cells: usize,
+    formula_cells: usize,
+    peak_reserved_cells: usize,
+}
+
+impl BiffSheetStats {
+    fn observe_cell(&mut self, row: u16, column: u16) -> Result<(), String> {
+        self.raw_cells = self
+            .raw_cells
+            .checked_add(1)
+            .ok_or_else(|| "The XLS worksheet cell count overflowed.".to_owned())?;
+        if self.raw_cells > MAX_RANGE_CELLS {
+            return Err("The XLS worksheet cell count exceeds the safety limit.".to_owned());
+        }
+        self.bounds.observe(u32::from(row), u32::from(column))?;
+        self.value_cells = self
+            .value_cells
+            .checked_add(1)
+            .ok_or_else(|| "The XLS worksheet value allocation overflowed.".to_owned())?;
+        if self.value_cells > MAX_RANGE_CELLS {
+            return Err("The XLS worksheet value allocation exceeds the safety limit.".to_owned());
+        }
+        Ok(())
+    }
+
+    fn observe_formula(&mut self, row: u16, column: u16) -> Result<(), String> {
+        self.observe_cell(row, column)?;
+        self.formula_cells = self
+            .formula_cells
+            .checked_add(1)
+            .ok_or_else(|| "The XLS worksheet formula allocation overflowed.".to_owned())?;
+        if self.formula_cells > MAX_RANGE_CELLS {
+            return Err(
+                "The XLS worksheet formula allocation exceeds the safety limit.".to_owned(),
+            );
+        }
+        self.formula_bounds
+            .observe(u32::from(row), u32::from(column))?;
+        Ok(())
+    }
+
+    fn observe_cell_span(
+        &mut self,
+        row: u16,
+        first_column: u16,
+        last_column: u16,
+    ) -> Result<(), String> {
+        if last_column < first_column {
+            return Err("The XLS MulRK cell span is invalid.".to_owned());
+        }
+        let span = usize::from(last_column - first_column) + 1;
+        self.raw_cells = self
+            .raw_cells
+            .checked_add(span)
+            .ok_or_else(|| "The XLS worksheet cell count overflowed.".to_owned())?;
+        if self.raw_cells > MAX_RANGE_CELLS {
+            return Err("The XLS worksheet cell count exceeds the safety limit.".to_owned());
+        }
+        self.value_cells = self
+            .value_cells
+            .checked_add(span)
+            .ok_or_else(|| "The XLS worksheet value allocation overflowed.".to_owned())?;
+        if self.value_cells > MAX_RANGE_CELLS {
+            return Err("The XLS worksheet value allocation exceeds the safety limit.".to_owned());
+        }
+        self.bounds
+            .observe(u32::from(row), u32::from(first_column))?;
+        self.bounds.observe(u32::from(row), u32::from(last_column))
+    }
+}
+
+fn validate_biff_sheet(bytes: &[u8], sheet_offset: usize) -> Result<BiffSheetStats, String> {
+    let first = read_biff_record(bytes, sheet_offset)?
+        .ok_or_else(|| "The XLS worksheet offset does not reference a BOF record.".to_owned())?;
+    if !matches!(first.record_type, 0x0009 | 0x0209 | 0x0409 | 0x0809) || first.payload.len() < 4 {
+        return Err("The XLS worksheet offset does not reference a valid BOF record.".to_owned());
+    }
+    let substream_type = u16::from_le_bytes([first.payload[2], first.payload[3]]);
+    if !matches!(substream_type, 0x0010 | 0x0020) {
+        return Err("The XLS BoundSheet offset references an unsupported substream.".to_owned());
+    }
+    let biff_version = normalized_biff_version(
+        u16::from_le_bytes([first.payload[0], first.payload[1]]),
+        substream_type,
+    );
+
+    let mut stats = BiffSheetStats::default();
+    let mut offset = first.next_offset;
+    let mut saw_eof = false;
+    let mut merge_count = 0_usize;
+    let mut formula_string_pending = false;
+    while offset < bytes.len() {
+        let record = read_biff_record(bytes, offset)?
+            .ok_or_else(|| "The XLS worksheet substream ended before EOF.".to_owned())?;
+        let payload = record.payload;
+        if formula_string_pending && !matches!(record.record_type, 0x0207 | 0x003c) {
+            return Err("The XLS formula string result is missing.".to_owned());
+        }
+        match record.record_type {
+            0x000a => {
+                saw_eof = true;
+                break;
+            }
+            0x0200 => validate_biff_dimensions(payload, &mut stats)?,
+            0x0006 => {
+                validate_biff_scalar_cell(payload, 20, true, &mut stats)?;
+                formula_string_pending =
+                    payload[6] == 0x00 && payload[12] == 0xff && payload[13] == 0xff;
+            }
+            0x0203 => validate_biff_scalar_cell(payload, 14, false, &mut stats)?,
+            0x0204 | 0x00d6 => {
+                validate_biff_scalar_cell(payload, 8, false, &mut stats)?;
+                validate_biff_cell_string(&payload[6..], biff_version)?;
+            }
+            0x0205 => validate_biff_scalar_cell(payload, 8, false, &mut stats)?,
+            0x027e | 0x00fd => validate_biff_scalar_cell(payload, 10, false, &mut stats)?,
+            0x0207 => {
+                if !formula_string_pending {
+                    return Err(
+                        "The XLS formula string record has no preceding formula.".to_owned()
+                    );
+                }
+                validate_biff_formula_string(payload, biff_version)?;
+                formula_string_pending = false;
+            }
+            0x00bd => validate_biff_mul_rk(payload, &mut stats)?,
+            0x00e5 => {
+                if payload.len() < 2 || (payload.len() - 2) % 8 != 0 {
+                    return Err("The XLS merged-cell record is invalid.".to_owned());
+                }
+                let declared = usize::from(u16::from_le_bytes([payload[0], payload[1]]));
+                if declared != (payload.len() - 2) / 8 {
+                    return Err("The XLS merged-cell count is inconsistent.".to_owned());
+                }
+                for dimensions in payload[2..].chunks_exact(8) {
+                    let first_row = u16::from_le_bytes([dimensions[0], dimensions[1]]);
+                    let last_row = u16::from_le_bytes([dimensions[2], dimensions[3]]);
+                    let first_column = u16::from_le_bytes([dimensions[4], dimensions[5]]);
+                    let last_column = u16::from_le_bytes([dimensions[6], dimensions[7]]);
+                    if last_row < first_row || last_column < first_column {
+                        return Err("The XLS merged-cell range is invalid.".to_owned());
+                    }
+                    validate_sheet_position(u32::from(first_row), u32::from(first_column))?;
+                    validate_sheet_position(u32::from(last_row), u32::from(last_column))?;
+                }
+                merge_count = merge_count
+                    .checked_add(declared)
+                    .ok_or_else(|| "The XLS merged-cell count overflowed.".to_owned())?;
+                if merge_count > MAX_RANGE_CELLS {
+                    return Err("The XLS merged-cell count exceeds the safety limit.".to_owned());
+                }
+            }
+            _ => {}
+        }
+        offset = record.next_offset;
+    }
+    if !saw_eof {
+        return Err("The XLS worksheet substream has no EOF record.".to_owned());
+    }
+    if stats.bounds.area()? > MAX_RANGE_CELLS || stats.formula_bounds.area()? > MAX_RANGE_CELLS {
+        return Err("The XLS worksheet cell span exceeds the safety limit.".to_owned());
+    }
+    Ok(stats)
+}
+
+fn validate_biff_scalar_cell(
+    payload: &[u8],
+    minimum_length: usize,
+    formula: bool,
+    stats: &mut BiffSheetStats,
+) -> Result<(), String> {
+    if payload.len() < minimum_length {
+        return Err("The XLS worksheet cell record is truncated.".to_owned());
+    }
+    let row = u16::from_le_bytes([payload[0], payload[1]]);
+    let column = u16::from_le_bytes([payload[2], payload[3]]);
+    if formula {
+        stats.observe_formula(row, column)
+    } else {
+        stats.observe_cell(row, column)
+    }
+}
+
+fn validate_biff_formula_string(payload: &[u8], biff_version: u16) -> Result<(), String> {
+    if payload == [0, 0] {
+        return Ok(());
+    }
+    let header_length = if biff_version >= 0x0600 { 3 } else { 2 };
+    if payload.len() < header_length {
+        return Err("The XLS formula string record is truncated.".to_owned());
+    }
+    let character_count = usize::from(u16::from_le_bytes([payload[0], payload[1]]));
+    if character_count > MAX_CELL_CHARS {
+        return Err("The XLS formula string exceeds the character limit.".to_owned());
+    }
+    let width = if biff_version >= 0x0600 && payload[2] & 0x01 != 0 {
+        2
+    } else {
+        1
+    };
+    let required = character_count
+        .checked_mul(width)
+        .and_then(|length| length.checked_add(header_length))
+        .ok_or_else(|| "The XLS formula string size overflowed.".to_owned())?;
+    if payload.len() < required {
+        return Err("The XLS formula string record is truncated.".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_biff_cell_string(payload: &[u8], biff_version: u16) -> Result<(), String> {
+    if biff_version >= 0x0600 {
+        return validate_biff_formula_string(payload, biff_version);
+    }
+    if payload.len() < 2 {
+        return Err("The XLS cell string record is truncated.".to_owned());
+    }
+    let character_count = usize::from(u16::from_le_bytes([payload[0], payload[1]]));
+    if character_count > MAX_CELL_CHARS {
+        return Err("The XLS cell string exceeds the character limit.".to_owned());
+    }
+    let required = character_count
+        .checked_add(2)
+        .ok_or_else(|| "The XLS cell string size overflowed.".to_owned())?;
+    if payload.len() < required {
+        return Err("The XLS cell string record is truncated.".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_biff_mul_rk(payload: &[u8], stats: &mut BiffSheetStats) -> Result<(), String> {
+    if payload.len() < 12 || (payload.len() - 6) % 6 != 0 {
+        return Err("The XLS MulRK record is invalid.".to_owned());
+    }
+    let row = u16::from_le_bytes([payload[0], payload[1]]);
+    let first_column = u16::from_le_bytes([payload[2], payload[3]]);
+    let last_column_offset = payload.len() - 2;
+    let last_column =
+        u16::from_le_bytes([payload[last_column_offset], payload[last_column_offset + 1]]);
+    let declared_span = usize::from(
+        last_column
+            .checked_sub(first_column)
+            .ok_or_else(|| "The XLS MulRK cell span is invalid.".to_owned())?,
+    ) + 1;
+    if declared_span != (payload.len() - 6) / 6 {
+        return Err("The XLS MulRK cell count is inconsistent.".to_owned());
+    }
+    stats.observe_cell_span(row, first_column, last_column)
+}
+
+fn validate_biff_dimensions(payload: &[u8], stats: &mut BiffSheetStats) -> Result<(), String> {
+    let (first_row, last_row, mut first_column, last_column) = match payload.len() {
+        10 => (
+            u32::from(u16::from_le_bytes([payload[0], payload[1]])),
+            u32::from(u16::from_le_bytes([payload[2], payload[3]])),
+            u16::from_le_bytes([payload[4], payload[5]]),
+            u16::from_le_bytes([payload[6], payload[7]]),
+        ),
+        14 => (
+            u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]),
+            u32::from_le_bytes([payload[4], payload[5], payload[6], payload[7]]),
+            u16::from_le_bytes([payload[8], payload[9]]),
+            u16::from_le_bytes([payload[10], payload[11]]),
+        ),
+        _ => return Err("The XLS Dimensions record is invalid.".to_owned()),
+    };
+    let area = if last_row == 0 || last_column == 0 {
+        1
+    } else {
+        if first_column > 0x00ff || last_column < first_column {
+            first_column = 0;
+        }
+        if last_row <= first_row || last_column <= first_column {
+            return Err("The XLS Dimensions record has an invalid cell span.".to_owned());
+        }
+        let rows = usize::try_from(last_row - first_row)
+            .map_err(|_| "The XLS Dimensions row span is invalid.".to_owned())?;
+        let columns = usize::from(last_column - first_column);
+        rows.checked_mul(columns)
+            .ok_or_else(|| "The XLS Dimensions allocation size overflowed.".to_owned())?
+    };
+    if area > MAX_RANGE_CELLS {
+        return Err("The XLS Dimensions allocation exceeds the safety limit.".to_owned());
+    }
+    let peak_reserved_cells = stats
+        .value_cells
+        .checked_add(area)
+        .ok_or_else(|| "The XLS Dimensions allocation size overflowed.".to_owned())?;
+    if peak_reserved_cells > MAX_RANGE_CELLS {
+        return Err("The XLS Dimensions allocation exceeds the safety limit.".to_owned());
+    }
+    stats.peak_reserved_cells = stats.peak_reserved_cells.max(peak_reserved_cells);
+    Ok(())
+}
+
+fn utf8_xml_decoder() -> XmlDecoder {
+    XmlReader::from_str("").decoder()
+}
+
+fn xml_attribute_value(
+    element: &BytesStart<'_>,
+    expected_local_name: &[u8],
+    decoder: XmlDecoder,
+) -> Result<Option<String>, String> {
+    let mut value = None;
+    for attribute in element.attributes() {
+        let attribute = attribute.map_err(|_| "The XLSX XML attribute is invalid.".to_owned())?;
+        if attribute.key.local_name().as_ref() != expected_local_name {
+            continue;
+        }
+        if value.is_some() {
+            return Err("The XLSX XML attribute is duplicated.".to_owned());
+        }
+        value = Some(
+            attribute
+                .decoded_and_normalized_value(XmlVersion::Implicit1_0, decoder)
+                .map_err(|_| "The XLSX XML attribute value is invalid.".to_owned())?
+                .into_owned(),
+        );
+    }
+    Ok(value)
+}
+
+fn validate_shared_strings_xml(bytes: &[u8]) -> Result<(), String> {
+    let mut reader = XmlReader::from_reader(DecodingReader::new(bytes));
+    reader.config_mut().expand_empty_elements = true;
+    let decoder = utf8_xml_decoder();
+    let mut buffer = Vec::new();
+    let mut depth = 0_usize;
+    let mut root_depth = None;
+    let mut root_closed = false;
+    let mut declared_unique = None;
+    let mut actual_unique = 0_usize;
+
+    loop {
+        buffer.clear();
+        match reader
+            .read_event_into(&mut buffer)
+            .map_err(|_| "The XLSX shared strings XML is invalid.".to_owned())?
+        {
+            Event::Start(element) => {
+                depth = depth
+                    .checked_add(1)
+                    .ok_or_else(|| "The XLSX XML nesting depth overflowed.".to_owned())?;
+                if root_depth.is_none() {
+                    if root_closed || element.local_name().as_ref() != b"sst" {
+                        return Err("The XLSX shared strings root element is invalid.".to_owned());
+                    }
+                    root_depth = Some(depth);
+                    if let Some(value) = xml_attribute_value(&element, b"uniqueCount", decoder)? {
+                        let count = value.parse::<usize>().map_err(|_| {
+                            "The XLSX shared strings uniqueCount is invalid.".to_owned()
+                        })?;
+                        if count > MAX_RANGE_CELLS {
+                            return Err(
+                                "The XLSX shared strings uniqueCount exceeds the safety limit."
+                                    .to_owned(),
+                            );
+                        }
+                        declared_unique = Some(count);
+                    }
+                } else if element.local_name().as_ref() == b"si" {
+                    actual_unique = actual_unique
+                        .checked_add(1)
+                        .ok_or_else(|| "The XLSX shared strings count overflowed.".to_owned())?;
+                    if actual_unique > MAX_RANGE_CELLS {
+                        return Err(
+                            "The XLSX shared strings count exceeds the safety limit.".to_owned()
+                        );
+                    }
+                }
+            }
+            Event::End(element) => {
+                if root_depth == Some(depth) {
+                    if element.local_name().as_ref() != b"sst" {
+                        return Err("The XLSX shared strings root element is invalid.".to_owned());
+                    }
+                    root_depth = None;
+                    root_closed = true;
+                }
+                depth = depth
+                    .checked_sub(1)
+                    .ok_or_else(|| "The XLSX XML nesting depth is invalid.".to_owned())?;
+            }
+            Event::DocType(_) => {
+                return Err("XLSX XML must not contain a DOCTYPE declaration.".to_owned());
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    if depth != 0 || !root_closed {
+        return Err("The XLSX shared strings root element is invalid.".to_owned());
+    }
+    if declared_unique.is_some_and(|declared| declared != actual_unique) {
+        return Err("The XLSX shared strings uniqueCount is inconsistent.".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_workbook_xml(bytes: &[u8]) -> Result<(), String> {
+    let mut reader = XmlReader::from_reader(DecodingReader::new(bytes));
+    reader.config_mut().expand_empty_elements = true;
+    let mut buffer = Vec::new();
+    let mut depth = 0_usize;
+    let mut root_depth = None;
+    let mut root_closed = false;
+    let mut sheet_count = 0_usize;
+
+    loop {
+        buffer.clear();
+        match reader
+            .read_event_into(&mut buffer)
+            .map_err(|_| "The XLSX workbook XML is invalid.".to_owned())?
+        {
+            Event::Start(element) => {
+                depth = depth
+                    .checked_add(1)
+                    .ok_or_else(|| "The XLSX XML nesting depth overflowed.".to_owned())?;
+                if root_depth.is_none() {
+                    if root_closed || element.local_name().as_ref() != b"workbook" {
+                        return Err("The XLSX workbook root element is invalid.".to_owned());
+                    }
+                    root_depth = Some(depth);
+                } else if element.local_name().as_ref() == b"sheet" {
+                    sheet_count = sheet_count
+                        .checked_add(1)
+                        .ok_or_else(|| "The XLSX worksheet count overflowed.".to_owned())?;
+                    if sheet_count > MAX_SHEETS {
+                        return Err(
+                            "The XLSX workbook sheet count exceeds the safety limit.".to_owned()
+                        );
+                    }
+                }
+            }
+            Event::End(element) => {
+                if root_depth == Some(depth) {
+                    if element.local_name().as_ref() != b"workbook" {
+                        return Err("The XLSX workbook root element is invalid.".to_owned());
+                    }
+                    root_depth = None;
+                    root_closed = true;
+                }
+                depth = depth
+                    .checked_sub(1)
+                    .ok_or_else(|| "The XLSX XML nesting depth is invalid.".to_owned())?;
+            }
+            Event::DocType(_) => {
+                return Err("XLSX XML must not contain a DOCTYPE declaration.".to_owned());
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    if depth != 0 || !root_closed || sheet_count == 0 {
+        return Err("The XLSX workbook contains no valid worksheet metadata.".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_styles_xml(bytes: &[u8]) -> Result<(), String> {
+    let mut reader = XmlReader::from_reader(DecodingReader::new(bytes));
+    reader.config_mut().expand_empty_elements = true;
+    let mut buffer = Vec::new();
+    let mut depth = 0_usize;
+    let mut root_depth = None;
+    let mut root_closed = false;
+    let mut num_fmts_depth = None;
+    let mut cell_xfs_depth = None;
+    let mut num_fmt_count = 0_usize;
+    let mut cell_xf_count = 0_usize;
+
+    loop {
+        buffer.clear();
+        match reader
+            .read_event_into(&mut buffer)
+            .map_err(|_| "The XLSX styles XML is invalid.".to_owned())?
+        {
+            Event::Start(element) => {
+                depth = depth
+                    .checked_add(1)
+                    .ok_or_else(|| "The XLSX XML nesting depth overflowed.".to_owned())?;
+                let local_name = element.local_name();
+                if root_depth.is_none() {
+                    if root_closed || local_name.as_ref() != b"styleSheet" {
+                        return Err("The XLSX styles root element is invalid.".to_owned());
+                    }
+                    root_depth = Some(depth);
+                } else if local_name.as_ref() == b"numFmts" {
+                    if num_fmts_depth.is_some() {
+                        return Err("The XLSX number format scope is invalid.".to_owned());
+                    }
+                    num_fmts_depth = Some(depth);
+                } else if local_name.as_ref() == b"cellXfs" {
+                    if cell_xfs_depth.is_some() {
+                        return Err("The XLSX cell format scope is invalid.".to_owned());
+                    }
+                    cell_xfs_depth = Some(depth);
+                } else if local_name.as_ref() == b"numFmt" && num_fmts_depth.is_some() {
+                    num_fmt_count = num_fmt_count
+                        .checked_add(1)
+                        .ok_or_else(|| "The XLSX number format count overflowed.".to_owned())?;
+                    if num_fmt_count > MAX_STYLE_NUMFMTS {
+                        return Err(
+                            "The XLSX number format count exceeds the safety limit.".to_owned()
+                        );
+                    }
+                } else if local_name.as_ref() == b"xf" && cell_xfs_depth.is_some() {
+                    cell_xf_count = cell_xf_count
+                        .checked_add(1)
+                        .ok_or_else(|| "The XLSX cell format count overflowed.".to_owned())?;
+                    if cell_xf_count > MAX_STYLE_CELL_XFS {
+                        return Err(
+                            "The XLSX cell format count exceeds the safety limit.".to_owned()
+                        );
+                    }
+                }
+            }
+            Event::End(element) => {
+                if num_fmts_depth == Some(depth) {
+                    if element.local_name().as_ref() != b"numFmts" {
+                        return Err("The XLSX number format scope is invalid.".to_owned());
+                    }
+                    num_fmts_depth = None;
+                }
+                if cell_xfs_depth == Some(depth) {
+                    if element.local_name().as_ref() != b"cellXfs" {
+                        return Err("The XLSX cell format scope is invalid.".to_owned());
+                    }
+                    cell_xfs_depth = None;
+                }
+                if root_depth == Some(depth) {
+                    if element.local_name().as_ref() != b"styleSheet" {
+                        return Err("The XLSX styles root element is invalid.".to_owned());
+                    }
+                    root_depth = None;
+                    root_closed = true;
+                }
+                depth = depth
+                    .checked_sub(1)
+                    .ok_or_else(|| "The XLSX XML nesting depth is invalid.".to_owned())?;
+            }
+            Event::DocType(_) => {
+                return Err("XLSX XML must not contain a DOCTYPE declaration.".to_owned());
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    if depth != 0 || !root_closed || num_fmts_depth.is_some() || cell_xfs_depth.is_some() {
+        return Err("The XLSX styles XML structure is invalid.".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_relationships_xml(bytes: &[u8]) -> Result<(), String> {
+    let mut reader = XmlReader::from_reader(DecodingReader::new(bytes));
+    reader.config_mut().expand_empty_elements = true;
+    let decoder = utf8_xml_decoder();
+    let mut buffer = Vec::new();
+    let mut depth = 0_usize;
+    let mut root_depth = None;
+    let mut root_closed = false;
+
+    loop {
+        buffer.clear();
+        match reader
+            .read_event_into(&mut buffer)
+            .map_err(|_| "The XLSX relationships XML is invalid.".to_owned())?
+        {
+            Event::Start(element) => {
+                depth = depth
+                    .checked_add(1)
+                    .ok_or_else(|| "The XLSX XML nesting depth overflowed.".to_owned())?;
+                if root_depth.is_none() {
+                    if root_closed || element.local_name().as_ref() != b"Relationships" {
+                        return Err("The XLSX relationships root element is invalid.".to_owned());
+                    }
+                    root_depth = Some(depth);
+                } else if element.local_name().as_ref() == b"Relationship"
+                    && xml_attribute_value(&element, b"TargetMode", decoder)?
+                        .is_some_and(|value| value.trim().eq_ignore_ascii_case("external"))
+                {
+                    return Err("XLSX files containing external links are not accepted.".to_owned());
+                }
+            }
+            Event::End(element) => {
+                if root_depth == Some(depth) {
+                    if element.local_name().as_ref() != b"Relationships" {
+                        return Err("The XLSX relationships root element is invalid.".to_owned());
+                    }
+                    root_depth = None;
+                    root_closed = true;
+                }
+                depth = depth
+                    .checked_sub(1)
+                    .ok_or_else(|| "The XLSX XML nesting depth is invalid.".to_owned())?;
+            }
+            Event::DocType(_) => {
+                return Err("XLSX XML must not contain a DOCTYPE declaration.".to_owned());
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    if depth != 0 || !root_closed {
+        return Err("The XLSX relationships XML structure is invalid.".to_owned());
     }
     Ok(())
 }
@@ -974,6 +2086,43 @@ fn validate_ooxml_container(bytes: &[u8]) -> Result<(), String> {
             return Err("XLSX 압축 비율이 안전 제한을 초과했습니다.".to_owned());
         }
 
+        if normalized_name.ends_with("/workbook.xml") || normalized_name == "workbook.xml" {
+            if uncompressed > MAX_WORKBOOK_METADATA_BYTES {
+                return Err("The XLSX workbook metadata exceeds the safety limit.".to_owned());
+            }
+            let capacity = usize::try_from(uncompressed)
+                .map_err(|_| "The XLSX workbook metadata size is invalid.".to_owned())?;
+            let mut workbook_metadata = Vec::with_capacity(capacity);
+            entry
+                .read_to_end(&mut workbook_metadata)
+                .map_err(|_| "The XLSX workbook metadata cannot be inspected.".to_owned())?;
+            validate_workbook_xml(&workbook_metadata)?;
+        }
+
+        if normalized_name.ends_with("/sharedstrings.xml") || normalized_name == "sharedstrings.xml"
+        {
+            let capacity = usize::try_from(uncompressed)
+                .map_err(|_| "The XLSX shared strings size is invalid.".to_owned())?;
+            let mut shared_strings = Vec::with_capacity(capacity);
+            entry
+                .read_to_end(&mut shared_strings)
+                .map_err(|_| "The XLSX shared strings cannot be inspected.".to_owned())?;
+            validate_shared_strings_xml(&shared_strings)?;
+        }
+
+        if normalized_name.ends_with("/styles.xml") || normalized_name == "styles.xml" {
+            if uncompressed > MAX_STYLES_METADATA_BYTES {
+                return Err("The XLSX styles metadata exceeds the safety limit.".to_owned());
+            }
+            let capacity = usize::try_from(uncompressed)
+                .map_err(|_| "The XLSX styles metadata size is invalid.".to_owned())?;
+            let mut styles = Vec::with_capacity(capacity);
+            entry
+                .read_to_end(&mut styles)
+                .map_err(|_| "The XLSX styles metadata cannot be inspected.".to_owned())?;
+            validate_styles_xml(&styles)?;
+        }
+
         if normalized_name.ends_with(".rels") {
             if uncompressed > MAX_RELATIONSHIP_BYTES {
                 return Err("XLSX 관계 파일 크기가 안전 제한을 초과했습니다.".to_owned());
@@ -982,12 +2131,7 @@ fn validate_ooxml_container(bytes: &[u8]) -> Result<(), String> {
             entry
                 .read_to_end(&mut relationship)
                 .map_err(|_| "XLSX 관계 파일을 검사할 수 없습니다.".to_owned())?;
-            let has_target_mode_attribute = relationship
-                .windows(b"targetmode".len())
-                .any(|window| window.eq_ignore_ascii_case(b"targetmode"));
-            if has_target_mode_attribute {
-                return Err("외부 링크가 포함된 XLSX는 가져올 수 없습니다.".to_owned());
-            }
+            validate_relationships_xml(&relationship)?;
         }
     }
     Ok(())
@@ -1506,15 +2650,23 @@ pub(crate) fn hex_sha256(bytes: &[u8]) -> String {
 mod tests {
     use std::io::{Cursor, Write};
 
-    use calamine::{Cell, Data, ExcelDateTime, ExcelDateTimeType, Range};
+    use calamine::{
+        Cell, Data, ExcelDateTime, ExcelDateTimeType, Range, Reader, Sheets,
+        open_workbook_auto_from_rs,
+    };
     use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
     use super::{
-        ExpenseAdapter, MAX_CELL_CHARS, MAX_CFB_ENTRIES, MAX_COLUMNS, MAX_ROWS,
-        MAX_SAFE_AMOUNT_MINOR, absolute_nonzero_amount, declared_coverage_period, detect_adapter,
-        find_compound_header_row, parse_amount, parse_datetime, parse_kakao_pay, parse_kb_account,
-        parse_kb_card, redact_financial_identifiers, source_discriminator_fingerprint,
-        validate_ooxml_container, validate_range, validate_xls_container,
+        BiffSheetStats, ExpenseAdapter, MAX_BIFF_SST_CONTINUE_RECORDS, MAX_CELL_CHARS,
+        MAX_CFB_ENTRIES, MAX_COLUMNS, MAX_RANGE_CELLS, MAX_ROWS, MAX_SAFE_AMOUNT_MINOR,
+        MAX_STYLE_CELL_XFS, MAX_STYLE_NUMFMTS, MAX_STYLES_METADATA_BYTES, absolute_nonzero_amount,
+        declared_coverage_period, detect_adapter, find_compound_header_row, parse_amount,
+        parse_datetime, parse_kakao_pay, parse_kb_account, parse_kb_card,
+        redact_financial_identifiers, source_discriminator_fingerprint, validate_biff_dimensions,
+        validate_biff_sheet, validate_biff_sst, validate_biff_workbook_stream,
+        validate_ooxml_container, validate_range, validate_relationships_xml,
+        validate_shared_strings_xml, validate_styles_xml, validate_workbook_xml,
+        validate_xls_container, validate_xlsx_workbook_ranges,
     };
 
     fn string_range(rows: &[&[&str]]) -> Range<Data> {
@@ -1572,6 +2724,103 @@ mod tests {
                 .expect("write synthetic BIFF records");
         }
         compound.into_inner().into_inner()
+    }
+
+    fn push_biff_record(records: &mut Vec<u8>, record_type: u16, payload: &[u8]) {
+        let payload_len = u16::try_from(payload.len()).expect("synthetic BIFF payload length");
+        records.extend_from_slice(&record_type.to_le_bytes());
+        records.extend_from_slice(&payload_len.to_le_bytes());
+        records.extend_from_slice(payload);
+    }
+
+    fn utf16le_xml(value: &str) -> Vec<u8> {
+        let mut bytes = vec![0xff, 0xfe];
+        for code_unit in value.encode_utf16() {
+            bytes.extend_from_slice(&code_unit.to_le_bytes());
+        }
+        bytes
+    }
+
+    fn utf16be_xml(value: &str) -> Vec<u8> {
+        let mut bytes = vec![0xfe, 0xff];
+        for code_unit in value.encode_utf16() {
+            bytes.extend_from_slice(&code_unit.to_be_bytes());
+        }
+        bytes
+    }
+
+    fn biff_dimensions(rows: usize, columns: usize) -> Vec<u8> {
+        let mut dimensions = Vec::new();
+        dimensions.extend_from_slice(&0_u32.to_le_bytes());
+        dimensions.extend_from_slice(&(rows as u32).to_le_bytes());
+        dimensions.extend_from_slice(&0_u16.to_le_bytes());
+        dimensions.extend_from_slice(&(columns as u16).to_le_bytes());
+        dimensions.extend_from_slice(&0_u16.to_le_bytes());
+        dimensions
+    }
+
+    fn biff_workbook_with_sheet(sheet_records: &[(u16, Vec<u8>)]) -> Vec<u8> {
+        biff_workbook_with_sheet_version(0x0600, sheet_records)
+    }
+
+    fn biff_workbook_with_sheet_version(
+        biff_version: u16,
+        sheet_records: &[(u16, Vec<u8>)],
+    ) -> Vec<u8> {
+        let mut records = Vec::new();
+        let version = biff_version.to_le_bytes();
+        push_biff_record(&mut records, 0x0809, &[version[0], version[1], 0x05, 0x00]);
+        let bound_sheet_payload_start = records.len() + 4;
+        push_biff_record(&mut records, 0x0085, &[0, 0, 0, 0, 0, 0]);
+        push_biff_record(&mut records, 0x000a, &[]);
+        let sheet_offset = u32::try_from(records.len()).expect("synthetic worksheet offset");
+        records[bound_sheet_payload_start..bound_sheet_payload_start + 4]
+            .copy_from_slice(&sheet_offset.to_le_bytes());
+        push_biff_record(&mut records, 0x0809, &[version[0], version[1], 0x10, 0x00]);
+        for (record_type, payload) in sheet_records {
+            push_biff_record(&mut records, *record_type, payload);
+        }
+        push_biff_record(&mut records, 0x000a, &[]);
+        records
+    }
+
+    fn xlsx_with_sheet_xml(sheet_xml: &str) -> Vec<u8> {
+        const CONTENT_TYPES: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+</Types>"#;
+        const ROOT_RELS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>"#;
+        const WORKBOOK: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>
+</workbook>"#;
+        const WORKBOOK_RELS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+</Relationships>"#;
+
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        for (name, contents) in [
+            ("[Content_Types].xml", CONTENT_TYPES),
+            ("_rels/.rels", ROOT_RELS),
+            ("xl/workbook.xml", WORKBOOK),
+            ("xl/_rels/workbook.xml.rels", WORKBOOK_RELS),
+            ("xl/worksheets/sheet1.xml", sheet_xml),
+        ] {
+            writer
+                .start_file(name, SimpleFileOptions::default())
+                .expect("start synthetic XLSX entry");
+            writer
+                .write_all(contents.as_bytes())
+                .expect("write synthetic XLSX entry");
+        }
+        writer.finish().expect("finish synthetic XLSX").into_inner()
     }
 
     #[test]
@@ -1797,19 +3046,511 @@ mod tests {
     }
 
     #[test]
+    fn xlsx_metadata_preflight_bounds_declared_and_actual_allocations() {
+        let valid_shared_strings = br#"<?xml version="1.0"?>
+<x:sst xmlns:x="urn:test" x:uniqueCount="2">
+  <!-- <x:si/> --><![CDATA[<x:si/>]]><x:si/><x:si/>
+</x:sst>"#;
+        assert!(validate_shared_strings_xml(valid_shared_strings).is_ok());
+
+        let oversized_unique_count =
+            format!("<sst uniqueCount=\"{}\"><si/></sst>", MAX_RANGE_CELLS + 1);
+        assert!(validate_shared_strings_xml(oversized_unique_count.as_bytes()).is_err());
+
+        let ten_sheets = format!(
+            "<workbook><sheets>{}</sheets></workbook>",
+            "<sheet/>".repeat(10)
+        );
+        assert!(validate_workbook_xml(ten_sheets.as_bytes()).is_ok());
+        let eleven_sheets = format!(
+            "<workbook><sheets>{}</sheets></workbook>",
+            "<sheet/>".repeat(11)
+        );
+        assert!(validate_workbook_xml(eleven_sheets.as_bytes()).is_err());
+
+        let shared_strings_zip = zip_with_entry("xl/sharedStrings.xml", valid_shared_strings);
+        assert!(validate_ooxml_container(&shared_strings_zip).is_ok());
+        let workbook_zip = zip_with_entry("xl/workbook.xml", ten_sheets.as_bytes());
+        assert!(validate_ooxml_container(&workbook_zip).is_ok());
+    }
+
+    #[test]
+    fn event_xml_preflight_handles_namespaces_utf16_styles_and_relationship_values() {
+        let shared_strings = br#"<?xml version="1.0"?>
+<x:sst xmlns:x="urn:test" x:uniqueCount="2"><x:si/><x:si/></x:sst>"#;
+        assert!(validate_shared_strings_xml(shared_strings).is_ok());
+        assert!(validate_shared_strings_xml(br#"<sst uniqueCount="1"><si/><si/></sst>"#,).is_err());
+        assert!(validate_shared_strings_xml(br#"<!DOCTYPE sst><sst uniqueCount="0"/>"#).is_err());
+
+        let utf16_workbook = utf16le_xml(
+            r#"<?xml version="1.0" encoding="UTF-16"?>
+<x:workbook xmlns:x="urn:test"><x:sheets><x:sheet/></x:sheets></x:workbook>"#,
+        );
+        assert!(validate_workbook_xml(&utf16_workbook).is_ok());
+
+        let ignored_style_xfs = format!(
+            "<styleSheet><cellStyleXfs>{}</cellStyleXfs><cellXfs><xf/></cellXfs></styleSheet>",
+            "<xf/>".repeat(MAX_STYLE_CELL_XFS + 1)
+        );
+        assert!(validate_styles_xml(ignored_style_xfs.as_bytes()).is_ok());
+        let excessive_cell_xfs = format!(
+            "<styleSheet><cellXfs>{}</cellXfs></styleSheet>",
+            "<xf/>".repeat(MAX_STYLE_CELL_XFS + 1)
+        );
+        assert!(validate_styles_xml(excessive_cell_xfs.as_bytes()).is_err());
+        let excessive_num_fmts = format!(
+            "<styleSheet><numFmts>{}</numFmts></styleSheet>",
+            "<numFmt/>".repeat(MAX_STYLE_NUMFMTS + 1)
+        );
+        assert!(validate_styles_xml(excessive_num_fmts.as_bytes()).is_err());
+
+        let internal_and_comment = br#"<Relationships>
+<!-- TargetMode="External" -->
+<Relationship TargetMode=" Internal " Target="inside.xml"/>
+</Relationships>"#;
+        assert!(validate_relationships_xml(internal_and_comment).is_ok());
+        let external = br#"<r:Relationships xmlns:r="urn:test">
+<r:Relationship r:TargetMode=" External " Target="https://example.invalid"/>
+</r:Relationships>"#;
+        assert!(validate_relationships_xml(external).is_err());
+        let escaped_external = br#"<Relationships>
+<Relationship TargetMode="Ext&#x65;rnal" Target="https://example.invalid"/>
+</Relationships>"#;
+        assert!(validate_relationships_xml(escaped_external).is_err());
+        let similar_but_internal = br#"<Relationships>
+<Relationship TargetMode="ExternalLink" Target="inside.xml"/>
+</Relationships>"#;
+        assert!(validate_relationships_xml(similar_but_internal).is_ok());
+        let utf16_external = utf16le_xml(
+            r#"<?xml version="1.0" encoding="UTF-16"?>
+<Relationships><Relationship TargetMode="External"/></Relationships>"#,
+        );
+        assert!(validate_relationships_xml(&utf16_external).is_err());
+        let utf16be_external = utf16be_xml(
+            r#"<?xml version="1.0" encoding="UTF-16"?>
+<Relationships><Relationship TargetMode="External"/></Relationships>"#,
+        );
+        assert!(validate_relationships_xml(&utf16be_external).is_err());
+
+        let internal_relationships_zip =
+            zip_with_entry("xl/_rels/workbook.xml.rels", internal_and_comment);
+        assert!(validate_ooxml_container(&internal_relationships_zip).is_ok());
+        let oversized_styles = zip_with_entry(
+            "xl/styles.xml",
+            &vec![b'x'; MAX_STYLES_METADATA_BYTES as usize + 1],
+        );
+        assert!(validate_ooxml_container(&oversized_styles).is_err());
+    }
+
+    #[test]
+    fn xlsx_cells_are_streamed_and_bounded_before_dense_range_creation() {
+        let safe_sheet = r#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <dimension ref="A1:XFD1048576"/>
+  <sheetData><row r="5000"><c r="CV5000" t="inlineStr"><is><t>x</t></is></c></row></sheetData>
+</worksheet>"#;
+        let safe_xlsx = xlsx_with_sheet_xml(safe_sheet);
+        assert!(validate_ooxml_container(&safe_xlsx).is_ok());
+        let mut safe_workbook =
+            open_workbook_auto_from_rs(Cursor::new(safe_xlsx)).expect("open safe synthetic XLSX");
+        let safe_names = safe_workbook.sheet_names();
+        let Sheets::Xlsx(safe_reader) = &mut safe_workbook else {
+            panic!("synthetic workbook must be XLSX");
+        };
+        assert!(validate_xlsx_workbook_ranges(safe_reader, &safe_names).is_ok());
+
+        let sparse_sheet = r#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData><row r="1048576"><c r="XFD1048576" t="inlineStr"><is><t>x</t></is></c></row></sheetData>
+</worksheet>"#;
+        let sparse_xlsx = xlsx_with_sheet_xml(sparse_sheet);
+        let mut sparse_workbook = open_workbook_auto_from_rs(Cursor::new(sparse_xlsx))
+            .expect("open sparse synthetic XLSX without materializing its range");
+        let sparse_names = sparse_workbook.sheet_names();
+        let Sheets::Xlsx(sparse_reader) = &mut sparse_workbook else {
+            panic!("synthetic workbook must be XLSX");
+        };
+        assert!(validate_xlsx_workbook_ranges(sparse_reader, &sparse_names).is_err());
+
+        let styled_empty_sheet = r#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData><row r="1048576"><c r="XFD1048576" s="0"/></row></sheetData>
+</worksheet>"#;
+        let styled_empty_xlsx = xlsx_with_sheet_xml(styled_empty_sheet);
+        let mut styled_empty_workbook = open_workbook_auto_from_rs(Cursor::new(styled_empty_xlsx))
+            .expect("open synthetic XLSX containing a styled empty cell");
+        let styled_empty_names = styled_empty_workbook.sheet_names();
+        let Sheets::Xlsx(styled_empty_reader) = &mut styled_empty_workbook else {
+            panic!("synthetic workbook must be XLSX");
+        };
+        assert!(validate_xlsx_workbook_ranges(styled_empty_reader, &styled_empty_names).is_ok());
+    }
+
+    #[test]
+    fn legacy_biff_preflight_bounds_dimensions_cells_formulas_and_merges() {
+        let mut allowed_dimensions = Vec::new();
+        allowed_dimensions.extend_from_slice(&0_u32.to_le_bytes());
+        allowed_dimensions.extend_from_slice(&(MAX_ROWS as u32).to_le_bytes());
+        allowed_dimensions.extend_from_slice(&0_u16.to_le_bytes());
+        allowed_dimensions.extend_from_slice(&(MAX_COLUMNS as u16).to_le_bytes());
+        allowed_dimensions.extend_from_slice(&0_u16.to_le_bytes());
+        let mut allowed_number = vec![0_u8; 14];
+        allowed_number[0..2].copy_from_slice(&((MAX_ROWS - 1) as u16).to_le_bytes());
+        allowed_number[2..4].copy_from_slice(&((MAX_COLUMNS - 1) as u16).to_le_bytes());
+        assert!(
+            validate_biff_workbook_stream(&biff_workbook_with_sheet(&[
+                (0x0200, allowed_dimensions.clone()),
+                (0x0203, allowed_number),
+            ]))
+            .is_ok()
+        );
+
+        let mut oversized_dimensions = allowed_dimensions;
+        oversized_dimensions[4..8].copy_from_slice(&((MAX_ROWS + 1) as u32).to_le_bytes());
+        assert!(
+            validate_biff_workbook_stream(&biff_workbook_with_sheet(&[(
+                0x0200,
+                oversized_dimensions,
+            )]))
+            .is_err()
+        );
+
+        let mut distant_number = vec![0_u8; 14];
+        distant_number[0..2].copy_from_slice(&(MAX_ROWS as u16).to_le_bytes());
+        assert!(
+            validate_biff_workbook_stream(&biff_workbook_with_sheet(&[(0x0203, distant_number,)]))
+                .is_err()
+        );
+
+        let mut distant_formula = vec![0_u8; 20];
+        distant_formula[2..4].copy_from_slice(&(MAX_COLUMNS as u16).to_le_bytes());
+        assert!(
+            validate_biff_workbook_stream(&biff_workbook_with_sheet(&[(0x0006, distant_formula,)]))
+                .is_err()
+        );
+
+        let mut distant_merge = vec![0_u8; 10];
+        distant_merge[0..2].copy_from_slice(&1_u16.to_le_bytes());
+        distant_merge[4..6].copy_from_slice(&(MAX_ROWS as u16).to_le_bytes());
+        assert!(
+            validate_biff_workbook_stream(&biff_workbook_with_sheet(&[(0x00e5, distant_merge,)]))
+                .is_err()
+        );
+
+        let mut inconsistent_mul_rk = vec![0_u8; 12];
+        inconsistent_mul_rk[10..12].copy_from_slice(&1_u16.to_le_bytes());
+        assert!(
+            validate_biff_workbook_stream(&biff_workbook_with_sheet(&[(
+                0x00bd,
+                inconsistent_mul_rk,
+            )]))
+            .is_err()
+        );
+
+        let mut invalid_offset = biff_workbook_with_sheet(&[]);
+        invalid_offset[12..16].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(validate_biff_workbook_stream(&invalid_offset).is_err());
+    }
+
+    #[test]
+    fn legacy_biff_dimensions_model_current_length_and_repeated_reserve_calls() {
+        let max_dimensions = biff_dimensions(MAX_ROWS, MAX_COLUMNS);
+        let number = vec![0_u8; 14];
+
+        assert!(
+            validate_biff_workbook_stream(&biff_workbook_with_sheet(&[
+                (0x0200, max_dimensions.clone()),
+                (0x0200, max_dimensions.clone()),
+            ]))
+            .is_ok()
+        );
+        assert!(
+            validate_biff_workbook_stream(&biff_workbook_with_sheet(&[
+                (0x0203, number.clone()),
+                (0x0200, max_dimensions.clone()),
+            ]))
+            .is_err()
+        );
+        assert!(
+            validate_biff_workbook_stream(&biff_workbook_with_sheet(&[
+                (0x0200, max_dimensions.clone()),
+                (0x0203, number),
+                (0x0200, max_dimensions),
+            ]))
+            .is_err()
+        );
+
+        let zero_dimensions = vec![0_u8; 14];
+        let mut allowed = BiffSheetStats {
+            value_cells: MAX_RANGE_CELLS - 1,
+            ..BiffSheetStats::default()
+        };
+        assert!(validate_biff_dimensions(&zero_dimensions, &mut allowed).is_ok());
+        assert_eq!(allowed.peak_reserved_cells, MAX_RANGE_CELLS);
+        let mut rejected = BiffSheetStats {
+            value_cells: MAX_RANGE_CELLS,
+            ..BiffSheetStats::default()
+        };
+        assert!(validate_biff_dimensions(&zero_dimensions, &mut rejected).is_err());
+    }
+
+    #[test]
+    fn legacy_formula_strings_are_validated_without_double_counting() {
+        let mut string_formula = vec![0_u8; 20];
+        string_formula[12] = 0xff;
+        string_formula[13] = 0xff;
+        let formula_string = vec![1, 0, 0, b'x'];
+        let valid = biff_workbook_with_sheet(&[
+            (0x0006, string_formula.clone()),
+            (0x0207, formula_string.clone()),
+        ]);
+        assert!(validate_biff_workbook_stream(&valid).is_ok());
+        let sheet_offset = usize::try_from(u32::from_le_bytes([
+            valid[12], valid[13], valid[14], valid[15],
+        ]))
+        .expect("synthetic worksheet offset");
+        let stats = validate_biff_sheet(&valid, sheet_offset).expect("validate formula sheet");
+        assert_eq!(stats.raw_cells, 1);
+        assert_eq!(stats.value_cells, 1);
+        assert_eq!(stats.formula_cells, 1);
+
+        let legacy_formula_string = vec![3, 0, b'o', b'l', b'd'];
+        assert!(
+            validate_biff_workbook_stream(&biff_workbook_with_sheet_version(
+                0x0500,
+                &[
+                    (0x0006, string_formula.clone()),
+                    (0x0207, legacy_formula_string),
+                ],
+            ))
+            .is_ok()
+        );
+
+        assert!(
+            validate_biff_workbook_stream(&biff_workbook_with_sheet(&[(
+                0x0207,
+                formula_string.clone(),
+            )]))
+            .is_err()
+        );
+        assert!(
+            validate_biff_workbook_stream(&biff_workbook_with_sheet(&[(
+                0x0006,
+                string_formula.clone(),
+            )]))
+            .is_err()
+        );
+        assert!(
+            validate_biff_workbook_stream(&biff_workbook_with_sheet(&[
+                (0x0006, vec![0_u8; 20]),
+                (0x0207, formula_string.clone()),
+            ]))
+            .is_err()
+        );
+        assert!(
+            validate_biff_workbook_stream(&biff_workbook_with_sheet(&[
+                (0x0006, string_formula),
+                (0x0207, formula_string.clone()),
+                (0x0207, formula_string),
+            ]))
+            .is_err()
+        );
+
+        let mut oversized_label = vec![0_u8; 8];
+        oversized_label[6..8].copy_from_slice(&((MAX_CELL_CHARS + 1) as u16).to_le_bytes());
+        assert!(
+            validate_biff_workbook_stream(&biff_workbook_with_sheet(&[(0x0204, oversized_label,)]))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn legacy_biff_sst_counts_and_stream_size_are_bounded() {
+        let mut valid = Vec::new();
+        valid.extend_from_slice(&1_u32.to_le_bytes());
+        valid.extend_from_slice(&1_u32.to_le_bytes());
+        valid.extend_from_slice(&[0, 0, 0]);
+        assert!(validate_biff_sst(&[], &valid, 0).is_ok());
+
+        let mut oversized_count = Vec::new();
+        oversized_count.extend_from_slice(&((MAX_RANGE_CELLS + 1) as u32).to_le_bytes());
+        oversized_count.extend_from_slice(&((MAX_RANGE_CELLS + 1) as u32).to_le_bytes());
+        assert!(validate_biff_sst(&[], &oversized_count, 0).is_err());
+
+        let mut inconsistent = Vec::new();
+        inconsistent.extend_from_slice(&1_u32.to_le_bytes());
+        inconsistent.extend_from_slice(&1_u32.to_le_bytes());
+        inconsistent.extend_from_slice(&[0, 0]);
+        assert!(validate_biff_sst(&[], &inconsistent, 0).is_err());
+
+        let oversized_stream = vec![0_u8; 8 + MAX_RANGE_CELLS * 3 + 1];
+        assert!(validate_biff_sst(&[], &oversized_stream, 0).is_err());
+    }
+
+    #[test]
+    fn legacy_biff_sst_parses_unicode_rich_extended_and_continued_strings() {
+        let mut variants = Vec::new();
+        variants.extend_from_slice(&4_u32.to_le_bytes());
+        variants.extend_from_slice(&4_u32.to_le_bytes());
+        variants.extend_from_slice(&[3, 0, 0, b'a', b'b', b'c']);
+        variants.extend_from_slice(&[2, 0, 1, b'A', 0, 0xb0, 0x03]);
+        variants.extend_from_slice(&[1, 0, 0x08, 1, 0, b'r', 0, 0, 0, 0]);
+        variants.extend_from_slice(&[1, 0, 0x04, 3, 0, 0, 0, b'e', 1, 2, 3]);
+        assert!(validate_biff_sst(&[], &variants, 0).is_ok());
+
+        let mut header_boundary = Vec::new();
+        header_boundary.extend_from_slice(&1_u32.to_le_bytes());
+        header_boundary.extend_from_slice(&1_u32.to_le_bytes());
+        header_boundary.extend_from_slice(&[4, 0, 0]);
+        let mut header_boundary_continue = Vec::new();
+        push_biff_record(
+            &mut header_boundary_continue,
+            0x003c,
+            &[0, b'a', b'b', b'c', b'd'],
+        );
+        assert!(validate_biff_sst(&header_boundary_continue, &header_boundary, 0).is_ok());
+
+        let mut compressed_to_unicode = Vec::new();
+        compressed_to_unicode.extend_from_slice(&1_u32.to_le_bytes());
+        compressed_to_unicode.extend_from_slice(&1_u32.to_le_bytes());
+        compressed_to_unicode.extend_from_slice(&[3, 0, 0, b'a']);
+        let mut unicode_continue = Vec::new();
+        push_biff_record(&mut unicode_continue, 0x003c, &[1, b'b', 0, b'c', 0]);
+        assert!(validate_biff_sst(&unicode_continue, &compressed_to_unicode, 0).is_ok());
+
+        let mut unicode_to_compressed = Vec::new();
+        unicode_to_compressed.extend_from_slice(&1_u32.to_le_bytes());
+        unicode_to_compressed.extend_from_slice(&1_u32.to_le_bytes());
+        unicode_to_compressed.extend_from_slice(&[3, 0, 1, b'a', 0]);
+        let mut compressed_continue = Vec::new();
+        push_biff_record(&mut compressed_continue, 0x003c, &[0, b'b', b'c']);
+        assert!(validate_biff_sst(&compressed_continue, &unicode_to_compressed, 0).is_ok());
+
+        let mut split_header = Vec::new();
+        split_header.extend_from_slice(&1_u32.to_le_bytes());
+        split_header.extend_from_slice(&1_u32.to_le_bytes());
+        split_header.push(1);
+        let mut split_header_continue = Vec::new();
+        push_biff_record(&mut split_header_continue, 0x003c, &[0, 0, b'x']);
+        assert!(validate_biff_sst(&split_header_continue, &split_header, 0).is_err());
+
+        let mut split_rich_header = Vec::new();
+        split_rich_header.extend_from_slice(&1_u32.to_le_bytes());
+        split_rich_header.extend_from_slice(&1_u32.to_le_bytes());
+        split_rich_header.extend_from_slice(&[1, 0, 0x08, 1]);
+        let mut split_rich_continue = Vec::new();
+        push_biff_record(&mut split_rich_continue, 0x003c, &[0, b'x', 0, 0, 0, 0]);
+        assert!(validate_biff_sst(&split_rich_continue, &split_rich_header, 0).is_err());
+
+        let mut split_extension_header = Vec::new();
+        split_extension_header.extend_from_slice(&1_u32.to_le_bytes());
+        split_extension_header.extend_from_slice(&1_u32.to_le_bytes());
+        split_extension_header.extend_from_slice(&[1, 0, 0x04, 3, 0]);
+        let mut split_extension_continue = Vec::new();
+        push_biff_record(
+            &mut split_extension_continue,
+            0x003c,
+            &[0, 0, b'x', 1, 2, 3],
+        );
+        assert!(validate_biff_sst(&split_extension_continue, &split_extension_header, 0).is_err());
+
+        let mut continued_rich_data = Vec::new();
+        continued_rich_data.extend_from_slice(&1_u32.to_le_bytes());
+        continued_rich_data.extend_from_slice(&1_u32.to_le_bytes());
+        continued_rich_data.extend_from_slice(&[1, 0, 0x08, 1, 0, b'r', 1, 2]);
+        let mut continued_rich_tail = Vec::new();
+        push_biff_record(&mut continued_rich_tail, 0x003c, &[3, 4]);
+        assert!(validate_biff_sst(&continued_rich_tail, &continued_rich_data, 0).is_ok());
+
+        let mut continued_extension_data = Vec::new();
+        continued_extension_data.extend_from_slice(&1_u32.to_le_bytes());
+        continued_extension_data.extend_from_slice(&1_u32.to_le_bytes());
+        continued_extension_data.extend_from_slice(&[1, 0, 0x04, 3, 0, 0, 0, b'e', 1]);
+        let mut continued_extension_tail = Vec::new();
+        push_biff_record(&mut continued_extension_tail, 0x003c, &[2, 3]);
+        assert!(
+            validate_biff_sst(&continued_extension_tail, &continued_extension_data, 0,).is_ok()
+        );
+
+        let mut missing_continuation = Vec::new();
+        missing_continuation.extend_from_slice(&1_u32.to_le_bytes());
+        missing_continuation.extend_from_slice(&1_u32.to_le_bytes());
+        missing_continuation.extend_from_slice(&[1, 0, 0]);
+        assert!(validate_biff_sst(&[], &missing_continuation, 0).is_err());
+
+        let mut lying_declaration = Vec::new();
+        lying_declaration.extend_from_slice(&1_u32.to_le_bytes());
+        lying_declaration.extend_from_slice(&1_u32.to_le_bytes());
+        lying_declaration.extend_from_slice(&[1, 0, 0, b'a', 1, 0, 0, b'b']);
+        assert!(validate_biff_sst(&[], &lying_declaration, 0).is_err());
+    }
+
+    #[test]
+    fn legacy_biff_sst_allows_large_normal_data_but_bounds_continuation_chains() {
+        const STRING_COUNT: usize = 100;
+        const BIFF8_RECORD_PAYLOAD_LIMIT: usize = 8_224;
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&(STRING_COUNT as u32).to_le_bytes());
+        payload.extend_from_slice(&(STRING_COUNT as u32).to_le_bytes());
+        payload.extend_from_slice(&(MAX_CELL_CHARS as u16).to_le_bytes());
+        payload.push(0);
+        let first_fragment = BIFF8_RECORD_PAYLOAD_LIMIT - payload.len();
+        payload.extend(std::iter::repeat_n(b'a', first_fragment));
+        let mut continuations = Vec::new();
+        let mut first_tail = Vec::with_capacity(MAX_CELL_CHARS - first_fragment + 1);
+        first_tail.push(0);
+        first_tail.extend(std::iter::repeat_n(b'a', MAX_CELL_CHARS - first_fragment));
+        push_biff_record(&mut continuations, 0x003c, &first_tail);
+        for _ in 1..STRING_COUNT {
+            let mut string = Vec::with_capacity(BIFF8_RECORD_PAYLOAD_LIMIT);
+            string.extend_from_slice(&(MAX_CELL_CHARS as u16).to_le_bytes());
+            string.push(0);
+            let fragment = BIFF8_RECORD_PAYLOAD_LIMIT - string.len();
+            string.extend(std::iter::repeat_n(b'a', fragment));
+            push_biff_record(&mut continuations, 0x003c, &string);
+            let mut tail = Vec::with_capacity(MAX_CELL_CHARS - fragment + 1);
+            tail.push(0);
+            tail.extend(std::iter::repeat_n(b'a', MAX_CELL_CHARS - fragment));
+            push_biff_record(&mut continuations, 0x003c, &tail);
+        }
+        assert!(continuations.len() + payload.len() > 1_572_864);
+        assert!(validate_biff_sst(&continuations, &payload, 0).is_ok());
+
+        let mut allowed_chain = Vec::new();
+        push_biff_record(&mut allowed_chain, 0x0809, &[0x00, 0x06, 0x05, 0x00]);
+        for _ in 0..MAX_BIFF_SST_CONTINUE_RECORDS {
+            push_biff_record(&mut allowed_chain, 0x003c, &[1]);
+        }
+        push_biff_record(&mut allowed_chain, 0x000a, &[]);
+        assert!(validate_biff_workbook_stream(&allowed_chain).is_ok());
+
+        let mut rejected_chain = allowed_chain;
+        let eof = rejected_chain.split_off(rejected_chain.len() - 4);
+        push_biff_record(&mut rejected_chain, 0x003c, &[1]);
+        rejected_chain.extend_from_slice(&eof);
+        assert!(validate_biff_workbook_stream(&rejected_chain).is_err());
+
+        let mut empty_continue = Vec::new();
+        push_biff_record(&mut empty_continue, 0x0809, &[0x00, 0x06, 0x05, 0x00]);
+        push_biff_record(&mut empty_continue, 0x003c, &[]);
+        push_biff_record(&mut empty_continue, 0x000a, &[]);
+        assert!(validate_biff_workbook_stream(&empty_continue).is_err());
+    }
+
+    #[test]
     fn unsafe_ooxml_parts_and_external_relationships_are_rejected() {
         let macro_book = zip_with_entry("xl/vbaProject.bin", b"synthetic macro marker");
         assert!(validate_ooxml_container(&macro_book).is_err());
 
         let external = zip_with_entry(
             "xl/_rels/workbook.xml.rels",
-            br#"<Relationship TargetMode="External" Target="https://example.invalid"/>"#,
+            br#"<Relationships><Relationship TargetMode="External" Target="https://example.invalid"/></Relationships>"#,
         );
         assert!(validate_ooxml_container(&external).is_err());
 
         let spaced_external = zip_with_entry(
             "xl/_rels/workbook.xml.rels",
-            br#"<Relationship TARGETMODE = ' External ' Target="https://example.invalid"/>"#,
+            br#"<Relationships><Relationship TargetMode = ' eXtErNaL ' Target="https://example.invalid"/></Relationships>"#,
         );
         assert!(validate_ooxml_container(&spaced_external).is_err());
 
@@ -1839,6 +3580,73 @@ mod tests {
             0x0a, 0x00, 0x00, 0x00, // EOF
         ];
         assert!(validate_xls_container(&cfb_with_workbook(&external_supbook, None)).is_err());
+
+        let internal_supbook_and_sheet = [
+            0x09, 0x08, 0x04, 0x00, 0x00, 0x06, 0x05, 0x00, // BIFF8 workbook BOF
+            0xae, 0x01, 0x04, 0x00, 0x01, 0x00, 0x01, 0x04, // self SupBook
+            0x17, 0x00, 0x08, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, // internal XTI
+            0x0a, 0x00, 0x00, 0x00, // EOF
+        ];
+        assert!(
+            validate_xls_container(&cfb_with_workbook(&internal_supbook_and_sheet, None)).is_ok()
+        );
+
+        let addin_supbook_and_sheet = [
+            0x09, 0x08, 0x04, 0x00, 0x00, 0x06, 0x05, 0x00, // BIFF8 workbook BOF
+            0xae, 0x01, 0x04, 0x00, 0x01, 0x00, 0x01, 0x3a, // add-in SupBook
+            0x17, 0x00, 0x08, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, // add-in XTI
+            0x0a, 0x00, 0x00, 0x00, // EOF
+        ];
+        assert!(
+            validate_xls_container(&cfb_with_workbook(&addin_supbook_and_sheet, None)).is_err()
+        );
+
+        let missing_supbook_reference = [
+            0x09, 0x08, 0x04, 0x00, 0x00, 0x06, 0x05, 0x00, // BIFF8 workbook BOF
+            0xae, 0x01, 0x04, 0x00, 0x01, 0x00, 0x01, 0x04, // self SupBook
+            0x17, 0x00, 0x08, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+            0x00, // invalid XTI index
+            0x0a, 0x00, 0x00, 0x00, // EOF
+        ];
+        assert!(
+            validate_xls_container(&cfb_with_workbook(&missing_supbook_reference, None)).is_err()
+        );
+
+        let inconsistent_xti_count = [
+            0x09, 0x08, 0x04, 0x00, 0x00, 0x06, 0x05, 0x00, // BIFF8 workbook BOF
+            0xae, 0x01, 0x04, 0x00, 0x01, 0x00, 0x01, 0x04, // self SupBook
+            0x17, 0x00, 0x08, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, // only one XTI
+            0x0a, 0x00, 0x00, 0x00, // EOF
+        ];
+        assert!(validate_xls_container(&cfb_with_workbook(&inconsistent_xti_count, None)).is_err());
+
+        let legacy_internal_sheet = [
+            0x09, 0x08, 0x04, 0x00, 0x00, 0x05, 0x05, 0x00, // BIFF5 workbook BOF
+            0x17, 0x00, 0x08, 0x00, 0x06, 0x03, b'S', b'h', b'e', b'e', b't', b'2', 0x0a, 0x00,
+            0x00, 0x00, // EOF
+        ];
+        assert!(validate_xls_container(&cfb_with_workbook(&legacy_internal_sheet, None)).is_ok());
+        let legacy_external_sheet = [
+            0x09, 0x08, 0x04, 0x00, 0x00, 0x05, 0x05, 0x00, // BIFF5 workbook BOF
+            0x17, 0x00, 0x08, 0x00, 0x06, 0x01, b'B', b'o', b'o', b'k', b'.', b'x', 0x0a, 0x00,
+            0x00, 0x00, // EOF
+        ];
+        assert!(validate_xls_container(&cfb_with_workbook(&legacy_external_sheet, None)).is_err());
+
+        let unknown_version_internal_sheet = [
+            0x09, 0x08, 0x04, 0x00, 0x00, 0x07, 0x05, 0x00, // unknown version -> BIFF8
+            0xae, 0x01, 0x04, 0x00, 0x01, 0x00, 0x01, 0x04, // self SupBook
+            0x17, 0x00, 0x08, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, // internal XTI
+            0x0a, 0x00, 0x00, 0x00, // EOF
+        ];
+        assert!(
+            validate_xls_container(&cfb_with_workbook(&unknown_version_internal_sheet, None))
+                .is_ok()
+        );
 
         let embedded_object = [
             0x09, 0x08, 0x04, 0x00, 0x00, 0x06, 0x05, 0x00, // BOF

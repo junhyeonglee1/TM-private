@@ -17,12 +17,15 @@ use zeroize::{Zeroize, Zeroizing};
 
 #[cfg(not(test))]
 pub(super) const EXPENSE_DATA_KEY_ENV: &str = "TM_EXPENSE_DATA_KEY_V1";
+pub(super) const EXPENSE_EXPECTED_KEY_FINGERPRINT_ENV: &str = "TM_EXPENSE_EXPECTED_KEY_FINGERPRINT";
 pub(super) const EXPENSE_DATA_KEY_VERSION: u32 = 1;
 
 const KEY_BYTES: usize = 32;
 const NONCE_BYTES: usize = 24;
 const MAX_PLAINTEXT_BYTES: usize = 4 * 1024;
 const KEY_PREFIX: &str = "tm_exp_v1_";
+const KEY_FINGERPRINT_PREFIX: &str = "tm_exp_kfp_v1_";
+const KEY_FINGERPRINT_DOMAIN: &[u8] = b"tm-expense:key-fingerprint:v1\0";
 const BLIND_INDEX_DOMAIN: &[u8] = b"tm-expense:blind-index:v1\0";
 const IDEMPOTENT_NONCE_DOMAIN: &[u8] = b"tm-expense-idempotent-nonce-v1\0";
 type HmacSha256 = Hmac<Sha256>;
@@ -60,6 +63,7 @@ pub(super) enum ExpenseCryptoError {
     DecryptionFailed,
     InvalidUtf8,
     KeyVerificationFailed,
+    RolloutLocked,
 }
 
 impl fmt::Display for ExpenseCryptoError {
@@ -74,6 +78,7 @@ impl fmt::Display for ExpenseCryptoError {
             Self::DecryptionFailed => "expense encrypted value could not be authenticated",
             Self::InvalidUtf8 => "expense decrypted value is not UTF-8",
             Self::KeyVerificationFailed => "expense encryption key verification failed",
+            Self::RolloutLocked => "expense rollout is locked pending key verification",
         })
     }
 }
@@ -231,6 +236,11 @@ impl ExpenseCrypto {
         let digest = hmac_sha256(&**self.key, &message);
         encode_hex(&digest[..])
     }
+
+    pub(super) fn key_fingerprint(&self) -> String {
+        let digest = hmac_sha256(&**self.key, KEY_FINGERPRINT_DOMAIN);
+        format!("{KEY_FINGERPRINT_PREFIX}{}", encode_hex(&digest[..]))
+    }
 }
 
 fn normalize_blind_value(value: &str) -> String {
@@ -307,7 +317,7 @@ fn encode_hex(value: &[u8]) -> String {
 mod tests {
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
-    use super::{ExpenseCrypto, ExpenseCryptoError, KEY_PREFIX};
+    use super::{ExpenseCrypto, ExpenseCryptoError, KEY_FINGERPRINT_PREFIX, KEY_PREFIX};
 
     fn crypto() -> ExpenseCrypto {
         ExpenseCrypto::from_encoded_key(
@@ -421,6 +431,19 @@ mod tests {
             ))
             .is_ok()
         );
+    }
+
+    #[test]
+    fn key_fingerprint_is_domain_separated_and_deterministic() {
+        let first = ExpenseCrypto::from_encoded_key(&"11".repeat(32)).expect("first key");
+        let second = ExpenseCrypto::from_encoded_key(&"22".repeat(32)).expect("second key");
+        assert_eq!(
+            first.key_fingerprint(),
+            "tm_exp_kfp_v1_acde74882428fa9681f2c3dae8bd3d59b729a84b8e79f6911af04117ab2644dd"
+        );
+        assert!(first.key_fingerprint().starts_with(KEY_FINGERPRINT_PREFIX));
+        assert_ne!(first.key_fingerprint(), second.key_fingerprint());
+        assert!(!format!("{first:?}").contains(&"11".repeat(32)));
     }
 
     #[test]

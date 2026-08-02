@@ -55,7 +55,9 @@ use crate::auth::{
     AuthDecision, FAILED_ATTEMPT_LIMIT, TokenAuthenticator, sha256_hex, valid_device_token,
 };
 use crate::costs::{CloudCostMeter, RailwayUsageClient, RailwayUsageConfig};
-use crate::expense_crypto::{ExpenseCrypto, ExpenseCryptoError};
+use crate::expense_crypto::{
+    EXPENSE_EXPECTED_KEY_FINGERPRINT_ENV, ExpenseCrypto, ExpenseCryptoError,
+};
 use crate::openai::{
     OpenAiClient, OpenAiConfig, OpenAiError, OpenAiProbeResult, PROBE_MAXIMUM_COST_MICROUSD,
 };
@@ -81,6 +83,8 @@ pub const IMPORT_MAINTENANCE_MODE: &str = "import";
 pub const INCIDENT_MODE_ENV: &str = "TM_INCIDENT_MODE";
 pub const AI_ENABLED_ENV: &str = "TM_AI_ENABLED";
 pub const EXPENSE_AI_ENABLED_ENV: &str = "TM_EXPENSE_AI_ENABLED";
+pub const EXPENSE_ROLLOUT_MODE_ENV: &str = "TM_EXPENSE_ROLLOUT_MODE";
+pub const EXPENSE_ACTIVATION_FINGERPRINT_ENV: &str = "TM_EXPENSE_ACTIVATION_FINGERPRINT";
 pub const TASK_REPORT_ENABLED_ENV: &str = "TM_TASK_REPORT_ENABLED";
 const REQUEST_ID_HEADER: HeaderName = HeaderName::from_static("x-request-id");
 const AI_CONFIRM_HEADER: HeaderName = HeaderName::from_static("x-tm-confirm-ai-call");
@@ -150,6 +154,77 @@ impl IncidentMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExpenseRolloutMode {
+    Locked,
+    Enabled,
+}
+
+impl ExpenseRolloutMode {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Locked => "locked",
+            Self::Enabled => "enabled",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpenseRolloutConfig {
+    mode: ExpenseRolloutMode,
+    expected_key_fingerprint: Option<String>,
+    activation_fingerprint: Option<String>,
+}
+
+impl ExpenseRolloutConfig {
+    fn local_enabled() -> Self {
+        Self {
+            mode: ExpenseRolloutMode::Enabled,
+            expected_key_fingerprint: None,
+            activation_fingerprint: None,
+        }
+    }
+
+    fn cloud_from_env(maintenance_mode: MaintenanceMode) -> Result<Self, String> {
+        if maintenance_mode == MaintenanceMode::Import {
+            return Ok(Self {
+                mode: ExpenseRolloutMode::Locked,
+                expected_key_fingerprint: optional_env(EXPENSE_EXPECTED_KEY_FINGERPRINT_ENV)?,
+                activation_fingerprint: optional_env(EXPENSE_ACTIVATION_FINGERPRINT_ENV)?,
+            });
+        }
+        let mode = match required_env(EXPENSE_ROLLOUT_MODE_ENV)?.as_str() {
+            "locked" => ExpenseRolloutMode::Locked,
+            "enabled" => ExpenseRolloutMode::Enabled,
+            _ => {
+                return Err(format!(
+                    "{EXPENSE_ROLLOUT_MODE_ENV} must be locked or enabled"
+                ));
+            }
+        };
+        let expected_key_fingerprint =
+            required_expense_key_fingerprint(EXPENSE_EXPECTED_KEY_FINGERPRINT_ENV)?;
+        let activation_fingerprint = optional_env(EXPENSE_ACTIVATION_FINGERPRINT_ENV)?;
+        if let Some(value) = activation_fingerprint.as_deref()
+            && !valid_expense_key_fingerprint(value)
+        {
+            return Err(format!(
+                "{EXPENSE_ACTIVATION_FINGERPRINT_ENV} has an invalid format"
+            ));
+        }
+        if mode == ExpenseRolloutMode::Enabled && activation_fingerprint.is_none() {
+            return Err(format!(
+                "{EXPENSE_ACTIVATION_FINGERPRINT_ENV} must be set when {EXPENSE_ROLLOUT_MODE_ENV}=enabled"
+            ));
+        }
+        Ok(Self {
+            mode,
+            expected_key_fingerprint: Some(expected_key_fingerprint),
+            activation_fingerprint,
+        })
+    }
+}
+
 impl ServerProfile {
     fn parse(value: &str) -> Result<Self, String> {
         match value {
@@ -184,6 +259,7 @@ pub struct ServerConfig {
     pub incident_mode: IncidentMode,
     pub ai_enabled: bool,
     pub expense_ai_enabled: bool,
+    pub expense_rollout: ExpenseRolloutConfig,
     pub task_report_enabled: bool,
     pub stock: StockConfig,
     pub railway_usage: RailwayUsageConfig,
@@ -257,6 +333,11 @@ impl ServerConfig {
                     "{EXPENSE_AI_ENABLED_ENV} is only allowed in cloud-authenticated"
                 ));
             }
+        };
+        let expense_rollout = if profile == ServerProfile::CloudAuthenticated {
+            ExpenseRolloutConfig::cloud_from_env(maintenance_mode)?
+        } else {
+            ExpenseRolloutConfig::local_enabled()
         };
         if expense_ai_enabled && !ai_enabled {
             return Err(format!(
@@ -350,6 +431,7 @@ impl ServerConfig {
             incident_mode,
             ai_enabled,
             expense_ai_enabled,
+            expense_rollout,
             task_report_enabled,
             stock,
             railway_usage,
@@ -375,6 +457,10 @@ struct AppState {
     core: TmCore,
     openai: OpenAiClient,
     expense_crypto: Result<ExpenseCrypto, ExpenseCryptoError>,
+    expense_key_fingerprint: Option<String>,
+    expense_expected_key_fingerprint_match: bool,
+    expense_activation_fingerprint_match: Option<bool>,
+    expense_rollout_mode: ExpenseRolloutMode,
     expense_crypto_required: bool,
     incident_mode: IncidentMode,
     ai_enabled: bool,
@@ -426,6 +512,10 @@ impl AppState {
             core,
             openai: OpenAiClient::disabled(),
             expense_crypto: Err(ExpenseCryptoError::MissingKey),
+            expense_key_fingerprint: None,
+            expense_expected_key_fingerprint_match: false,
+            expense_activation_fingerprint_match: None,
+            expense_rollout_mode: ExpenseRolloutMode::Locked,
             expense_crypto_required: false,
             incident_mode: IncidentMode::Normal,
             ai_enabled: false,
@@ -448,11 +538,42 @@ impl AppState {
         railway_usage: RailwayUsageClient,
         stock: StockConfig,
     ) -> Self {
-        let expense_crypto = load_expense_crypto(&core);
+        Self::with_controls_costs_stock_and_expense_rollout(
+            core,
+            openai,
+            incident_mode,
+            ai_enabled,
+            task_report_enabled,
+            security,
+            railway_usage,
+            stock,
+            ExpenseRolloutConfig::local_enabled(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn with_controls_costs_stock_and_expense_rollout(
+        core: TmCore,
+        openai: OpenAiClient,
+        incident_mode: IncidentMode,
+        ai_enabled: bool,
+        task_report_enabled: bool,
+        security: SecurityMonitor,
+        railway_usage: RailwayUsageClient,
+        stock: StockConfig,
+        expense_rollout: ExpenseRolloutConfig,
+    ) -> Self {
+        let loaded_expense_crypto = load_expense_crypto_with_rollout(&core, &expense_rollout);
         Self {
             core,
             openai,
-            expense_crypto,
+            expense_crypto: loaded_expense_crypto.crypto,
+            expense_key_fingerprint: loaded_expense_crypto.key_fingerprint,
+            expense_expected_key_fingerprint_match: loaded_expense_crypto
+                .expected_key_fingerprint_match,
+            expense_activation_fingerprint_match: loaded_expense_crypto
+                .activation_fingerprint_match,
+            expense_rollout_mode: expense_rollout.mode,
             expense_crypto_required: false,
             incident_mode,
             ai_enabled,
@@ -467,6 +588,13 @@ impl AppState {
 
 const EXPENSE_CRYPTO_PROBE_PLAINTEXT: &str = "tm-expense-key-probe-v1";
 
+struct LoadedExpenseCrypto {
+    crypto: Result<ExpenseCrypto, ExpenseCryptoError>,
+    key_fingerprint: Option<String>,
+    expected_key_fingerprint_match: bool,
+    activation_fingerprint_match: Option<bool>,
+}
+
 #[cfg(not(test))]
 fn configured_expense_crypto() -> Result<ExpenseCrypto, ExpenseCryptoError> {
     ExpenseCrypto::from_env()
@@ -478,7 +606,64 @@ fn configured_expense_crypto() -> Result<ExpenseCrypto, ExpenseCryptoError> {
 }
 
 fn load_expense_crypto(core: &TmCore) -> Result<ExpenseCrypto, ExpenseCryptoError> {
-    let crypto = configured_expense_crypto()?;
+    load_expense_crypto_with_rollout(core, &ExpenseRolloutConfig::local_enabled()).crypto
+}
+
+fn load_expense_crypto_with_rollout(
+    core: &TmCore,
+    rollout: &ExpenseRolloutConfig,
+) -> LoadedExpenseCrypto {
+    let crypto = match configured_expense_crypto() {
+        Ok(crypto) => crypto,
+        Err(error) => {
+            return LoadedExpenseCrypto {
+                crypto: Err(error),
+                key_fingerprint: None,
+                expected_key_fingerprint_match: false,
+                activation_fingerprint_match: None,
+            };
+        }
+    };
+    let key_fingerprint = crypto.key_fingerprint();
+    let expected_key_fingerprint_match = rollout
+        .expected_key_fingerprint
+        .as_deref()
+        .is_none_or(|expected| expected == key_fingerprint);
+    let activation_fingerprint_match = rollout
+        .activation_fingerprint
+        .as_deref()
+        .map(|activation| activation == key_fingerprint);
+    let failure = if !expected_key_fingerprint_match {
+        Some(ExpenseCryptoError::KeyVerificationFailed)
+    } else if rollout.mode == ExpenseRolloutMode::Locked {
+        Some(ExpenseCryptoError::RolloutLocked)
+    } else if rollout.activation_fingerprint.is_some() && activation_fingerprint_match != Some(true)
+    {
+        Some(ExpenseCryptoError::KeyVerificationFailed)
+    } else {
+        None
+    };
+    if let Some(error) = failure {
+        return LoadedExpenseCrypto {
+            crypto: Err(error),
+            key_fingerprint: Some(key_fingerprint),
+            expected_key_fingerprint_match,
+            activation_fingerprint_match,
+        };
+    }
+    let crypto = initialize_or_verify_expense_crypto(core, crypto);
+    LoadedExpenseCrypto {
+        crypto,
+        key_fingerprint: Some(key_fingerprint),
+        expected_key_fingerprint_match,
+        activation_fingerprint_match,
+    }
+}
+
+fn initialize_or_verify_expense_crypto(
+    core: &TmCore,
+    crypto: ExpenseCrypto,
+) -> Result<ExpenseCrypto, ExpenseCryptoError> {
     let expected_aad = expense_text_aad("crypto-probe", "value");
     let probe = core
         .expense_crypto_probe()
@@ -534,6 +719,13 @@ fn verify_expense_crypto_probe(
         return Err(ExpenseCryptoError::KeyVerificationFailed);
     }
     Ok(())
+}
+
+fn expense_crypto_probe_sha256(probe: &ExpenseCryptoProbe) -> String {
+    sha256_hex(&format!(
+        "expense-data-key-probe|{}|{}|{}|{}",
+        probe.key_version, probe.nonce, probe.ciphertext, probe.aad
+    ))
 }
 
 #[derive(Clone)]
@@ -608,6 +800,7 @@ struct RuntimeControlState {
     incident_mode: IncidentMode,
     ai_enabled: bool,
     expense_ai_enabled: bool,
+    expense_rollout_mode: ExpenseRolloutMode,
     task_report_enabled: bool,
     security: SecurityMonitor,
 }
@@ -834,7 +1027,12 @@ struct OperationsControls {
     incident_mode: &'static str,
     ai_enabled: bool,
     expense_ai_enabled: bool,
+    expense_rollout_mode: &'static str,
     expense_crypto_ready: bool,
+    expense_key_fingerprint: Option<String>,
+    expense_expected_key_fingerprint_match: bool,
+    expense_activation_fingerprint_match: Option<bool>,
+    expense_crypto_probe_sha256: Option<String>,
     expense_ledger_empty: bool,
     expense_key_initialized: bool,
     expense_key_initialization_allowed: bool,
@@ -879,6 +1077,10 @@ struct LocalBackupStatus {
     pre_migration_count: usize,
     latest_pre_migration_created_at: Option<String>,
     latest_pre_migration_byte_size: Option<u64>,
+    latest_pre_migration_sha256: Option<String>,
+    latest_pre_migration_schema_version: Option<i64>,
+    latest_pre_migration_integrity_check: Option<String>,
+    latest_pre_migration_schema_semantics_validated: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -886,6 +1088,7 @@ struct LocalBackupStatus {
 struct RemoteBackupStatus {
     status: String,
     checked_at: Option<String>,
+    snapshot_started_at: Option<String>,
     snapshot_id: Option<String>,
     database_sha256: Option<String>,
     database_byte_size: Option<u64>,
@@ -895,6 +1098,8 @@ struct RemoteBackupStatus {
     migration_ledger_complete: Option<bool>,
     required_tables_complete: Option<bool>,
     schema_semantics_validated: Option<bool>,
+    expense_crypto_probe_present: Option<bool>,
+    expense_crypto_probe_sha256: Option<String>,
     reason: Option<String>,
     retry_after_seconds: Option<u64>,
 }
@@ -950,15 +1155,9 @@ pub fn build_cloud_bootstrap_router(core: TmCore) -> Router {
     Router::new()
         .route("/healthz", get(cloud_healthz))
         .route("/readyz", get(cloud_readyz))
+        .route("/deployment-readyz", get(deployment_readyz))
         .fallback(not_found)
-        .with_state(AppState::with_controls(
-            core,
-            OpenAiClient::disabled(),
-            IncidentMode::Normal,
-            false,
-            false,
-            SecurityMonitor::new(),
-        ))
+        .with_state(AppState::for_database_import(core, SecurityMonitor::new()))
         .layer(middleware::from_fn(request_shape_guard))
         .layer(middleware::from_fn(security_headers))
         .layer(middleware::from_fn(request_telemetry))
@@ -1055,6 +1254,7 @@ pub fn build_cloud_authenticated_router_with_feature_controls_costs_and_stock(
         railway_usage,
         stock,
         ai_enabled,
+        ExpenseRolloutConfig::local_enabled(),
     )
 }
 
@@ -1069,6 +1269,7 @@ pub fn build_cloud_authenticated_router_with_feature_controls_costs_stock_and_ex
     railway_usage: RailwayUsageClient,
     stock: StockConfig,
     expense_ai_enabled: bool,
+    expense_rollout: ExpenseRolloutConfig,
 ) -> Router {
     let security = SecurityMonitor::new();
     let authenticator = TokenAuthenticator::new(auth);
@@ -1082,12 +1283,14 @@ pub fn build_cloud_authenticated_router_with_feature_controls_costs_stock_and_ex
         incident_mode,
         ai_enabled,
         expense_ai_enabled,
+        expense_rollout_mode: expense_rollout.mode,
         task_report_enabled,
         security: security.clone(),
     };
     Router::new()
         .route("/healthz", get(cloud_healthz))
         .route("/readyz", get(cloud_readyz))
+        .route("/deployment-readyz", get(deployment_readyz))
         .merge(device_api::routes())
         .merge(expense_api::routes())
         .merge(pwa::routes())
@@ -1168,7 +1371,7 @@ pub fn build_cloud_authenticated_router_with_feature_controls_costs_stock_and_ex
         .fallback(not_found)
         .method_not_allowed_fallback(method_not_allowed)
         .with_state({
-            let mut state = AppState::with_controls_and_costs(
+            let mut state = AppState::with_controls_costs_stock_and_expense_rollout(
                 core,
                 openai,
                 incident_mode,
@@ -1177,6 +1380,7 @@ pub fn build_cloud_authenticated_router_with_feature_controls_costs_stock_and_ex
                 security,
                 railway_usage,
                 stock,
+                expense_rollout,
             );
             state.expense_crypto_required = true;
             state.expense_ai_enabled = expense_ai_enabled;
@@ -1209,6 +1413,7 @@ pub fn build_cloud_import_router(core: TmCore, auth: AuthConfig) -> Router {
     Router::new()
         .route("/healthz", get(cloud_healthz))
         .route("/readyz", get(cloud_readyz))
+        .route("/deployment-readyz", get(deployment_readyz))
         .route("/api/v1/auth/status", get(auth_status))
         .route("/api/v1/ops/status", get(operations_status))
         .route("/api/v1/ops/import", post(import_api::import_database))
@@ -1332,12 +1537,95 @@ async fn cloud_readyz(
     }))
 }
 
-fn ensure_expense_crypto_ready(state: &AppState, request_id: &RequestId) -> Result<(), ApiError> {
-    if state.expense_crypto_required && state.expense_crypto.is_err() {
+async fn deployment_readyz(
+    State(state): State<AppState>,
+    Extension(request_id): Extension<RequestId>,
+) -> Result<Json<ApiEnvelope<CloudReadiness>>, ApiError> {
+    let expense_crypto_required = state.expense_crypto_required;
+    let expense_rollout_mode = state.expense_rollout_mode;
+    let key_binding_ready = !expense_crypto_required
+        || (state.expense_key_fingerprint.is_some()
+            && state.expense_expected_key_fingerprint_match
+            && match state.expense_rollout_mode {
+                ExpenseRolloutMode::Locked => matches!(
+                    &state.expense_crypto,
+                    Err(ExpenseCryptoError::RolloutLocked)
+                ),
+                ExpenseRolloutMode::Enabled => {
+                    state.expense_crypto.is_ok()
+                        && state.expense_activation_fingerprint_match == Some(true)
+                }
+            });
+    let error_request_id = request_id.0.clone();
+    let health_and_key_status = tokio::task::spawn_blocking(move || {
+        let health = state.core.health()?;
+        let key_status = state.core.expense_key_initialization_status()?;
+        Ok::<_, CoreError>((health, key_status))
+    })
+    .await
+    .map_err(|_| ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: "DEPLOYMENT_READINESS_WORKER_FAILED",
+        message: "deployment readiness worker failed".to_owned(),
+        request_id: error_request_id.clone(),
+    })?
+    .map_err(|_| ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: "DEPLOYMENT_NOT_READY",
+        message: "deployment is not ready".to_owned(),
+        request_id: error_request_id.clone(),
+    })?;
+    let (health, key_status) = health_and_key_status;
+    let key_state_ready = !expense_crypto_required
+        || match expense_rollout_mode {
+            ExpenseRolloutMode::Locked => {
+                (key_status.ledger_empty
+                    && !key_status.key_initialized
+                    && key_status.key_initialization_allowed)
+                    || (key_status.key_initialized && !key_status.key_initialization_allowed)
+            }
+            ExpenseRolloutMode::Enabled => {
+                key_status.key_initialized && !key_status.key_initialization_allowed
+            }
+        };
+    if !health.ok
+        || (expense_crypto_required && health.schema_version != 15)
+        || !key_binding_ready
+        || !key_state_ready
+    {
         return Err(ApiError {
             status: StatusCode::SERVICE_UNAVAILABLE,
-            code: "EXPENSE_CRYPTO_NOT_READY",
-            message: "expense data protection is not ready".to_owned(),
+            code: "DEPLOYMENT_NOT_READY",
+            message: "deployment is not ready".to_owned(),
+            request_id: error_request_id,
+        });
+    }
+    Ok(Json(ApiEnvelope {
+        request_id: request_id.0,
+        data: CloudReadiness {
+            status: "deployment-ready",
+            checked_at: health.checked_at,
+        },
+    }))
+}
+
+fn ensure_expense_crypto_ready(state: &AppState, request_id: &RequestId) -> Result<(), ApiError> {
+    if state.expense_crypto_required && state.expense_crypto.is_err() {
+        let (code, message) = if state.expense_rollout_mode == ExpenseRolloutMode::Locked {
+            (
+                "EXPENSE_ROLLOUT_LOCKED",
+                "expense access is locked pending production key verification",
+            )
+        } else {
+            (
+                "EXPENSE_CRYPTO_NOT_READY",
+                "expense data protection is not ready",
+            )
+        };
+        return Err(ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code,
+            message: message.to_owned(),
             request_id: request_id.0.clone(),
         });
     }
@@ -2159,6 +2447,11 @@ async fn operations_status(
             .as_ref()
             .and_then(|attempt| attempt.failure_code.clone());
         let expense_key_status = state.core.expense_key_initialization_status()?;
+        let expense_crypto_probe_sha256 = state
+            .core
+            .expense_crypto_probe()?
+            .as_ref()
+            .map(expense_crypto_probe_sha256);
         let security = state.security.snapshot();
         let backups = state.core.list_backups()?;
         let latest = backups.first();
@@ -2169,6 +2462,8 @@ async fn operations_status(
             .iter()
             .filter(|backup| backup.trigger == "pre_migration")
             .count();
+        let latest_pre_migration_verification = latest_pre_migration
+            .and_then(|backup| state.core.verify_database_backup(&backup.path).ok());
         let current_schema_applied_at = state.core.migration_applied_at(health.schema_version)?;
         let remote_status_path = state
             .core
@@ -2188,6 +2483,7 @@ async fn operations_status(
             RemoteBackupStatus {
                 status: "pending".to_owned(),
                 checked_at: None,
+                snapshot_started_at: None,
                 snapshot_id: None,
                 database_sha256: None,
                 database_byte_size: None,
@@ -2197,6 +2493,8 @@ async fn operations_status(
                 migration_ledger_complete: None,
                 required_tables_complete: None,
                 schema_semantics_validated: None,
+                expense_crypto_probe_present: None,
+                expense_crypto_probe_sha256: None,
                 reason: None,
                 retry_after_seconds: None,
             }
@@ -2210,6 +2508,7 @@ async fn operations_status(
             state.incident_mode,
             state.ai_enabled,
             !state.expense_crypto_required || state.expense_crypto.is_ok(),
+            state.expense_rollout_mode,
             checked_at,
         );
         Ok::<_, CoreError>(OperationsStatus {
@@ -2227,7 +2526,13 @@ async fn operations_status(
                 incident_mode: state.incident_mode.as_str(),
                 ai_enabled: state.ai_enabled,
                 expense_ai_enabled: state.expense_ai_enabled,
+                expense_rollout_mode: state.expense_rollout_mode.as_str(),
                 expense_crypto_ready: state.expense_crypto.is_ok(),
+                expense_key_fingerprint: state.expense_key_fingerprint.clone(),
+                expense_expected_key_fingerprint_match: state
+                    .expense_expected_key_fingerprint_match,
+                expense_activation_fingerprint_match: state.expense_activation_fingerprint_match,
+                expense_crypto_probe_sha256,
                 expense_ledger_empty: expense_key_status.ledger_empty,
                 expense_key_initialized: expense_key_status.key_initialized,
                 expense_key_initialization_allowed: expense_key_status.key_initialization_allowed,
@@ -2258,7 +2563,21 @@ async fn operations_status(
                 pre_migration_count,
                 latest_pre_migration_created_at: latest_pre_migration
                     .map(|backup| backup.created_at.clone()),
-                latest_pre_migration_byte_size: latest_pre_migration.map(|backup| backup.byte_size),
+                latest_pre_migration_byte_size: latest_pre_migration_verification
+                    .as_ref()
+                    .map(|backup| backup.byte_size),
+                latest_pre_migration_sha256: latest_pre_migration_verification
+                    .as_ref()
+                    .map(|backup| backup.sha256.clone()),
+                latest_pre_migration_schema_version: latest_pre_migration_verification
+                    .as_ref()
+                    .map(|backup| backup.schema_version),
+                latest_pre_migration_integrity_check: latest_pre_migration_verification
+                    .as_ref()
+                    .map(|backup| backup.integrity_check.clone()),
+                latest_pre_migration_schema_semantics_validated: latest_pre_migration_verification
+                    .as_ref()
+                    .map(|backup| backup.schema_semantics_validated),
             },
             remote_backup,
             stock: OperationsStockStatus {
@@ -2326,6 +2645,7 @@ fn operations_alerts(
     incident_mode: IncidentMode,
     ai_enabled: bool,
     expense_crypto_ready: bool,
+    expense_rollout_mode: ExpenseRolloutMode,
     now: DateTime<Utc>,
 ) -> (&'static str, Vec<OperationsAlert>) {
     let mut alerts = Vec::new();
@@ -2346,8 +2666,16 @@ fn operations_alerts(
     if !expense_crypto_ready {
         alerts.push(OperationsAlert {
             severity: "critical",
-            code: "EXPENSE_CRYPTO_NOT_READY",
-            message: "Expense data protection key verification failed",
+            code: if expense_rollout_mode == ExpenseRolloutMode::Locked {
+                "EXPENSE_ROLLOUT_LOCKED"
+            } else {
+                "EXPENSE_CRYPTO_NOT_READY"
+            },
+            message: if expense_rollout_mode == ExpenseRolloutMode::Locked {
+                "Expense access is locked pending production key verification"
+            } else {
+                "Expense data protection key verification failed"
+            },
         });
     }
     if !health.ok {
@@ -2537,6 +2865,23 @@ fn optional_env(name: &str) -> Result<Option<String>, String> {
     }
 }
 
+fn valid_expense_key_fingerprint(value: &str) -> bool {
+    value.len() == 78
+        && value.starts_with("tm_exp_kfp_v1_")
+        && value[14..].bytes().all(|byte| byte.is_ascii_hexdigit())
+        && value[14..]
+            .bytes()
+            .all(|byte| !byte.is_ascii_alphabetic() || byte.is_ascii_lowercase())
+}
+
+fn required_expense_key_fingerprint(name: &str) -> Result<String, String> {
+    let value = required_env(name)?;
+    if !valid_expense_key_fingerprint(&value) {
+        return Err(format!("{name} has an invalid format"));
+    }
+    Ok(value)
+}
+
 fn required_env(name: &str) -> Result<String, String> {
     optional_env(name)?.ok_or_else(|| format!("{name} must be set"))
 }
@@ -2681,9 +3026,11 @@ async fn authenticate_cloud_request(
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
-    if matches!(request.uri().path(), "/healthz" | "/readyz")
-        || (auth_state.allow_public_device_routes
-            && device_api::is_public_path(request.uri().path()))
+    if matches!(
+        request.uri().path(),
+        "/healthz" | "/readyz" | "/deployment-readyz"
+    ) || (auth_state.allow_public_device_routes
+        && device_api::is_public_path(request.uri().path()))
     {
         return next.run(request).await;
     }
@@ -2813,7 +3160,11 @@ async fn runtime_controls_guard(
     let path = request.uri().path();
     let lockdown_allowlist = matches!(
         path,
-        "/healthz" | "/readyz" | "/api/v1/auth/status" | "/api/v1/ops/status"
+        "/healthz"
+            | "/readyz"
+            | "/deployment-readyz"
+            | "/api/v1/auth/status"
+            | "/api/v1/ops/status"
     );
     let blocked = match runtime.incident_mode {
         IncidentMode::Normal => None,
@@ -2825,6 +3176,14 @@ async fn runtime_controls_guard(
         }
         IncidentMode::ReadOnly | IncidentMode::Lockdown => None,
     };
+    let blocked = blocked.or_else(|| {
+        (runtime.expense_rollout_mode == ExpenseRolloutMode::Locked
+            && path.starts_with("/api/v1/expenses"))
+        .then_some((
+            "EXPENSE_ROLLOUT_LOCKED",
+            "expense access is locked pending production key verification",
+        ))
+    });
     let blocked = blocked.or_else(|| {
         (!runtime.ai_enabled && ai_execution_path(request.method(), path)).then_some((
             "AI_KILL_SWITCH_ACTIVE",
@@ -2852,6 +3211,7 @@ async fn runtime_controls_guard(
             incident_mode = runtime.incident_mode.as_str(),
             ai_enabled = runtime.ai_enabled,
             expense_ai_enabled = runtime.expense_ai_enabled,
+            expense_rollout_mode = runtime.expense_rollout_mode.as_str(),
             task_report_enabled = runtime.task_report_enabled,
             method = %request.method(),
             route = safe_route_family(path),
@@ -3057,6 +3417,7 @@ fn safe_route_family(path: &str) -> &'static str {
     match path {
         "/healthz" => "/healthz",
         "/readyz" => "/readyz",
+        "/deployment-readyz" => "/deployment-readyz",
         "/api/v1/auth/status" => "/api/v1/auth/status",
         "/api/v1/device-pairings" => "/api/v1/device-pairings",
         "/api/v1/device/self" => "/api/v1/device/self",
@@ -3210,8 +3571,9 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{
-        AppState, IncidentMode, RailwayUsageClient, ServerProfile, StockConfig, assign_request_id,
-        build_cloud_authenticated_router, build_cloud_authenticated_router_with_controls,
+        AppState, ExpenseRolloutConfig, ExpenseRolloutMode, IncidentMode, RailwayUsageClient,
+        ServerProfile, StockConfig, assign_request_id, build_cloud_authenticated_router,
+        build_cloud_authenticated_router_with_controls,
         build_cloud_authenticated_router_with_feature_controls_costs_stock_and_expenses,
         build_cloud_authenticated_router_with_openai, build_cloud_bootstrap_router,
         build_cloud_import_router, build_router, build_router_with_openai, cloud_readyz,
@@ -3219,7 +3581,7 @@ mod tests {
         validate_cloud_home, validate_expense_ai_provider_configuration, write_api,
     };
     use crate::auth::{AuthConfig, DEVICE_TOKEN_PREFIX, TOKEN_PREFIX, sha256_hex};
-    use crate::expense_crypto::ExpenseCryptoError;
+    use crate::expense_crypto::{ExpenseCrypto, ExpenseCryptoError};
     use crate::openai::{OpenAiClient, OpenAiConfig, ProbeUsage};
 
     const TEST_AUTH_SECRET: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -3230,6 +3592,40 @@ mod tests {
 
     fn test_auth_config() -> AuthConfig {
         AuthConfig::for_test(&test_auth_token(), Utc::now() + ChronoDuration::minutes(5))
+    }
+
+    fn test_expense_key_fingerprint() -> String {
+        ExpenseCrypto::for_test()
+            .expect("create test expense crypto")
+            .key_fingerprint()
+    }
+
+    fn test_expense_rollout_router(core: TmCore, rollout: ExpenseRolloutConfig) -> Router {
+        build_cloud_authenticated_router_with_feature_controls_costs_stock_and_expenses(
+            core,
+            test_auth_config(),
+            OpenAiClient::disabled(),
+            IncidentMode::Normal,
+            true,
+            true,
+            RailwayUsageClient::disabled(),
+            StockConfig::default(),
+            false,
+            rollout,
+        )
+    }
+
+    async fn get_route_status(router: Router, path: &'static str) -> StatusCode {
+        router
+            .oneshot(
+                Request::builder()
+                    .uri(path)
+                    .body(Body::empty())
+                    .expect("build readiness request"),
+            )
+            .await
+            .expect("call readiness route")
+            .status()
     }
 
     fn install_test_device(core: &TmCore) -> (String, String) {
@@ -4877,6 +5273,7 @@ mod tests {
         assert!(body["data"]["database"]["currentSchemaAppliedAt"].is_string());
         assert_eq!(body["data"]["localBackup"]["preMigrationCount"], 0);
         assert!(body["data"]["localBackup"]["latestPreMigrationCreatedAt"].is_null());
+        assert!(body["data"]["localBackup"]["latestPreMigrationSha256"].is_null());
         assert_eq!(body["data"]["scheduler"]["status"], "healthy");
         assert_eq!(body["data"]["scheduler"]["openaiCallsEnabled"], false);
         assert_eq!(body["data"]["scheduler"]["effectCount"], 0);
@@ -4894,6 +5291,11 @@ mod tests {
         );
         assert_eq!(body["data"]["controls"]["expenseLedgerEmpty"], true);
         assert_eq!(body["data"]["controls"]["expenseKeyInitialized"], true);
+        assert!(
+            body["data"]["controls"]["expenseKeyFingerprint"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("tm_exp_kfp_v1_") && value.len() == 78)
+        );
         assert_eq!(
             body["data"]["controls"]["expenseKeyInitializationAllowed"],
             false
@@ -4901,6 +5303,10 @@ mod tests {
         let serialized = body.to_string();
         assert!(!serialized.contains("databasePath"));
         assert!(!serialized.contains("TM_AUTH"));
+        assert!(
+            !serialized
+                .contains("9dbdfe3b08213d08a84217a7f1b735f86e2ed20b4a87ffedee422661a7219d49")
+        );
     }
 
     #[test]
@@ -7733,6 +8139,7 @@ mod tests {
                 RailwayUsageClient::disabled(),
                 StockConfig::default(),
                 false,
+                ExpenseRolloutConfig::local_enabled(),
             );
         let blocked_ai = ai_disabled
             .oneshot(
@@ -7811,6 +8218,181 @@ mod tests {
         assert_eq!(
             safe_route_family("/api/v1/expenses/transactions/private-search-value"),
             "/api/v1/expenses/transactions/{id}"
+        );
+    }
+
+    #[tokio::test]
+    async fn deployment_readiness_does_not_initialize_a_probe_in_bootstrap_or_import_mode() {
+        let (_bootstrap_temporary, bootstrap_core) = test_core();
+        let bootstrap_router = build_cloud_bootstrap_router(bootstrap_core.clone());
+        assert_eq!(
+            get_route_status(bootstrap_router, "/deployment-readyz").await,
+            StatusCode::OK
+        );
+        assert!(
+            bootstrap_core
+                .expense_crypto_probe()
+                .expect("query bootstrap expense probe")
+                .is_none()
+        );
+
+        let (_import_temporary, import_core) = test_core();
+        let import_router = build_cloud_import_router(import_core.clone(), test_auth_config());
+        assert_eq!(
+            get_route_status(import_router, "/deployment-readyz").await,
+            StatusCode::OK
+        );
+        assert!(
+            import_core
+                .expense_crypto_probe()
+                .expect("query import expense probe")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn deployment_readiness_accepts_a_matching_locked_rollout_without_initializing_a_probe() {
+        let (_temporary, core) = test_core();
+        let fingerprint = test_expense_key_fingerprint();
+        let router = test_expense_rollout_router(
+            core.clone(),
+            ExpenseRolloutConfig {
+                mode: ExpenseRolloutMode::Locked,
+                expected_key_fingerprint: Some(fingerprint),
+                activation_fingerprint: None,
+            },
+        );
+
+        assert_eq!(
+            get_route_status(router.clone(), "/deployment-readyz").await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            get_route_status(router, "/readyz").await,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert!(
+            core.expense_crypto_probe()
+                .expect("query locked rollout expense probe")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn deployment_readiness_rejects_a_locked_rollout_with_the_wrong_expected_key() {
+        let (_temporary, core) = test_core();
+        let wrong_fingerprint = format!("tm_exp_kfp_v1_{}", "0".repeat(64));
+        assert_ne!(wrong_fingerprint, test_expense_key_fingerprint());
+        let router = test_expense_rollout_router(
+            core.clone(),
+            ExpenseRolloutConfig {
+                mode: ExpenseRolloutMode::Locked,
+                expected_key_fingerprint: Some(wrong_fingerprint),
+                activation_fingerprint: None,
+            },
+        );
+
+        assert_eq!(
+            get_route_status(router, "/deployment-readyz").await,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert!(
+            core.expense_crypto_probe()
+                .expect("query mismatched locked rollout expense probe")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn deployment_readiness_accepts_only_a_matching_enabled_activation() {
+        let (_enabled_temporary, enabled_core) = test_core();
+        let fingerprint = test_expense_key_fingerprint();
+        let enabled_router = test_expense_rollout_router(
+            enabled_core.clone(),
+            ExpenseRolloutConfig {
+                mode: ExpenseRolloutMode::Enabled,
+                expected_key_fingerprint: Some(fingerprint.clone()),
+                activation_fingerprint: Some(fingerprint.clone()),
+            },
+        );
+        assert_eq!(
+            get_route_status(enabled_router.clone(), "/deployment-readyz").await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            get_route_status(enabled_router, "/readyz").await,
+            StatusCode::OK
+        );
+        assert!(
+            enabled_core
+                .expense_crypto_probe()
+                .expect("query enabled rollout expense probe")
+                .is_some()
+        );
+
+        let (_mismatch_temporary, mismatch_core) = test_core();
+        let wrong_activation = format!("tm_exp_kfp_v1_{}", "0".repeat(64));
+        assert_ne!(wrong_activation, fingerprint);
+        let mismatch_router = test_expense_rollout_router(
+            mismatch_core.clone(),
+            ExpenseRolloutConfig {
+                mode: ExpenseRolloutMode::Enabled,
+                expected_key_fingerprint: Some(fingerprint),
+                activation_fingerprint: Some(wrong_activation),
+            },
+        );
+        assert_eq!(
+            get_route_status(mismatch_router, "/deployment-readyz").await,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert!(
+            mismatch_core
+                .expense_crypto_probe()
+                .expect("query activation-mismatched expense probe")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn deployment_readiness_refuses_first_key_initialization_for_a_nonempty_ledger() {
+        let (_temporary, core) = test_core();
+        let coverage_date = NaiveDate::from_ymd_opt(2026, 8, 1).expect("valid coverage date");
+        core.preview_expense_import_redacted(&ExpenseImportPreviewInput {
+            adapter: ExpenseImportAdapter::KbCardUsageV1,
+            source_kind: ExpenseSourceKind::Card,
+            source_fingerprint: "11".repeat(32),
+            file_sha256: "22".repeat(32),
+            normalized_sha256: "33".repeat(32),
+            coverage_start: coverage_date,
+            coverage_end: coverage_date,
+            rejected_count: 0,
+            rows: Vec::new(),
+        })
+        .expect("create nonempty expense ledger without a key probe");
+        let key_status = core
+            .expense_key_initialization_status()
+            .expect("query nonempty expense ledger state");
+        assert!(!key_status.ledger_empty);
+        assert!(!key_status.key_initialized);
+        assert!(!key_status.key_initialization_allowed);
+
+        let fingerprint = test_expense_key_fingerprint();
+        let router = test_expense_rollout_router(
+            core.clone(),
+            ExpenseRolloutConfig {
+                mode: ExpenseRolloutMode::Enabled,
+                expected_key_fingerprint: Some(fingerprint.clone()),
+                activation_fingerprint: Some(fingerprint),
+            },
+        );
+        assert_eq!(
+            get_route_status(router, "/deployment-readyz").await,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert!(
+            core.expense_crypto_probe()
+                .expect("query refused expense probe")
+                .is_none()
         );
     }
 

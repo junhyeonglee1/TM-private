@@ -129,6 +129,7 @@ jobs:
         run: |
           $paths = @(
             '.\scripts\build-release.ps1',
+            '.\scripts\expense-release-evidence.ps1',
             '.\scripts\configure-expense-railway.ps1',
             '.\scripts\deploy-verified-expense-railway.ps1',
             '.\scripts\verify-expense-production.ps1'
@@ -157,29 +158,53 @@ jobs:
       - name: Build Windows executables
         shell: pwsh
         run: |
+          $releaseDir = Join-Path $env:TM_CARGO_TARGET_DIR 'x86_64-pc-windows-msvc\release'
+          $desktopPath = Join-Path $releaseDir 'tm.exe'
+          $cliPath = Join-Path $releaseDir 'tm-cli.exe'
+          Remove-Item -LiteralPath $desktopPath, $cliPath -Force -ErrorAction SilentlyContinue
           & '.\node_modules\.bin\tauri.cmd' build --target x86_64-pc-windows-msvc --no-bundle --features custom-protocol -- --locked
           if ($LASTEXITCODE -ne 0) { throw "Tauri release build failed with exit code $LASTEXITCODE" }
+          if (-not (Test-Path -LiteralPath $desktopPath -PathType Leaf)) {
+            throw 'The exact target desktop executable was not created by this run.'
+          }
           cargo build --locked --release --target x86_64-pc-windows-msvc -p tm-cli --bin tm-cli
           if ($LASTEXITCODE -ne 0) { throw "tm-cli release build failed with exit code $LASTEXITCODE" }
+          if (-not (Test-Path -LiteralPath $cliPath -PathType Leaf)) {
+            throw 'The exact target CLI executable was not created by this run.'
+          }
+          "TM_DESKTOP_EXE_PATH=$desktopPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "TM_DESKTOP_EXE_SHA256=$((Get-FileHash -LiteralPath $desktopPath -Algorithm SHA256).Hash.ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "TM_CLI_EXE_PATH=$cliPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "TM_CLI_EXE_SHA256=$((Get-FileHash -LiteralPath $cliPath -Algorithm SHA256).Hash.ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Prepare verified artifact
         shell: pwsh
         run: |
           $artifact = Join-Path $env:RUNNER_TEMP 'tm-step10-windows-x64'
-          $desktop = Get-ChildItem -LiteralPath $env:TM_CARGO_TARGET_DIR -Filter 'tm.exe' -File -Recurse |
-            Where-Object { $_.FullName -match '[\\/]release[\\/]tm\.exe$' } |
-            Sort-Object LastWriteTimeUtc -Descending |
-            Select-Object -First 1
-          $cli = Get-ChildItem -LiteralPath $env:TM_CARGO_TARGET_DIR -Filter 'tm-cli.exe' -File -Recurse |
-            Where-Object { $_.FullName -match '[\\/]release[\\/]tm-cli\.exe$' } |
-            Sort-Object LastWriteTimeUtc -Descending |
-            Select-Object -First 1
-          if (-not $desktop -or -not $cli) {
-            throw 'Expected release executables were not found under the Cargo target directory.'
+          $expectedReleaseDir = [System.IO.Path]::GetFullPath(
+            (Join-Path $env:TM_CARGO_TARGET_DIR 'x86_64-pc-windows-msvc\release')
+          )
+          if (-not [string]::Equals(
+              [System.IO.Path]::GetFullPath((Split-Path -Parent $env:TM_DESKTOP_EXE_PATH)),
+              $expectedReleaseDir,
+              [System.StringComparison]::OrdinalIgnoreCase
+            ) -or -not [string]::Equals(
+              [System.IO.Path]::GetFullPath((Split-Path -Parent $env:TM_CLI_EXE_PATH)),
+              $expectedReleaseDir,
+              [System.StringComparison]::OrdinalIgnoreCase
+            ) -or -not (Test-Path -LiteralPath $env:TM_DESKTOP_EXE_PATH -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $env:TM_CLI_EXE_PATH -PathType Leaf)) {
+            throw 'The exact target release executables are missing or outside the approved directory.'
+          }
+          if ((Get-FileHash -LiteralPath $env:TM_DESKTOP_EXE_PATH -Algorithm SHA256).Hash.ToLowerInvariant() -ne
+              $env:TM_DESKTOP_EXE_SHA256 -or
+            (Get-FileHash -LiteralPath $env:TM_CLI_EXE_PATH -Algorithm SHA256).Hash.ToLowerInvariant() -ne
+              $env:TM_CLI_EXE_SHA256) {
+            throw 'A release executable changed after its exact build hash was recorded.'
           }
           New-Item -ItemType Directory -Force -Path $artifact | Out-Null
-          Copy-Item -LiteralPath $desktop.FullName -Destination (Join-Path $artifact 'tm.exe')
-          Copy-Item -LiteralPath $cli.FullName -Destination (Join-Path $artifact 'tm-cli.exe')
+          Copy-Item -LiteralPath $env:TM_DESKTOP_EXE_PATH -Destination (Join-Path $artifact 'tm.exe')
+          Copy-Item -LiteralPath $env:TM_CLI_EXE_PATH -Destination (Join-Path $artifact 'tm-cli.exe')
           if (-not (Test-Path -LiteralPath $env:TM_EXPENSE_DECRYPTOR_PATH -PathType Leaf)) {
             throw 'The verified expense sidecar was not found.'
           }

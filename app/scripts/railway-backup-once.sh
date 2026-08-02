@@ -32,6 +32,7 @@ snapshot="$snapshot_directory/tm.sqlite3"
 manifest="$snapshot_directory/manifest.json"
 mkdir -p "$snapshot_directory"
 
+snapshot_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 sqlite3 "$database" ".timeout 15000" ".backup '$snapshot'"
 integrity="$(sqlite3 -readonly "$snapshot" 'PRAGMA integrity_check;')"
 if [ "$integrity" != "ok" ]; then
@@ -52,6 +53,47 @@ esac
 if [ "$schema_version" -lt 1 ] || [ "$schema_version" -gt 15 ]; then
     echo "event=tm_backup_failed reason=unsupported_schema_version" >&2
     exit 1
+fi
+expense_crypto_probe_present=null
+expense_crypto_probe_sha256=''
+if [ "$schema_version" -ge 15 ]; then
+    expense_crypto_probe_count="$(
+        sqlite3 -readonly "$snapshot" \
+            "SELECT COUNT(*) FROM expense_crypto_metadata
+             WHERE singleton_key = 'expense-data-key-probe' AND key_version = 1;"
+    )"
+    case "$expense_crypto_probe_count" in
+        0)
+            expense_crypto_probe_present=false
+            ;;
+        1)
+            expense_crypto_probe_present=true
+            expense_crypto_probe_sha256="$(
+                sqlite3 -readonly -noheader "$snapshot" \
+                    "SELECT singleton_key || '|' || key_version || '|' || nonce || '|' ||
+                            ciphertext || '|' || aad
+                     FROM expense_crypto_metadata
+                     WHERE singleton_key = 'expense-data-key-probe' AND key_version = 1;" |
+                    tr -d '\r\n' |
+                    sha256sum |
+                    awk '{print $1}'
+            )"
+            case "$expense_crypto_probe_sha256" in
+                ''|*[!0-9a-f]*)
+                    echo "event=tm_backup_failed reason=invalid_expense_probe_hash" >&2
+                    exit 1
+                    ;;
+            esac
+            if [ "${#expense_crypto_probe_sha256}" -ne 64 ]; then
+                echo "event=tm_backup_failed reason=invalid_expense_probe_hash_length" >&2
+                exit 1
+            fi
+            ;;
+        *)
+            echo "event=tm_backup_failed reason=invalid_expense_probe_count" >&2
+            exit 1
+            ;;
+    esac
 fi
 migration_summary="$(
     sqlite3 -readonly "$snapshot" \
@@ -387,13 +429,16 @@ database_sha256="$(sha256sum "$snapshot" | awk '{print $1}')"
 database_bytes="$(wc -c < "$snapshot" | tr -d ' ')"
 jq -n \
     --arg createdAt "$created_at" \
+    --arg snapshotStartedAt "$snapshot_started_at" \
     --arg sha256 "$database_sha256" \
     --argjson byteSize "$database_bytes" \
     --argjson schemaVersion "$schema_version" \
     --argjson migrationLedgerComplete true \
     --argjson requiredTablesComplete true \
     --argjson schemaSemanticsValidated "$schema_semantics_validated" \
-    '{createdAt:$createdAt,sha256:$sha256,byteSize:$byteSize,schemaVersion:$schemaVersion,migrationLedgerComplete:$migrationLedgerComplete,requiredTablesComplete:$requiredTablesComplete,schemaSemanticsValidated:$schemaSemanticsValidated}' \
+    --argjson expenseCryptoProbePresent "$expense_crypto_probe_present" \
+    --arg expenseCryptoProbeSha256 "$expense_crypto_probe_sha256" \
+    '{createdAt:$createdAt,snapshotStartedAt:$snapshotStartedAt,sha256:$sha256,byteSize:$byteSize,schemaVersion:$schemaVersion,migrationLedgerComplete:$migrationLedgerComplete,requiredTablesComplete:$requiredTablesComplete,schemaSemanticsValidated:$schemaSemanticsValidated,expenseCryptoProbePresent:$expenseCryptoProbePresent,expenseCryptoProbeSha256:(if $expenseCryptoProbeSha256 == "" then null else $expenseCryptoProbeSha256 end)}' \
     > "$manifest"
 
 endpoint="${TM_BACKUP_S3_ENDPOINT%/}"
@@ -435,6 +480,7 @@ restic_command check --read-data >/dev/null
 status_tmp="$status_directory/status.json.tmp"
 jq -n \
     --arg checkedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg snapshotStartedAt "$snapshot_started_at" \
     --arg snapshotId "$snapshot_id" \
     --arg sha256 "$database_sha256" \
     --argjson byteSize "$database_bytes" \
@@ -442,7 +488,9 @@ jq -n \
     --argjson migrationLedgerComplete true \
     --argjson requiredTablesComplete true \
     --argjson schemaSemanticsValidated "$schema_semantics_validated" \
-    '{status:"succeeded",checkedAt:$checkedAt,snapshotId:$snapshotId,databaseSha256:$sha256,databaseByteSize:$byteSize,schemaVersion:$schemaVersion,retention:{daily:7,weekly:4,monthly:12},integrityCheck:"ok",migrationLedgerComplete:$migrationLedgerComplete,requiredTablesComplete:$requiredTablesComplete,schemaSemanticsValidated:$schemaSemanticsValidated}' \
+    --argjson expenseCryptoProbePresent "$expense_crypto_probe_present" \
+    --arg expenseCryptoProbeSha256 "$expense_crypto_probe_sha256" \
+    '{status:"succeeded",checkedAt:$checkedAt,snapshotStartedAt:$snapshotStartedAt,snapshotId:$snapshotId,databaseSha256:$sha256,databaseByteSize:$byteSize,schemaVersion:$schemaVersion,retention:{daily:7,weekly:4,monthly:12},integrityCheck:"ok",migrationLedgerComplete:$migrationLedgerComplete,requiredTablesComplete:$requiredTablesComplete,schemaSemanticsValidated:$schemaSemanticsValidated,expenseCryptoProbePresent:$expenseCryptoProbePresent,expenseCryptoProbeSha256:(if $expenseCryptoProbeSha256 == "" then null else $expenseCryptoProbeSha256 end)}' \
     > "$status_tmp"
 chmod 0600 "$status_tmp"
 mv "$status_tmp" "$status_directory/status.json"

@@ -107,7 +107,17 @@ jobs:
           provenance="${RUNNER_TEMP}/tm-step16-container-provenance"
           rm -rf "${context}" "${provenance}"
           mkdir -p "${context}" "${provenance}"
-          git archive --format=tar --output="${archive}" "${TM_SOURCE_SHA}:app"
+          test -z "$(git --no-replace-objects replace -l)"
+          test ! -e .git/info/attributes
+          if git --no-replace-objects config --show-origin --get-all core.attributesFile >/dev/null; then
+            echo 'External Git attributes configuration is not allowed.' >&2
+            exit 1
+          elif [ "$?" -ne 1 ]; then
+            echo 'Unable to inspect external Git attributes configuration.' >&2
+            exit 1
+          fi
+          GIT_ATTR_NOSYSTEM=1 git --no-replace-objects -c core.attributesFile=/dev/null \
+            archive --format=tar --output="${archive}" "${TM_SOURCE_SHA}:app"
           tar -xf "${archive}" -C "${context}"
           source_archive_sha256="$(sha256sum "${archive}" | cut -d ' ' -f 1)"
           echo "context=${context}" >> "${GITHUB_OUTPUT}"
@@ -179,6 +189,7 @@ jobs:
           cp "${TM_STEP16_CONTEXT}/.dockerignore" "${TM_STEP16_PROVENANCE}/.dockerignore"
           cp "${TM_STEP16_CONTEXT}/Cargo.lock" "${TM_STEP16_PROVENANCE}/Cargo.lock"
           cp "${TM_STEP16_CONTEXT}/container-supply-chain.lock.json" "${TM_STEP16_PROVENANCE}/container-supply-chain.lock.json"
+          cp "${TM_STEP16_CONTEXT}/operations-toolchain.lock.json" "${TM_STEP16_PROVENANCE}/operations-toolchain.lock.json"
 
       - name: Scan reviewed CI container image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0

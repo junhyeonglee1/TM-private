@@ -82,6 +82,10 @@ pub(crate) const MANIFEST_TABLES: &[&str] = &[
     "expense_mutation_receipts",
 ];
 
+/// The schema 14 durability boundary ends at `app_state`. Schema 15 appends
+/// the expense tables beginning with `expense_crypto_metadata`.
+pub(crate) const SCHEMA_14_MANIFEST_TABLE_COUNT: usize = 45;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct MigrationTableManifest {

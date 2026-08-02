@@ -8,16 +8,16 @@ use serde_json::{Value, json};
 
 use crate::{
     AiBudgetPolicy, AiBudgetReservation, AiBudgetSettlementRecord, AiBudgetStatus,
-    AiOperationBudgetStatus, AiTokenUsage, Attachment, BackupArtifact, BackupInfo, ChangeRequest,
-    ChangeRequestClaim, ChangeRequestEvent, ChecklistItem, ChecklistMutationInput,
-    CreateAttachmentInput, CreateChangeRequestInput, CreateLinkInput, CreateNoteAggregateInput,
-    CreateNoteInput, CreateProjectInput, CreateTaskAggregateInput, CreateTaskInput,
-    CreateWorkLogInput, DigestDelivery, DigestKind, DigestPreparation, EndSessionInput, EntityLink,
-    EntityType, Error, ExportArtifact, HealthReport, LinkTargetType, MigrationDryRun,
-    MigrationManifest, Note, NoteAggregate, NotePatch, NoteType, Project, Result, SearchHit,
-    SessionCompletion, SessionStatus, StartSessionInput, Tag, Task, TaskAggregate, TaskDayEntry,
-    TaskDayStatus, TaskEvent, TaskPatch, TaskReportCompletion, TaskReportRun, TaskReportStart,
-    TaskStatus, TmHome, TrashEntityType, TrashItem, UpdateChangeRequestInput,
+    AiOperationBudgetStatus, AiTokenUsage, Attachment, BackupArtifact, BackupInfo,
+    BackupVerification, ChangeRequest, ChangeRequestClaim, ChangeRequestEvent, ChecklistItem,
+    ChecklistMutationInput, CreateAttachmentInput, CreateChangeRequestInput, CreateLinkInput,
+    CreateNoteAggregateInput, CreateNoteInput, CreateProjectInput, CreateTaskAggregateInput,
+    CreateTaskInput, CreateWorkLogInput, DigestDelivery, DigestKind, DigestPreparation,
+    EndSessionInput, EntityLink, EntityType, Error, ExportArtifact, HealthReport, LinkTargetType,
+    MigrationDryRun, MigrationManifest, Note, NoteAggregate, NotePatch, NoteType, Project, Result,
+    SearchHit, SessionCompletion, SessionStatus, StartSessionInput, Tag, Task, TaskAggregate,
+    TaskDayEntry, TaskDayStatus, TaskEvent, TaskPatch, TaskReportCompletion, TaskReportRun,
+    TaskReportStart, TaskStatus, TmHome, TrashEntityType, TrashItem, UpdateChangeRequestInput,
     UpdateTaskAggregateInput, WorkLog, WorkSession, ai_budget, backup, change_request,
     database::{Database, SCHEMA_VERSION, new_id, now_utc, today_seoul, validate_schema_semantics},
     digest,
@@ -1367,6 +1367,22 @@ impl TmCore {
         }
         backups.sort_by(|left, right| right.created_at.cmp(&left.created_at));
         Ok(backups)
+    }
+
+    pub fn verify_database_backup(
+        &self,
+        backup_path: impl AsRef<Path>,
+    ) -> Result<BackupVerification> {
+        let backup_root = std::fs::canonicalize(self.home().database_backups_dir())?;
+        let candidate = std::fs::canonicalize(backup_path.as_ref())?;
+        if candidate.parent() != Some(backup_root.as_path())
+            || candidate
+                .extension()
+                .is_none_or(|extension| extension != "sqlite3")
+        {
+            return Err(Error::InvalidBackup(candidate));
+        }
+        backup::verify_database_backup(&candidate)
     }
 
     pub fn export_json(&self) -> Result<Value> {

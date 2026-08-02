@@ -2,7 +2,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{BufReader, Read},
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use chrono::Utc;
@@ -15,16 +15,17 @@ use walkdir::WalkDir;
 use zip::{ZipWriter, write::SimpleFileOptions};
 
 use crate::{
-    Error, Result,
+    BackupVerification, Error, Result,
     database::{
         Database, SCHEMA_VERSION, database_lock, now_utc, register_runtime_functions,
         validate_schema_semantics,
     },
-    migration::MANIFEST_TABLES,
+    migration::{MANIFEST_TABLES, SCHEMA_14_MANIFEST_TABLE_COUNT},
 };
 
 const DATABASE_BACKUP_LIMIT: usize = 30;
 const SOURCE_BACKUP_LIMIT: usize = 10;
+const MAX_BACKUP_SHM_BYTES: u64 = 64 * 1024 * 1024;
 const PROTECTED_CHANGE_REQUEST_PREDICATE: &str = "change_requests.attempt_count > 0
      OR change_requests.status IN ('approved', 'claimed', 'failed', 'completed', 'cancelled')
      OR EXISTS (
@@ -303,9 +304,24 @@ fn backup_lock(directory: &Path) -> Result<File> {
         .open(directory.join(".tm-backup.lock"))?)
 }
 
+#[derive(Debug)]
+struct ValidatedDatabase {
+    schema_version: i64,
+    integrity_check: String,
+    schema_semantics_validated: bool,
+}
+
 fn validate_database(path: &Path, require_tm_schema: bool) -> Result<()> {
     let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|_| Error::InvalidBackup(path.to_path_buf()))?;
+    validate_database_connection(&connection, path, require_tm_schema).map(|_| ())
+}
+
+fn validate_database_connection(
+    connection: &Connection,
+    path: &Path,
+    require_tm_schema: bool,
+) -> Result<ValidatedDatabase> {
     let integrity: String = connection
         .query_row("PRAGMA integrity_check", [], |row| row.get(0))
         .map_err(|_| Error::InvalidBackup(path.to_path_buf()))?;
@@ -325,14 +341,13 @@ fn validate_database(path: &Path, require_tm_schema: bool) -> Result<()> {
         true
     };
     let has_complete_manifest = if require_tm_schema {
-        has_complete_migration_manifest(&connection, version).unwrap_or(false)
-            && (version != SCHEMA_VERSION
-                || has_complete_schema_tables(&connection).unwrap_or(false))
+        has_complete_migration_manifest(connection, version).unwrap_or(false)
+            && (version < 14 || has_complete_schema_tables(connection, version).unwrap_or(false))
     } else {
         true
     };
     let has_valid_schema_semantics =
-        version < 14 || validate_schema_semantics(&connection, version).is_ok();
+        version < 14 || validate_schema_semantics(connection, version).is_ok();
     let has_foreign_key_violation = {
         let mut statement = connection
             .prepare("PRAGMA foreign_key_check")
@@ -353,7 +368,11 @@ fn validate_database(path: &Path, require_tm_schema: bool) -> Result<()> {
     {
         return Err(Error::InvalidBackup(path.to_path_buf()));
     }
-    Ok(())
+    Ok(ValidatedDatabase {
+        schema_version: version,
+        integrity_check: integrity,
+        schema_semantics_validated: has_valid_schema_semantics,
+    })
 }
 
 fn has_complete_migration_manifest(
@@ -371,8 +390,22 @@ fn has_complete_migration_manifest(
     Ok(versions == (1..=version).collect::<Vec<_>>())
 }
 
-fn has_complete_schema_tables(connection: &Connection) -> rusqlite::Result<bool> {
-    for table in MANIFEST_TABLES {
+fn has_complete_schema_tables(connection: &Connection, version: i64) -> rusqlite::Result<bool> {
+    let tables = match version {
+        14 => MANIFEST_TABLES
+            .get(..SCHEMA_14_MANIFEST_TABLE_COUNT)
+            .filter(|tables| {
+                tables.last() == Some(&"app_state")
+                    && MANIFEST_TABLES.get(SCHEMA_14_MANIFEST_TABLE_COUNT)
+                        == Some(&"expense_crypto_metadata")
+            }),
+        SCHEMA_VERSION => Some(MANIFEST_TABLES),
+        _ => Some(&[]),
+    };
+    let Some(tables) = tables else {
+        return Ok(false);
+    };
+    for table in tables {
         let exists: bool = connection.query_row(
             "SELECT EXISTS(
                 SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1
@@ -409,6 +442,102 @@ pub(crate) fn sha256_file(path: &Path) -> Result<String> {
         hasher.update(&buffer[..read]);
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+pub(crate) fn verify_database_backup(path: &Path) -> Result<BackupVerification> {
+    let directory = path
+        .parent()
+        .ok_or_else(|| Error::InvalidBackup(path.to_path_buf()))?;
+    let canonical_directory =
+        fs::canonicalize(directory).map_err(|_| Error::InvalidBackup(path.to_path_buf()))?;
+    let lock = backup_lock(&canonical_directory)?;
+    FileExt::lock_shared(&lock)?;
+    let result = (|| {
+        let before = backup_file_evidence(path)?;
+        if before.canonical_path.parent() != Some(canonical_directory.as_path()) {
+            return Err(Error::InvalidBackup(path.to_path_buf()));
+        }
+        let connection = Connection::open_with_flags(
+            &before.canonical_path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_FULL_MUTEX,
+        )
+        .map_err(|_| Error::InvalidBackup(path.to_path_buf()))?;
+        let validated = validate_database_connection(&connection, path, true)?;
+        let after = backup_file_evidence(path)?;
+        if !before.matches(&after) {
+            return Err(Error::InvalidBackup(path.to_path_buf()));
+        }
+        Ok(BackupVerification {
+            sha256: after.sha256,
+            byte_size: after.byte_size,
+            schema_version: validated.schema_version,
+            integrity_check: validated.integrity_check,
+            schema_semantics_validated: validated.schema_semantics_validated,
+        })
+    })();
+    FileExt::unlock(&lock)?;
+    result
+}
+
+#[derive(Debug)]
+struct BackupFileEvidence {
+    canonical_path: PathBuf,
+    byte_size: u64,
+    modified: SystemTime,
+    sha256: String,
+}
+
+impl BackupFileEvidence {
+    fn matches(&self, other: &Self) -> bool {
+        self.canonical_path == other.canonical_path
+            && self.byte_size == other.byte_size
+            && self.modified == other.modified
+            && self.sha256 == other.sha256
+    }
+}
+
+fn backup_file_evidence(path: &Path) -> Result<BackupFileEvidence> {
+    let invalid = || Error::InvalidBackup(path.to_path_buf());
+    // TM backups can retain a coordination-only SHM file with an empty WAL.
+    // A non-empty WAL or rollback journal would make the logical database
+    // differ from the main file whose SHA-256 is reported, so reject it.
+    for suffix in ["-wal", "-journal"] {
+        let mut sidecar = path.as_os_str().to_os_string();
+        sidecar.push(suffix);
+        match fs::symlink_metadata(PathBuf::from(sidecar)) {
+            Ok(metadata) if metadata.file_type().is_file() && metadata.len() == 0 => {}
+            Ok(_) => return Err(invalid()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(invalid()),
+        }
+    }
+    let mut shared_memory = path.as_os_str().to_os_string();
+    shared_memory.push("-shm");
+    match fs::symlink_metadata(PathBuf::from(shared_memory)) {
+        Ok(metadata)
+            if metadata.file_type().is_file() && metadata.len() <= MAX_BACKUP_SHM_BYTES => {}
+        Ok(_) => return Err(invalid()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(invalid()),
+    }
+    let canonical_path = fs::canonicalize(path).map_err(|_| invalid())?;
+    let metadata_before = fs::metadata(&canonical_path).map_err(|_| invalid())?;
+    if !metadata_before.is_file() {
+        return Err(invalid());
+    }
+    let modified_before = metadata_before.modified().map_err(|_| invalid())?;
+    let sha256 = sha256_file(&canonical_path).map_err(|_| invalid())?;
+    let metadata_after = fs::metadata(&canonical_path).map_err(|_| invalid())?;
+    let modified_after = metadata_after.modified().map_err(|_| invalid())?;
+    if metadata_before.len() != metadata_after.len() || modified_before != modified_after {
+        return Err(invalid());
+    }
+    Ok(BackupFileEvidence {
+        canonical_path,
+        byte_size: metadata_after.len(),
+        modified: modified_after,
+        sha256,
+    })
 }
 
 fn unique_name(prefix: &str, reason: &str, extension: &str) -> String {
@@ -1704,9 +1833,15 @@ fn validate_restore_reference(
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
 
-    use super::should_skip;
+    use tempfile::tempdir;
+
+    use super::{backup_file_evidence, should_skip};
+    use crate::{Result, migration::SCHEMA_14_MANIFEST_TABLE_COUNT};
 
     #[test]
     fn source_snapshot_excludes_generated_and_sensitive_content() {
@@ -1726,5 +1861,48 @@ mod tests {
         for path in ["src/main.rs", "docs/patches/README.md", "src/data/model.ts"] {
             assert!(!should_skip(Path::new(path)), "expected to keep {path}");
         }
+    }
+
+    #[test]
+    fn schema_fourteen_manifest_boundary_precedes_expense_tables() {
+        assert_eq!(SCHEMA_14_MANIFEST_TABLE_COUNT, 45);
+        assert_eq!(
+            super::MANIFEST_TABLES.get(SCHEMA_14_MANIFEST_TABLE_COUNT - 1),
+            Some(&"app_state")
+        );
+        assert_eq!(
+            super::MANIFEST_TABLES.get(SCHEMA_14_MANIFEST_TABLE_COUNT),
+            Some(&"expense_crypto_metadata")
+        );
+    }
+
+    #[test]
+    fn backup_file_evidence_detects_same_length_replacement() -> Result<()> {
+        let temporary = tempdir()?;
+        let path = temporary.path().join("proof.sqlite3");
+        let mut wal = path.as_os_str().to_os_string();
+        wal.push("-wal");
+        let wal = PathBuf::from(wal);
+        let mut shm = path.as_os_str().to_os_string();
+        shm.push("-shm");
+        let shm = PathBuf::from(shm);
+        fs::write(&path, b"first-proof")?;
+        fs::write(&wal, b"")?;
+        fs::write(&shm, b"coordination-only")?;
+        let first = backup_file_evidence(&path)?;
+
+        fs::write(&path, b"other-proof")?;
+        let second = backup_file_evidence(&path)?;
+
+        assert_eq!(first.byte_size, second.byte_size);
+        assert_eq!(first.canonical_path, second.canonical_path);
+        assert_ne!(first.sha256, second.sha256);
+        assert!(!first.matches(&second));
+        fs::write(&wal, b"uncheckpointed-frame")?;
+        assert!(matches!(
+            backup_file_evidence(&path),
+            Err(crate::Error::InvalidBackup(_))
+        ));
+        Ok(())
     }
 }

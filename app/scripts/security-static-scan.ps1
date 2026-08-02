@@ -121,12 +121,15 @@ foreach ($required in @(
     'verify-step16-container-supply-chain.ps1',
     'TM_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}',
     'ref: ${{ env.TM_SOURCE_SHA }}',
-    'git archive --format=tar',
+    'test ! -e .git/info/attributes',
+    'GIT_ATTR_NOSYSTEM=1 git --no-replace-objects -c core.attributesFile=/dev/null',
+    'archive --format=tar',
     '"${TM_SOURCE_SHA}:app"',
     '--label "org.opencontainers.image.revision=${TM_SOURCE_SHA}"',
     '-CommitSha $env:TM_SOURCE_SHA',
     '--platform linux/amd64',
     'requirements-pip-audit-lock.txt',
+    'operations-toolchain.lock.json',
     'tm-step16-container-provenance',
     'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a'
 )) {
@@ -237,6 +240,8 @@ else {
         "`$Service = 'tm-server'",
         "`$BaseUri = 'https://tm-server-production-5573.up.railway.app'",
         '[switch]$InitializeNewKey',
+        'ApprovalReceiptPath',
+        'ApprovalNonce',
         '[switch]$RunGuardSelfTest',
         'expenseLedgerEmpty',
         'expenseKeyInitialized',
@@ -245,13 +250,24 @@ else {
         'Assert-ExpenseKeyFinalProof',
         'Get-CredentialFailureAction',
         'Assert-VerifiedRemoteBackup',
+        'Get-TmVerifiedActionsArtifactEvidence',
+        'Assert-ExpenseKeyApprovalReceipt',
+        'Assert-TmPendingReceiptState',
+        'Resolve-TmVerifiedGit',
+        'Resolve-TmVerifiedGh',
+        'Assert-TmSignedToolMatches',
+        'Production expense configuration refuses -Force and -Confirm:$false.',
         "'TM_EXPENSE_DATA_KEY_V1', '--stdin', '--skip-deploys'",
         'TM_BUILD_COMMIT_SHA',
         'receiptId',
         'expiresAtUtc',
         'remoteBackupDatabaseSha256',
         'sourceDeploymentRequired = $true',
-        '$process.StandardInput.Write($EncodedKey)',
+        'Invoke-TmBoundedProcess',
+        'Get-ExpenseDataKeyFingerprint',
+        'expenseKeyFingerprint',
+        'productionFingerprintComparisonDeferred',
+        'recoveryCredentialVaultRoundTripVerified',
         'recoveryCredentialMatchVerified = $recoveryCredentialMatchVerified',
         'secretValueWrittenToResult = $false'
     )) {
@@ -276,11 +292,19 @@ else {
         "`$repository = 'junhyeonglee1/TM-private'",
         "`$expectedBranch = 'agent/step10-cloud-cutover'",
         'ExpectedHeadSha',
-        "WorkflowName 'STEP 10 Windows build'",
-        "WorkflowName 'STEP 16 security'",
-        'status --porcelain=v1 --untracked-files=all',
+        'Get-TmVerifiedActionsArtifactEvidence',
+        'Assert-TmReleaseEvidenceMatches',
+        'Assert-TmPendingReceiptState',
+        'Expand-TmSafeSourceArchive',
+        'Get-TmDirectoryManifestSha256',
+        'final-live-read-only-preflight',
+        'Production source deployment refuses -Force and -Confirm:$false.',
+        'configurationReceiptStateConsumed',
+        'Assert-TmCanonicalGitState',
         'ConfigurationResultPath',
-        '$git -C $tmRoot archive',
+        'Invoke-TmVerifiedGitText',
+        'Invoke-TmBoundedProcess',
+        'sourceArchiveSha256',
         'Get-DeploymentIdFromUpload',
         'Wait-VerifiedRailwayDeployment',
         'productionImageDigest',
@@ -293,6 +317,110 @@ else {
     }
 }
 
+$expenseReleaseEvidencePath = Join-Path $appRoot 'scripts\expense-release-evidence.ps1'
+if (-not (Test-Path -LiteralPath $expenseReleaseEvidencePath -PathType Leaf)) {
+    $violations.Add('The schema 15 expense release evidence helper is missing.')
+}
+else {
+    $expenseReleaseEvidence = [System.IO.File]::ReadAllText(
+        $expenseReleaseEvidencePath,
+        [System.Text.Encoding]::UTF8
+    )
+    foreach ($required in @(
+        'dpapi-current-user-v1',
+        'DataProtectionScope]::CurrentUser',
+        'Get-TmVerifiedActionsArtifactEvidence',
+        'run_attempt',
+        'artifact.digest',
+        'downloadedZipSha256',
+        'Invoke-TmGhArtifactZipDownload',
+        'StandardOutput.BaseStream.ReadAsync',
+        'Expand-TmVerifiedFlatArtifactZip',
+        '[System.IO.Compression.ZipArchive]',
+        'Read-TmHashManifest',
+        'ARTIFACT-SHA256SUMS.txt',
+        'Assert-TmReceiptIntegrityProof',
+        'Assert-TmPendingReceiptState',
+        "[System.IO.File]::Move(`$statePath, `$consumedPath)",
+        'Resolve-TmVerifiedRailwayCli',
+        'Resolve-TmVerifiedGit',
+        'Resolve-TmVerifiedGh',
+        'Assert-TmSafeGitEnvironment',
+        '--no-replace-objects',
+        'GIT_ATTR_NOSYSTEM',
+        'Assert-TmZipCentralDirectoryBounds',
+        'Invoke-TmBoundedProcess',
+        'Get-ExpenseDataKeyFingerprint',
+        'Export-TmVerifiedFlatPayload',
+        'operations-toolchain.lock.json',
+        '68cc3bcdc591289a5c1d5246b76e83081dbf120fd672fbfa2c013de60a10ec52',
+        'Get-AuthenticodeSignature'
+    )) {
+        if (-not $expenseReleaseEvidence.Contains($required)) {
+            $violations.Add("The expense release evidence guard is missing: $required")
+        }
+    }
+    if ($expenseReleaseEvidence -match '(?i)gh\s+run\s+download' -or
+        $expenseReleaseEvidence -match '(?i)Resolve-Tm(?:Git|Gh)Executable') {
+        $violations.Add('The release helper must use raw artifact ZIP streaming and locked Git/GitHub CLI paths.')
+    }
+}
+
+$buildReleasePath = Join-Path $appRoot 'scripts\build-release.ps1'
+if (-not (Test-Path -LiteralPath $buildReleasePath -PathType Leaf)) {
+    $violations.Add('The reviewed STEP 10 artifact retrieval script is missing.')
+}
+else {
+    $buildRelease = [System.IO.File]::ReadAllText($buildReleasePath, [System.Text.Encoding]::UTF8)
+    foreach ($required in @(
+        'expense-release-evidence.ps1',
+        'Resolve-TmVerifiedGit',
+        'Assert-TmCanonicalGitState',
+        'Resolve-TmVerifiedGh',
+        'Get-TmVerifiedActionsArtifactEvidence',
+        "ExpectedWorkflowPath '.github/workflows/windows-step10-build.yml'",
+        "ArtifactKind step10",
+        "ArtifactName 'tm-step10-windows-x64'",
+        'PayloadDestination',
+        'artifactDigest',
+        'downloadedZipSha256'
+    )) {
+        if (-not $buildRelease.Contains($required)) {
+            $violations.Add("The STEP 10 artifact retrieval guard is missing: $required")
+        }
+    }
+    if ($buildRelease -match '(?i)Get-Command\s+gh' -or
+        $buildRelease -match '(?i)gh\s+run\s+(?:view|download)') {
+        $violations.Add('STEP 10 artifact retrieval must not bypass the locked raw-ZIP evidence helper.')
+    }
+}
+
+$operationsToolchainPath = Join-Path $appRoot 'operations-toolchain.lock.json'
+if (-not (Test-Path -LiteralPath $operationsToolchainPath -PathType Leaf)) {
+    $violations.Add('The reviewed operations toolchain lock is missing.')
+}
+else {
+    try {
+        $operationsToolchain = [System.IO.File]::ReadAllText(
+            $operationsToolchainPath,
+            [System.Text.Encoding]::UTF8
+        ) | ConvertFrom-Json
+        if ([int]$operationsToolchain.schemaVersion -ne 1 -or
+            [string]$operationsToolchain.railwayCli.version -cne '5.28.1' -or
+            [string]$operationsToolchain.railwayCli.sha256 -cne
+                '68cc3bcdc591289a5c1d5246b76e83081dbf120fd672fbfa2c013de60a10ec52' -or
+            [string]$operationsToolchain.git.relativePath -cne
+                '.cache/codex-runtimes/codex-primary-runtime/dependencies/native/git/cmd/git.exe' -or
+            [string]$operationsToolchain.githubCli.absolutePath -cne
+                'C:\Program Files\GitHub CLI\gh.exe') {
+            $violations.Add('The operations toolchain lock does not match the reviewed release policy.')
+        }
+    }
+    catch {
+        $violations.Add('The operations toolchain lock is not valid JSON.')
+    }
+}
+
 $expenseVerifier = [System.IO.File]::ReadAllText(
     (Join-Path $appRoot 'scripts\verify-expense-production.ps1'),
     [System.Text.Encoding]::UTF8
@@ -302,12 +430,37 @@ if ($expenseVerifier -notmatch "BaseUri = 'https://tm-server-production-5573\.up
     $expenseVerifier -notmatch 'ExpectedHeadSha' -or
     $expenseVerifier -notmatch 'deploymentProvenance' -or
     $expenseVerifier -notmatch 'latestPreMigrationCreatedAt' -or
+    $expenseVerifier -notmatch 'latestPreMigrationSha256' -or
+    $expenseVerifier -notmatch 'latestPreMigrationSchemaVersion' -or
+    $expenseVerifier -notmatch 'latestPreMigrationIntegrityCheck' -or
     $expenseVerifier -notmatch 'remoteBackup\.checkedAt' -or
+    $expenseVerifier -notmatch 'expenseKeyInitializationAllowed' -or
+    $expenseVerifier -notmatch 'expenseKeyFingerprint' -or
+    $expenseVerifier -notmatch 'expenseRecoveryKeyMatchVerified' -or
+    $expenseVerifier -notmatch 'Assert-TmReceiptIntegrityProof \$deploymentResult' -or
+    $expenseVerifier -notmatch 'Expand-TmSafeSourceArchive' -or
+    $expenseVerifier -match '\$\(\$Response\.Body\)' -or
     $expenseVerifier -match '(?i)HttpMethod\]::(?:Post|Put|Patch|Delete)' -or
     $expenseVerifier -match '(?i)-Method\s+(?:Post|Put|Patch|Delete)' -or
     $expenseVerifier -match '\[switch\]\$Mutate' -or
     $expenseVerifier -match 'synthetic-recurring-create') {
     $violations.Add('The production expense verifier must remain origin-pinned, backup-aware, and read-only.')
+}
+
+$expenseCryptoSource = [System.IO.File]::ReadAllText(
+    (Join-Path $appRoot 'crates\tm-server\src\expense_crypto.rs'),
+    [System.Text.Encoding]::UTF8
+)
+$serverSource = [System.IO.File]::ReadAllText(
+    (Join-Path $appRoot 'crates\tm-server\src\lib.rs'),
+    [System.Text.Encoding]::UTF8
+)
+if ($expenseCryptoSource -notmatch 'tm-expense:key-fingerprint:v1\\0' -or
+    $expenseCryptoSource -notmatch 'tm_exp_kfp_v1_' -or
+    $serverSource -notmatch 'expense_key_fingerprint' -or
+    $serverSource -notmatch 'latest_pre_migration_sha256' -or
+    $serverSource -notmatch 'latest_pre_migration_schema_semantics_validated') {
+    $violations.Add('The server is missing the reviewed expense-key or pre-migration backup proof fields.')
 }
 
 $windowsBuildWorkflow = [System.IO.File]::ReadAllText(
@@ -316,6 +469,12 @@ $windowsBuildWorkflow = [System.IO.File]::ReadAllText(
 )
 if ($windowsBuildWorkflow -notmatch 'configure-expense-railway\.ps1\s+-RunGuardSelfTest') {
     $violations.Add('The Windows workflow does not execute the production expense key guard self-test.')
+}
+if ($windowsBuildWorkflow -match 'Get-ChildItem[\s\S]{0,200}(?:tm|tm-cli)\.exe' -or
+    $windowsBuildWorkflow -notmatch "x86_64-pc-windows-msvc\\release" -or
+    $windowsBuildWorkflow -notmatch 'TM_DESKTOP_EXE_SHA256' -or
+    $windowsBuildWorkflow -notmatch 'TM_CLI_EXE_SHA256') {
+    $violations.Add('The Windows workflow must bind exact target executables from the current run, not cache mtime discovery.')
 }
 if ($windowsBuildWorkflow -notmatch 'deploy-verified-expense-railway\.ps1[\s\S]{0,300}-RunGuardSelfTest') {
     $violations.Add('The Windows workflow does not execute the verified Railway deployment guard self-test.')

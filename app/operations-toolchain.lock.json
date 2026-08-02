@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "railwayCli": {
+    "packageName": "@railway/cli",
+    "version": "5.28.1",
+    "sha256": "68cc3bcdc591289a5c1d5246b76e83081dbf120fd672fbfa2c013de60a10ec52",
+    "installKind": "official-pnpm-store",
+    "authenticodePolicy": "allow-unsigned-exact-sha256"
+  },
+  "git": {
+    "installKind": "codex-bundled-runtime",
+    "relativePath": ".cache/codex-runtimes/codex-primary-runtime/dependencies/native/git/cmd/git.exe",
+    "authenticodeStatus": "Valid",
+    "signerOrganization": "Johannes Schindelin"
+  },
+  "githubCli": {
+    "installKind": "official-program-files",
+    "absolutePath": "C:\\Program Files\\GitHub CLI\\gh.exe",
+    "authenticodeStatus": "Valid",
+    "signerOrganization": "GitHub, Inc."
+  }
+}

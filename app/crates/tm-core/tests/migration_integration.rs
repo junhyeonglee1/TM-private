@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use rusqlite::{Connection, functions::FunctionFlags, params};
+use sha2::{Digest, Sha256};
 use tempfile::{Builder, TempDir};
 use tm_core::{
     CreateTaskInput, DEFAULT_TM_HOME, Error, Result, TaskPatch, TaskStatus, TmCore, TmHome,
@@ -186,6 +187,38 @@ fn schema_fifteen_migrates_schema_fourteen_without_losing_existing_work() -> Res
     );
     let inspected = TmCore::inspect_migration_database(&database_path)?;
     assert!(manifest.logically_matches(&inspected));
+    Ok(())
+}
+
+#[test]
+fn schema_fourteen_pre_migration_backup_proof_is_complete_and_rejects_tampering() -> Result<()> {
+    let (temporary, _database_path) = schema_fourteen_fixture("tm-schema14-backup-proof-")?;
+    let core = TmCore::open(TmHome::new(temporary.path()))?;
+    let pre_migration = core
+        .list_backups()?
+        .into_iter()
+        .find(|backup| backup.trigger == "pre_migration")
+        .ok_or_else(|| Error::Invariant("schema 14 pre-migration backup missing".to_owned()))?;
+
+    let proof = core.verify_database_backup(&pre_migration.path)?;
+    let backup_bytes = std::fs::read(&pre_migration.path)?;
+    let backup_byte_size = u64::try_from(backup_bytes.len())
+        .map_err(|error| Error::Invariant(format!("backup size conversion failed: {error}")))?;
+    let independent_sha256 = format!("{:x}", Sha256::digest(&backup_bytes));
+    assert_eq!(proof.schema_version, 14);
+    assert_eq!(proof.integrity_check, "ok");
+    assert!(proof.schema_semantics_validated);
+    assert_eq!(proof.byte_size, pre_migration.byte_size);
+    assert_eq!(proof.byte_size, backup_byte_size);
+    assert_eq!(proof.sha256, independent_sha256);
+
+    let connection = Connection::open(&pre_migration.path)?;
+    connection.execute_batch("PRAGMA foreign_keys = OFF; DROP TABLE calendar_events;")?;
+    drop(connection);
+    assert!(matches!(
+        core.verify_database_backup(&pre_migration.path),
+        Err(Error::InvalidBackup(_))
+    ));
     Ok(())
 }
 

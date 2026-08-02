@@ -6,6 +6,8 @@ param(
     [long]$Step10RunId,
     [long]$Step16RunId,
     [string]$ResultPath,
+    [string]$ApprovalReceiptPath,
+    [string]$ApprovalNonce,
     [switch]$InitializeNewKey,
     [switch]$RunGuardSelfTest,
     [switch]$Apply,
@@ -16,6 +18,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 Add-Type -AssemblyName System.Net.Http
+. (Join-Path $PSScriptRoot 'expense-release-evidence.ps1')
 
 # This is intentionally production-only. The read-only proof and Railway target
 # must not be independently overridable because that could authorize a key write
@@ -24,6 +27,14 @@ $ProjectId = '7fcb22b5-db34-4e2b-a12a-cbc60391ff5f'
 $Environment = 'production'
 $Service = 'tm-server'
 $BaseUri = 'https://tm-server-production-5573.up.railway.app'
+$repository = 'junhyeonglee1/TM-private'
+$expectedBranch = 'agent/step10-cloud-cutover'
+$step10WorkflowName = 'STEP 10 Windows build'
+$step10WorkflowPath = '.github/workflows/windows-step10-build.yml'
+$step10ArtifactName = 'tm-step10-windows-x64'
+$step16WorkflowName = 'STEP 16 security'
+$step16WorkflowPath = '.github/workflows/step16-security.yml'
+$step16ArtifactName = 'tm-step16-container-provenance'
 $credentialResource = 'TM Expense Production Data Key'
 $credentialUser = "$ProjectId/$Environment/$Service"
 $tokenCredentialResource = 'TM Cloud Production'
@@ -34,7 +45,11 @@ $tmRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 if ([string]::IsNullOrWhiteSpace($ResultPath)) {
     $ResultPath = Join-Path $tmRoot 'dist\manual-expense-railway-configuration\result.json'
 }
+if ([string]::IsNullOrWhiteSpace($ApprovalReceiptPath)) {
+    $ApprovalReceiptPath = Join-Path $tmRoot 'dist\manual-expense-railway-approval\approval.json'
+}
 $ResultPath = [System.IO.Path]::GetFullPath($ResultPath)
+$ApprovalReceiptPath = [System.IO.Path]::GetFullPath($ApprovalReceiptPath)
 $resultDirectory = Split-Path -Parent $ResultPath
 $base = ([System.Uri]$BaseUri).GetLeftPart([System.UriPartial]::Authority)
 
@@ -71,7 +86,12 @@ function Invoke-TmOperationsStatus {
         if ($cacheControl -notmatch '(^|,|\s)no-store($|,|\s)') {
             throw 'Production operations status did not return Cache-Control: no-store.'
         }
-        $body = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult() | ConvertFrom-Json
+        try {
+            $body = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult() | ConvertFrom-Json
+        }
+        catch {
+            throw 'Production operations status returned invalid JSON.'
+        }
         if ($null -eq $body.data) {
             throw 'Production operations status returned an invalid envelope.'
         }
@@ -128,8 +148,7 @@ function Assert-VerifiedRemoteBackup {
     }
     $backupAlerts = @($Operations.alerts | Where-Object { [string]$_.code -like 'REMOTE_BACKUP_*' })
     if ($backupAlerts.Count -gt 0) {
-        $codes = @($backupAlerts | ForEach-Object { [string]$_.code }) -join ','
-        throw "Production reports a remote backup alert: $codes"
+        throw 'Production reports one or more remote backup alerts.'
     }
 }
 
@@ -180,6 +199,7 @@ function Get-ExpenseKeyProof {
             RemoteBackupDatabaseSha256 = ([string]$Operations.remoteBackup.databaseSha256).ToLowerInvariant()
             RemoteBackupDatabaseByteSize = [uint64]$Operations.remoteBackup.databaseByteSize
             OverallStatus = [string]$Operations.overallStatus
+            ExpenseKeyFingerprint = $null
         }
     }
 
@@ -200,6 +220,9 @@ function Get-ExpenseKeyProof {
             throw "Production schema 15 returned a non-Boolean $property proof."
         }
     }
+    if ($Operations.controls.PSObject.Properties.Name -notcontains 'expenseKeyFingerprint') {
+        throw 'Production schema 15 is missing the expense key fingerprint proof.'
+    }
     $ledgerEmpty = [bool]$Operations.controls.expenseLedgerEmpty
     $keyInitialized = [bool]$Operations.controls.expenseKeyInitialized
     $cryptoReady = [bool]$Operations.controls.expenseCryptoReady
@@ -210,6 +233,16 @@ function Get-ExpenseKeyProof {
     if (($cryptoReady -and -not $keyInitialized) -or
         ($initializationAllowed -and $cryptoReady)) {
         throw 'Production returned an impossible expense crypto readiness state.'
+    }
+    $expenseKeyFingerprint = $Operations.controls.expenseKeyFingerprint
+    if ($cryptoReady) {
+        if ($expenseKeyFingerprint -isnot [string] -or
+            [string]$expenseKeyFingerprint -notmatch '^tm_exp_kfp_v1_[0-9a-f]{64}$') {
+            throw 'Production crypto is ready without a valid expense key fingerprint.'
+        }
+    }
+    elseif ($null -ne $expenseKeyFingerprint) {
+        throw 'Production returned an expense key fingerprint while crypto is not ready.'
     }
     $criticalAlerts = @($Operations.alerts | Where-Object { [string]$_.severity -eq 'critical' })
     if ([string]$Operations.overallStatus -eq 'critical') {
@@ -237,6 +270,11 @@ function Get-ExpenseKeyProof {
         RemoteBackupDatabaseSha256 = ([string]$Operations.remoteBackup.databaseSha256).ToLowerInvariant()
         RemoteBackupDatabaseByteSize = [uint64]$Operations.remoteBackup.databaseByteSize
         OverallStatus = [string]$Operations.overallStatus
+        ExpenseKeyFingerprint = if ($null -eq $expenseKeyFingerprint) {
+            $null
+        } else {
+            [string]$expenseKeyFingerprint
+        }
     }
 }
 
@@ -268,13 +306,27 @@ function Resolve-ExpenseKeyAction {
     return 'write'
 }
 
-function Assert-ExpenseKeyFinalProof {
-    param([Parameter(Mandatory = $true)]$Proof)
+function Assert-ExpenseKeyProofMatches {
+    param(
+        [Parameter(Mandatory = $true)]$Expected,
+        [Parameter(Mandatory = $true)]$Actual
+    )
+    $expectedBinding = ConvertTo-TmCanonicalJsonValue $Expected
+    $actualBinding = ConvertTo-TmCanonicalJsonValue $Actual
+    if (-not [string]::Equals($expectedBinding, $actualBinding, [System.StringComparison]::Ordinal)) {
+        throw 'Production key, incident, or backup proof changed after preflight.'
+    }
+}
 
-    if (-not $Proof.InitializationAllowed -or
-        -not $Proof.LedgerEmpty -or
-        $Proof.KeyInitialized -or
-        $Proof.CryptoReady) {
+function Assert-ExpenseKeyFinalProof {
+    param(
+        [Parameter(Mandatory = $true)]$Expected,
+        [Parameter(Mandatory = $true)]$Actual,
+        [Parameter(Mandatory = $true)][bool]$KeyWriteRequired
+    )
+    Assert-ExpenseKeyProofMatches -Expected $Expected -Actual $Actual
+    if ($KeyWriteRequired -and (-not $Actual.InitializationAllowed -or
+            -not $Actual.LedgerEmpty -or $Actual.KeyInitialized -or $Actual.CryptoReady)) {
         throw 'Production changed after preflight; the expense key was not sent.'
     }
 }
@@ -286,6 +338,162 @@ function Get-CredentialFailureAction {
     )
     if ($CreatedCredential -and -not $KeyWriteAttempted) { return 'remove' }
     return 'retain'
+}
+
+function New-ExpenseKeyApprovalReceipt {
+    param(
+        [Parameter(Mandatory = $true)]$Proof,
+        [Parameter(Mandatory = $true)]$Step10Evidence,
+        [Parameter(Mandatory = $true)]$Step16Evidence,
+        [Parameter(Mandatory = $true)]$GitEvidence,
+        [Parameter(Mandatory = $true)]$GhEvidence,
+        [Parameter(Mandatory = $true)]$RailwayEvidence,
+        [Parameter(Mandatory = $true)][string]$Nonce
+    )
+    $createdAt = [DateTimeOffset]::UtcNow
+    $receipt = [ordered]@{
+        receiptVersion = 1
+        kind = 'tm-expense-key-approval'
+        approvalId = [Guid]::NewGuid().ToString('D')
+        approvalNonce = $Nonce
+        createdAtUtc = $createdAt.ToString('o')
+        expiresAtUtc = $createdAt.AddMinutes(15).ToString('o')
+        repository = $repository
+        branch = $expectedBranch
+        expectedHeadSha = $ExpectedHeadSha
+        step10RunId = $Step10RunId
+        step16RunId = $Step16RunId
+        projectId = $ProjectId
+        environment = $Environment
+        service = $Service
+        expenseAiEnabled = [bool]::Parse($ExpenseAiEnabled)
+        initializeNewKeyApproved = $true
+        productionWritePerformed = $false
+        proofSchemaVersion = [int]$Proof.SchemaVersion
+        proofMode = [string]$Proof.BootstrapMode
+        proofLedgerEmpty = [bool]$Proof.LedgerEmpty
+        proofKeyInitialized = [bool]$Proof.KeyInitialized
+        proofCryptoReady = [bool]$Proof.CryptoReady
+        proofInitializationAllowed = [bool]$Proof.InitializationAllowed
+        proofOverallStatus = [string]$Proof.OverallStatus
+        remoteBackupCheckedAt = [string]$Proof.RemoteBackupCheckedAt
+        remoteBackupSnapshotId = [string]$Proof.RemoteBackupSnapshotId
+        remoteBackupDatabaseSha256 = [string]$Proof.RemoteBackupDatabaseSha256
+        remoteBackupDatabaseByteSize = [uint64]$Proof.RemoteBackupDatabaseByteSize
+        actionsEvidence = [ordered]@{
+            step10 = $Step10Evidence
+            step16 = $Step16Evidence
+        }
+        operatorTools = [ordered]@{
+            git = [ordered]@{
+                version = [string]$GitEvidence.version; sha256 = [string]$GitEvidence.sha256
+                authenticodeStatus = [string]$GitEvidence.authenticodeStatus
+                signerSubject = [string]$GitEvidence.signerSubject; installKind = [string]$GitEvidence.installKind
+            }
+            githubCli = [ordered]@{
+                version = [string]$GhEvidence.version; sha256 = [string]$GhEvidence.sha256
+                authenticodeStatus = [string]$GhEvidence.authenticodeStatus
+                signerSubject = [string]$GhEvidence.signerSubject; installKind = [string]$GhEvidence.installKind
+            }
+        }
+        railwayCli = [ordered]@{
+            version = [string]$RailwayEvidence.version
+            sha256 = [string]$RailwayEvidence.sha256
+            authenticodeStatus = [string]$RailwayEvidence.authenticodeStatus
+            signerThumbprint = [string]$RailwayEvidence.signerThumbprint
+            installKind = [string]$RailwayEvidence.installKind
+        }
+        integrityProofKind = 'dpapi-current-user-v1'
+    }
+    Add-TmReceiptIntegrityProof $receipt
+    return $receipt
+}
+
+function Assert-ExpenseKeyApprovalReceipt {
+    param(
+        [Parameter(Mandatory = $true)]$Receipt,
+        [Parameter(Mandatory = $true)]$Proof,
+        [Parameter(Mandatory = $true)]$Step10Evidence,
+        [Parameter(Mandatory = $true)]$Step16Evidence,
+        [Parameter(Mandatory = $true)]$GitEvidence,
+        [Parameter(Mandatory = $true)]$GhEvidence,
+        [Parameter(Mandatory = $true)]$RailwayEvidence,
+        [Parameter(Mandatory = $true)][string]$Nonce,
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+    Assert-TmReceiptIntegrityProof $Receipt
+    foreach ($name in @(
+        'expenseAiEnabled', 'initializeNewKeyApproved', 'productionWritePerformed',
+        'proofLedgerEmpty', 'proofKeyInitialized', 'proofCryptoReady',
+        'proofInitializationAllowed'
+    )) {
+        if ($Receipt.$name -isnot [bool]) {
+            throw "The key approval receipt has a non-Boolean $name value."
+        }
+    }
+    $approvalId = [Guid]::Empty
+    if ([int]$Receipt.receiptVersion -ne 1 -or
+        [string]$Receipt.kind -cne 'tm-expense-key-approval' -or
+        -not [Guid]::TryParse([string]$Receipt.approvalId, [ref]$approvalId) -or
+        [string]$Receipt.approvalNonce -cne $Nonce -or
+        $Nonce -notmatch '^[A-Za-z0-9_-]{22}$' -or
+        [string]$Receipt.repository -cne $repository -or
+        [string]$Receipt.branch -cne $expectedBranch -or
+        ([string]$Receipt.expectedHeadSha).ToLowerInvariant() -cne $ExpectedHeadSha -or
+        [long]$Receipt.step10RunId -ne $Step10RunId -or
+        [long]$Receipt.step16RunId -ne $Step16RunId -or
+        [string]$Receipt.projectId -cne $ProjectId -or
+        [string]$Receipt.environment -cne $Environment -or
+        [string]$Receipt.service -cne $Service -or
+        $Receipt.expenseAiEnabled -ne [bool]::Parse($ExpenseAiEnabled) -or
+        $Receipt.initializeNewKeyApproved -ne $true -or
+        $Receipt.productionWritePerformed -ne $false) {
+        throw 'The key approval receipt is not bound to this exact production release.'
+    }
+    $createdAt = [DateTimeOffset]::MinValue
+    $expiresAt = [DateTimeOffset]::MinValue
+    if (-not [DateTimeOffset]::TryParse(
+        [string]$Receipt.createdAtUtc,
+        [System.Globalization.CultureInfo]::InvariantCulture,
+        [System.Globalization.DateTimeStyles]::RoundtripKind,
+        [ref]$createdAt
+    ) -or -not [DateTimeOffset]::TryParse(
+        [string]$Receipt.expiresAtUtc,
+        [System.Globalization.CultureInfo]::InvariantCulture,
+        [System.Globalization.DateTimeStyles]::RoundtripKind,
+        [ref]$expiresAt
+    )) {
+        throw 'The key approval receipt timestamps are invalid.'
+    }
+    $now = [DateTimeOffset]::UtcNow
+    $validity = $expiresAt.ToUniversalTime() - $createdAt.ToUniversalTime()
+    if ($validity.TotalMinutes -lt 1 -or $validity.TotalMinutes -gt 15.1 -or
+        $createdAt.ToUniversalTime() -gt $now.AddMinutes(2) -or
+        $expiresAt.ToUniversalTime() -lt $now) {
+        throw 'The key approval receipt expired or exceeds its 15-minute lifetime.'
+    }
+    if ([int]$Receipt.proofSchemaVersion -ne [int]$Proof.SchemaVersion -or
+        [string]$Receipt.proofMode -cne [string]$Proof.BootstrapMode -or
+        $Receipt.proofLedgerEmpty -ne [bool]$Proof.LedgerEmpty -or
+        $Receipt.proofKeyInitialized -ne [bool]$Proof.KeyInitialized -or
+        $Receipt.proofCryptoReady -ne [bool]$Proof.CryptoReady -or
+        $Receipt.proofInitializationAllowed -ne [bool]$Proof.InitializationAllowed -or
+        [string]$Receipt.proofOverallStatus -cne [string]$Proof.OverallStatus -or
+        [string]$Receipt.remoteBackupCheckedAt -cne [string]$Proof.RemoteBackupCheckedAt -or
+        [string]$Receipt.remoteBackupSnapshotId -cne [string]$Proof.RemoteBackupSnapshotId -or
+        ([string]$Receipt.remoteBackupDatabaseSha256).ToLowerInvariant() -cne
+            ([string]$Proof.RemoteBackupDatabaseSha256).ToLowerInvariant() -or
+        [uint64]$Receipt.remoteBackupDatabaseByteSize -ne [uint64]$Proof.RemoteBackupDatabaseByteSize) {
+        throw 'Production key or backup proof changed after dry-run approval.'
+    }
+    Assert-TmReleaseEvidenceMatches -Expected $Receipt.actionsEvidence.step10 -Actual $Step10Evidence -Name 'STEP 10'
+    Assert-TmReleaseEvidenceMatches -Expected $Receipt.actionsEvidence.step16 -Actual $Step16Evidence -Name 'STEP 16'
+    Assert-TmSignedToolMatches -Expected $Receipt.operatorTools.git -Actual $GitEvidence -Name 'Git'
+    Assert-TmSignedToolMatches -Expected $Receipt.operatorTools.githubCli -Actual $GhEvidence -Name 'GitHub CLI'
+    Assert-TmRailwayCliMatches -Expected $Receipt.railwayCli -Actual $RailwayEvidence
+    $null = Assert-TmPendingReceiptState -StateKind approval `
+        -ReceiptId ([string]$Receipt.approvalId) -ReceiptPath $Path
+    return $Receipt
 }
 
 function Assert-GuardThrows {
@@ -311,7 +519,7 @@ function Invoke-ExpenseKeyGuardSelfTest {
 {"overallStatus":"healthy","alerts":[],"objectives":{"backupFreshnessTargetHours":24},"database":{"ok":true,"schemaVersion":14},"controls":{"incidentMode":"normal"},"remoteBackup":{"status":"succeeded","checkedAt":"","snapshotId":"snapshot-14","databaseSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","databaseByteSize":1,"schemaVersion":14,"integrityCheck":"ok","migrationLedgerComplete":true,"requiredTablesComplete":true,"schemaSemanticsValidated":true}}
 '@
     $schema15Json = @'
-{"overallStatus":"critical","alerts":[{"severity":"critical","code":"EXPENSE_CRYPTO_NOT_READY"}],"objectives":{"backupFreshnessTargetHours":24},"database":{"ok":true,"schemaVersion":15},"controls":{"incidentMode":"normal","expenseLedgerEmpty":true,"expenseKeyInitialized":false,"expenseKeyInitializationAllowed":true,"expenseCryptoReady":false},"remoteBackup":{"status":"succeeded","checkedAt":"","snapshotId":"snapshot-15","databaseSha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","databaseByteSize":1,"schemaVersion":15,"integrityCheck":"ok","migrationLedgerComplete":true,"requiredTablesComplete":true,"schemaSemanticsValidated":true}}
+{"overallStatus":"critical","alerts":[{"severity":"critical","code":"EXPENSE_CRYPTO_NOT_READY"}],"objectives":{"backupFreshnessTargetHours":24},"database":{"ok":true,"schemaVersion":15},"controls":{"incidentMode":"normal","expenseLedgerEmpty":true,"expenseKeyInitialized":false,"expenseKeyInitializationAllowed":true,"expenseCryptoReady":false,"expenseKeyFingerprint":null},"remoteBackup":{"status":"succeeded","checkedAt":"","snapshotId":"snapshot-15","databaseSha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","databaseByteSize":1,"schemaVersion":15,"integrityCheck":"ok","migrationLedgerComplete":true,"requiredTablesComplete":true,"schemaSemanticsValidated":true}}
 '@
     $schema14 = $schema14Json | ConvertFrom-Json
     $schema15 = $schema15Json | ConvertFrom-Json
@@ -336,6 +544,19 @@ function Invoke-ExpenseKeyGuardSelfTest {
     $impossible.remoteBackup.checkedAt = $now
     $impossible.controls.expenseCryptoReady = $true
     Assert-GuardThrows { Get-ExpenseKeyProof $impossible } 'impossible expense crypto readiness state'
+    $fingerprintWhileUnavailable = $schema15Json | ConvertFrom-Json
+    $fingerprintWhileUnavailable.remoteBackup.checkedAt = $now
+    $fingerprintWhileUnavailable.controls.expenseKeyFingerprint = 'tm_exp_kfp_v1_' + ('a' * 64)
+    Assert-GuardThrows {
+        Get-ExpenseKeyProof $fingerprintWhileUnavailable
+    } 'fingerprint while crypto is not ready'
+
+    $testKeyPayload = [Convert]::ToBase64String([byte[]](1..32 | ForEach-Object { 0x11 }))
+    $testKey = 'tm_exp_v1_' + $testKeyPayload.TrimEnd('=').Replace('+', '-').Replace('/', '_')
+    if ((Get-ExpenseDataKeyFingerprint -EncodedKey $testKey) -cne
+        'tm_exp_kfp_v1_acde74882428fa9681f2c3dae8bd3d59b729a84b8e79f6911af04117ab2644dd') {
+        throw 'Guard self-test did not reproduce the expense key fingerprint vector.'
+    }
 
     Assert-GuardThrows {
         Resolve-ExpenseKeyAction $proof15 $false $false
@@ -366,7 +587,7 @@ function Invoke-ExpenseKeyGuardSelfTest {
         Resolve-ExpenseKeyAction $unavailable $false $true
     } 'separate recovery procedure'
     Assert-GuardThrows {
-        Assert-ExpenseKeyFinalProof $healthy
+        Assert-ExpenseKeyFinalProof -Expected $proof15 -Actual $healthy -KeyWriteRequired $true
     } 'changed after preflight'
 
     if ((Get-CredentialFailureAction $true $false) -ne 'remove' -or
@@ -398,43 +619,22 @@ function Set-RailwayExpenseKey {
         [Parameter(Mandatory = $true)][string]$EncodedKey
     )
 
-    $arguments = @(
+    $arguments = [string[]]@(
         'variable', 'set', 'TM_EXPENSE_DATA_KEY_V1', '--stdin', '--skip-deploys',
         '--project', $ProjectId,
         '--environment', $Environment,
         '--service', $Service
     )
-    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
-    $startInfo.FileName = $RailwayPath
-    $startInfo.Arguments = ($arguments -join ' ')
-    $startInfo.UseShellExecute = $false
-    $startInfo.CreateNoWindow = $true
-    $startInfo.RedirectStandardInput = $true
-    $startInfo.RedirectStandardOutput = $true
-    $startInfo.RedirectStandardError = $true
-    $process = [System.Diagnostics.Process]::new()
-    try {
-        $process.StartInfo = $startInfo
-        if (-not $process.Start()) {
-            throw 'Railway CLI could not be started.'
-        }
-        $process.StandardInput.Write($EncodedKey)
-        $process.StandardInput.Close()
-        $null = $process.StandardOutput.ReadToEnd()
-        $null = $process.StandardError.ReadToEnd()
-        $process.WaitForExit()
-        if ($process.ExitCode -ne 0) {
-            throw "Railway rejected the sealed expense key (exit $($process.ExitCode))."
-        }
-    }
-    finally {
-        $process.Dispose()
-        $startInfo = $null
+    $result = Invoke-TmBoundedProcess -FilePath $RailwayPath -Arguments $arguments `
+        -StandardInput $EncodedKey -TimeoutSeconds 120 -DiscardOutput
+    if ($result.ExitCode -ne 0) {
+        throw 'Railway rejected the sealed expense key.'
     }
 }
 
 if ($RunGuardSelfTest) {
     Invoke-ExpenseKeyGuardSelfTest
+    Invoke-TmReleaseEvidenceGuardSelfTest
     exit 0
 }
 
@@ -445,16 +645,17 @@ if ($ExpectedHeadSha -notmatch '^[0-9a-fA-F]{40}$' -or
 }
 $ExpectedHeadSha = $ExpectedHeadSha.ToLowerInvariant()
 
-$railway = Get-ChildItem -LiteralPath (Join-Path $env:LOCALAPPDATA 'pnpm\store\v11\links\@railway\cli') `
-    -Filter railway.exe -File -Recurse |
-    Sort-Object FullName -Descending |
-    Select-Object -First 1 -ExpandProperty FullName
-if ([string]::IsNullOrWhiteSpace($railway) -or -not (Test-Path -LiteralPath $railway -PathType Leaf)) {
-    throw 'Railway CLI was not found.'
-}
-
 $summary = "environment=$Environment service=$Service expenseAiEnabled=$ExpenseAiEnabled head=$ExpectedHeadSha"
 
+$git = $null
+$gh = $null
+$gitToolEvidence = $null
+$ghToolEvidence = $null
+$gitState = $null
+$step10Evidence = $null
+$step16Evidence = $null
+$railwayEvidence = $null
+$railway = $null
 $vault = $null
 $tokenCredential = $null
 $expenseCredential = $null
@@ -471,6 +672,14 @@ $keyWriteAttempted = $false
 $keyWriteConfirmed = $false
 $keyWriteAmbiguous = $false
 $recoveryCredentialMatchVerified = $false
+$recoveryCredentialVaultRoundTripVerified = $false
+$productionFingerprintComparisonDeferred = $false
+$localKeyFingerprint = $null
+$approvalReceipt = $null
+$approvalReceiptSha256 = $null
+$approvalStateConsumed = $false
+$featureControlAttempted = $false
+$featureControlAmbiguous = $false
 $stage = 'exclusive-lock'
 $proof = $null
 $keyAction = $null
@@ -488,6 +697,26 @@ try {
     if (-not $mutexAcquired) {
         throw 'Another production expense key configuration is already running on this PC.'
     }
+
+    $stage = 'canonical-release-evidence'
+    $gitToolEvidence = Resolve-TmVerifiedGit
+    $git = [string]$gitToolEvidence.path
+    $gitState = Assert-TmCanonicalGitState -GitPath $git -RepositoryRoot $tmRoot `
+        -Repository $repository -Branch $expectedBranch -ExpectedHeadSha $ExpectedHeadSha
+    $ghToolEvidence = Resolve-TmVerifiedGh
+    $gh = [string]$ghToolEvidence.path
+    $step10Evidence = Get-TmVerifiedActionsArtifactEvidence -GhPath $gh `
+        -Repository $repository -RunId $Step10RunId -ExpectedHeadSha $ExpectedHeadSha `
+        -ExpectedBranch $expectedBranch -ExpectedWorkflowName $step10WorkflowName `
+        -ExpectedWorkflowPath $step10WorkflowPath -ArtifactKind step10 `
+        -ArtifactName $step10ArtifactName
+    $step16Evidence = Get-TmVerifiedActionsArtifactEvidence -GhPath $gh `
+        -Repository $repository -RunId $Step16RunId -ExpectedHeadSha $ExpectedHeadSha `
+        -ExpectedBranch $expectedBranch -ExpectedWorkflowName $step16WorkflowName `
+        -ExpectedWorkflowPath $step16WorkflowPath -ArtifactKind step16 `
+        -ArtifactName $step16ArtifactName
+    $railwayEvidence = Resolve-TmVerifiedRailwayCli
+    $railway = [string]$railwayEvidence.path
 
     $stage = 'credential-locker'
     $vault = [Windows.Security.Credentials.PasswordVault,Windows.Security.Credentials,ContentType=WindowsRuntime]::new()
@@ -510,6 +739,10 @@ try {
     if ($credentialExists -and $encodedKey -notmatch '^tm_exp_v1_[A-Za-z0-9_-]{43}$') {
         throw 'The saved expense encryption key has an invalid format. It was not replaced.'
     }
+    if ($credentialExists) {
+        $localKeyFingerprint = Get-ExpenseDataKeyFingerprint -EncodedKey $encodedKey
+        $recoveryCredentialVaultRoundTripVerified = $true
+    }
 
     $stage = 'read-only-preflight'
     $proof = Get-ExpenseKeyProof (Invoke-TmOperationsStatus -Origin $base -Token $token)
@@ -518,22 +751,63 @@ try {
         -InitializeRequested ([bool]$InitializeNewKey) `
         -CredentialExists $credentialExists
     $keyWriteRequired = $keyAction -eq 'write'
+    $productionFingerprintComparisonDeferred = $keyWriteRequired
+    if (-not $keyWriteRequired) {
+        if ([string]$proof.ExpenseKeyFingerprint -cne $localKeyFingerprint) {
+            throw 'The local recovery credential does not match the active production expense key.'
+        }
+        $recoveryCredentialMatchVerified = $true
+    }
 
     $approvalSummary = "schema=$($proof.SchemaVersion) backup=$($proof.RemoteBackupSnapshotId) keyAction=$keyAction expenseAiEnabled=$ExpenseAiEnabled head=$ExpectedHeadSha"
     if (-not $Apply) {
         Write-Host "Dry run passed: $approvalSummary" -ForegroundColor Green
         Write-Host 'No Railway variable was changed and no deployment was triggered.'
-        Write-Host 'Re-run with -Apply after reviewing this live read-only proof.'
+        if ($keyWriteRequired) {
+            $stage = 'approval-receipt'
+            $nonce = New-TmApprovalNonce
+            $approvalReceipt = New-ExpenseKeyApprovalReceipt -Proof $proof `
+                -Step10Evidence $step10Evidence -Step16Evidence $step16Evidence `
+                -GitEvidence $gitToolEvidence -GhEvidence $ghToolEvidence `
+                -RailwayEvidence $railwayEvidence -Nonce $nonce
+            Write-TmJsonNoBom -Value $approvalReceipt -Path $ApprovalReceiptPath
+            $approvalState = New-TmPendingReceiptState -StateKind approval `
+                -ReceiptId ([string]$approvalReceipt.approvalId) `
+                -ReceiptPath $ApprovalReceiptPath `
+                -ExpiresAtUtc ([string]$approvalReceipt.expiresAtUtc)
+            Write-Host "Approval receipt: $ApprovalReceiptPath"
+            Write-Host "Approval nonce: $nonce"
+            Write-Host 'This receipt expires in 15 minutes and can be consumed only once.'
+            Write-Host 'After separate approval, re-run with -Apply, -InitializeNewKey, -ApprovalReceiptPath, and -ApprovalNonce.'
+        }
+        else {
+            Write-Host 'Re-run with -Apply after reviewing this live read-only proof.'
+        }
         return
     }
-    if ($Force) { $ConfirmPreference = 'None' }
+    $confirmBypassRequested = $PSBoundParameters.ContainsKey('Confirm') -and
+        -not [bool]$PSBoundParameters['Confirm']
+    if ($Force -or $confirmBypassRequested) {
+        throw 'Production expense configuration refuses -Force and -Confirm:$false.'
+    }
+    if ($keyWriteRequired) {
+        if ([string]::IsNullOrWhiteSpace($ApprovalNonce)) {
+            throw 'First-time expense key initialization requires the explicit dry-run approval nonce.'
+        }
+        $stage = 'approval-receipt-validation'
+        $approvalReceipt = Read-TmBoundedJsonFile -Path $ApprovalReceiptPath -MaximumBytes 1048576
+        $approvalReceipt = Assert-ExpenseKeyApprovalReceipt -Receipt $approvalReceipt `
+            -Proof $proof -Step10Evidence $step10Evidence -Step16Evidence $step16Evidence `
+            -GitEvidence $gitToolEvidence -GhEvidence $ghToolEvidence `
+            -RailwayEvidence $railwayEvidence -Nonce $ApprovalNonce -Path $ApprovalReceiptPath
+        $approvalReceiptSha256 = (Get-FileHash -LiteralPath $ApprovalReceiptPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
     if (-not $PSCmdlet.ShouldProcess(
         'Railway production/tm-server',
         "Configure schema 15 expense controls after live proof: $approvalSummary"
     )) {
         return
     }
-
     if ($keyWriteRequired) {
         if (-not $credentialExists) {
             $encodedKey = New-ExpenseDataKey
@@ -545,22 +819,41 @@ try {
             $vault.Add($expenseCredential)
             $createdCredential = $true
             $credentialExists = $true
+            $localKeyFingerprint = Get-ExpenseDataKeyFingerprint -EncodedKey $encodedKey
         }
         $verifiedCredential = $vault.Retrieve($credentialResource, $credentialUser)
         $verifiedCredential.RetrievePassword()
         if ([string]$verifiedCredential.Password -cne $encodedKey) {
             throw 'Windows Credential Locker verification failed.'
         }
-        $recoveryCredentialMatchVerified = $true
+        if ((Get-ExpenseDataKeyFingerprint -EncodedKey ([string]$verifiedCredential.Password)) -cne
+            $localKeyFingerprint) {
+            throw 'Windows Credential Locker fingerprint verification failed.'
+        }
+        $recoveryCredentialVaultRoundTripVerified = $true
     }
 
-    if ($keyWriteRequired) {
-        $stage = 'read-only-final-proof'
-        $finalProof = Get-ExpenseKeyProof (Invoke-TmOperationsStatus -Origin $base -Token $token)
-        Assert-ExpenseKeyFinalProof $finalProof
+    $stage = 'read-only-final-proof'
+    $finalProof = Get-ExpenseKeyProof (Invoke-TmOperationsStatus -Origin $base -Token $token)
+    Assert-ExpenseKeyFinalProof -Expected $proof -Actual $finalProof `
+        -KeyWriteRequired $keyWriteRequired
+    $finalRailwayEvidence = Resolve-TmVerifiedRailwayCli
+    Assert-TmRailwayCliMatches -Expected $railwayEvidence -Actual $finalRailwayEvidence
+    $railway = [string]$finalRailwayEvidence.path
 
-        $stage = 'sealed-expense-key'
+    if ($keyWriteRequired) {
+        $approvalReceipt = Assert-ExpenseKeyApprovalReceipt -Receipt $approvalReceipt `
+            -Proof $finalProof -Step10Evidence $step10Evidence -Step16Evidence $step16Evidence `
+            -GitEvidence $gitToolEvidence -GhEvidence $ghToolEvidence `
+            -RailwayEvidence $finalRailwayEvidence -Nonce $ApprovalNonce -Path $ApprovalReceiptPath
+
+        $stage = 'approval-receipt-consumption'
+        $null = Assert-TmPendingReceiptState -StateKind approval `
+            -ReceiptId ([string]$approvalReceipt.approvalId) `
+            -ReceiptPath $ApprovalReceiptPath -Consume
+        $approvalStateConsumed = $true
         $keyWriteAttempted = $true
+        $stage = 'sealed-expense-key'
         try {
             Set-RailwayExpenseKey -RailwayPath $railway -EncodedKey $encodedKey
             $keyWriteConfirmed = $true
@@ -572,26 +865,36 @@ try {
     }
 
     $stage = 'feature-control'
-    & $railway variable set `
-        "TM_EXPENSE_AI_ENABLED=$ExpenseAiEnabled" `
-        "TM_BUILD_COMMIT_SHA=$ExpectedHeadSha" `
-        --skip-deploys `
-        --project $ProjectId `
-        --environment $Environment `
-        --service $Service | Out-Null
-    if ($LASTEXITCODE -ne 0) {
+    $featureRailwayEvidence = Resolve-TmVerifiedRailwayCli
+    Assert-TmRailwayCliMatches -Expected $railwayEvidence -Actual $featureRailwayEvidence
+    $railway = [string]$featureRailwayEvidence.path
+    $featureControlAttempted = $true
+    $featureControlAmbiguous = $true
+    $featureResult = Invoke-TmBoundedProcess -FilePath $railway `
+        -Arguments ([string[]]@(
+            'variable', 'set', "TM_EXPENSE_AI_ENABLED=$ExpenseAiEnabled",
+            "TM_BUILD_COMMIT_SHA=$ExpectedHeadSha",
+            "TM_EXPENSE_EXPECTED_KEY_FINGERPRINT=$localKeyFingerprint",
+            'TM_EXPENSE_ROLLOUT_MODE=locked', '--skip-deploys',
+            '--project', $ProjectId, '--environment', $Environment, '--service', $Service
+        )) -TimeoutSeconds 120 -DiscardOutput
+    if ($featureResult.ExitCode -ne 0) {
         throw 'Railway rejected the expense feature control or deployment.'
     }
+    $featureControlAmbiguous = $false
 
     $stage = 'complete'
     $configuredAt = [DateTimeOffset]::UtcNow
     $receiptId = [Guid]::NewGuid().ToString('D')
-    [ordered]@{
+    $configurationReceipt = [ordered]@{
         success = $true
-        receiptVersion = 1
+        receiptVersion = 4
+        kind = 'tm-expense-production-configuration'
         receiptId = $receiptId
         configuredAtUtc = $configuredAt.ToString('o')
-        expiresAtUtc = $configuredAt.AddMinutes(30).ToString('o')
+        expiresAtUtc = $configuredAt.AddMinutes(120).ToString('o')
+        repository = $repository
+        branch = $expectedBranch
         expectedHeadSha = $ExpectedHeadSha
         step10RunId = $Step10RunId
         step16RunId = $Step16RunId
@@ -610,26 +913,80 @@ try {
         remoteBackupDatabaseSha256 = [string]$proof.RemoteBackupDatabaseSha256
         remoteBackupDatabaseByteSize = [uint64]$proof.RemoteBackupDatabaseByteSize
         variableNames = if ($keyWriteRequired) {
-            @('TM_EXPENSE_DATA_KEY_V1', 'TM_EXPENSE_AI_ENABLED', 'TM_BUILD_COMMIT_SHA')
+            @(
+                'TM_EXPENSE_DATA_KEY_V1',
+                'TM_EXPENSE_AI_ENABLED',
+                'TM_BUILD_COMMIT_SHA',
+                'TM_EXPENSE_EXPECTED_KEY_FINGERPRINT',
+                'TM_EXPENSE_ROLLOUT_MODE'
+            )
         } else {
-            @('TM_EXPENSE_AI_ENABLED', 'TM_BUILD_COMMIT_SHA')
+            @(
+                'TM_EXPENSE_AI_ENABLED',
+                'TM_BUILD_COMMIT_SHA',
+                'TM_EXPENSE_EXPECTED_KEY_FINGERPRINT',
+                'TM_EXPENSE_ROLLOUT_MODE'
+            )
         }
         expenseAiEnabled = [bool]::Parse($ExpenseAiEnabled)
+        expenseExpectedKeyFingerprint = $localKeyFingerprint
+        expenseRolloutMode = 'locked'
         recoveryCredentialResource = $credentialResource
         recoveryCredentialUser = $credentialUser
         recoveryCredentialCreated = $createdCredential
         recoveryCredentialPresent = $credentialExists
         recoveryCredentialMatchVerified = $recoveryCredentialMatchVerified
+        recoveryCredentialVaultRoundTripVerified = $recoveryCredentialVaultRoundTripVerified
+        expenseKeyFingerprint = $localKeyFingerprint
+        productionFingerprintComparisonDeferred = $productionFingerprintComparisonDeferred
         recoveryCredentialSubmittedToRailway = $keyWriteConfirmed
         keyWriteRequired = $keyWriteRequired
         keyWriteAttempted = $keyWriteAttempted
         keyWriteConfirmed = $keyWriteConfirmed
         keyWriteAmbiguous = $false
+        keyApprovalId = if ($keyWriteRequired) { [string]$approvalReceipt.approvalId } else { $null }
+        keyApprovalReceiptSha256 = if ($keyWriteRequired) { $approvalReceiptSha256 } else { $null }
+        keyApprovalStateConsumed = $approvalStateConsumed
+        actionsEvidence = [ordered]@{
+            step10 = $step10Evidence
+            step16 = $step16Evidence
+        }
+        operatorTools = [ordered]@{
+            git = [ordered]@{
+                version = [string]$gitToolEvidence.version
+                sha256 = [string]$gitToolEvidence.sha256
+                authenticodeStatus = [string]$gitToolEvidence.authenticodeStatus
+                signerSubject = [string]$gitToolEvidence.signerSubject
+                installKind = [string]$gitToolEvidence.installKind
+            }
+            githubCli = [ordered]@{
+                version = [string]$ghToolEvidence.version
+                sha256 = [string]$ghToolEvidence.sha256
+                authenticodeStatus = [string]$ghToolEvidence.authenticodeStatus
+                signerSubject = [string]$ghToolEvidence.signerSubject
+                installKind = [string]$ghToolEvidence.installKind
+            }
+        }
+        railwayCli = [ordered]@{
+            version = [string]$featureRailwayEvidence.version
+            sha256 = [string]$featureRailwayEvidence.sha256
+            authenticodeStatus = [string]$featureRailwayEvidence.authenticodeStatus
+            signerThumbprint = [string]$featureRailwayEvidence.signerThumbprint
+            installKind = [string]$featureRailwayEvidence.installKind
+        }
         abandonedMutexRecovered = $abandonedMutexRecovered
         secretValueWrittenToResult = $false
         deploymentTriggered = $false
         sourceDeploymentRequired = $true
-    } | ConvertTo-Json | Set-Content -LiteralPath $ResultPath -Encoding utf8
+        featureControlAttempted = $featureControlAttempted
+        featureControlAmbiguous = $false
+        singleUseStateRequired = $true
+        integrityProofKind = 'dpapi-current-user-v1'
+    }
+    Add-TmReceiptIntegrityProof $configurationReceipt
+    Write-TmJsonNoBom -Value $configurationReceipt -Path $ResultPath
+    $null = New-TmPendingReceiptState -StateKind configuration -ReceiptId $receiptId `
+        -ReceiptPath $ResultPath -ExpiresAtUtc ([string]$configurationReceipt.expiresAtUtc)
 
     Write-Host ''
     Write-Host 'TM schema 15 expense controls were configured.' -ForegroundColor Green
@@ -638,7 +995,7 @@ try {
     }
     else {
         Write-Host 'The healthy production expense key was not rewritten.'
-        Write-Host 'The stored local recovery credential was not cryptographically matched to production by this run.' -ForegroundColor Yellow
+        Write-Host 'The stored local recovery credential was cryptographically matched to production.'
     }
     Write-Host 'No deployment was triggered. Deploy the exact Actions-verified source commit, then verify readiness and backup health.'
 }
@@ -664,6 +1021,8 @@ catch {
         keyWriteAttempted = $keyWriteAttempted
         keyWriteConfirmed = $keyWriteConfirmed
         keyWriteAmbiguous = $keyWriteAmbiguous
+        featureControlAttempted = $featureControlAttempted
+        featureControlAmbiguous = $featureControlAmbiguous
         secretValueWrittenToResult = $false
     } | ConvertTo-Json | Set-Content -LiteralPath $ResultPath -Encoding utf8
     throw "Expense Railway configuration failed at ${stage}: $failureMessage"
@@ -672,6 +1031,7 @@ finally {
     if ($mutexAcquired -and $null -ne $mutex) { $mutex.ReleaseMutex() }
     if ($null -ne $mutex) { $mutex.Dispose() }
     $encodedKey = $null
+    $localKeyFingerprint = $null
     $token = $null
     $expenseCredential = $null
     $verifiedCredential = $null
