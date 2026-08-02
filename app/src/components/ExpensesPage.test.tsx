@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { App } from "../App";
 import { createApi } from "../lib/api";
 import type { CommandTransport } from "../lib/api";
+import { safeErrorText } from "../lib/error-text";
 import { createMemoryTransport } from "../lib/mock-transport";
 import type { ExpenseReview, ExpenseTransaction, ResolveExpenseReviewInput } from "../types";
 
@@ -37,6 +38,15 @@ const transportWithReview = (
 });
 
 describe("지출·정기지출 UI", () => {
+  it("Tauri 문자열 오류의 실제 안전 메시지를 보존한다", () => {
+    expect(safeErrorText("지원하는 거래내역 형식을 찾지 못했습니다.", "요청 실패")).toBe(
+      "지원하는 거래내역 형식을 찾지 못했습니다.",
+    );
+    expect(safeErrorText(null, "요청을 처리하지 못했습니다.")).toBe(
+      "요청을 처리하지 못했습니다.",
+    );
+  });
+
   it("Today에서 날짜만으로 오늘·7일·기한 경과를 분류한다", async () => {
     renderApp();
 

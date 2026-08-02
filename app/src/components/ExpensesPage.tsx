@@ -3,6 +3,7 @@ import type { FormEvent } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 
 import type { TmApi } from "../lib/api";
+import { safeErrorText } from "../lib/error-text";
 import type {
   CreateRecurringExpenseInput,
   EditableExpenseEventKind,
@@ -171,7 +172,7 @@ const monthTitle = (month: string): string => {
 const basename = (path: string): string => path.split(/[\\/]/).at(-1) ?? "선택한 파일";
 
 const errorText = (error: unknown): string =>
-  error instanceof Error ? error.message : "요청을 처리하지 못했습니다.";
+  safeErrorText(error, "요청을 처리하지 못했습니다.");
 
 export function ExpensesPage({
   api,

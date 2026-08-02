@@ -2348,20 +2348,20 @@ fn parse_kb_account(range: &Range<Data>) -> Result<(Vec<ParsedExpenseRow>, usize
 }
 
 fn parse_kb_card(range: &Range<Data>) -> Result<(Vec<ParsedExpenseRow>, usize), String> {
-    let header = find_compound_header_row(range, &["이용일자", "가맹점", "이용금액"])?;
+    let layout = find_kb_card_layout(range)?;
     let mut rows = Vec::new();
     let mut rejected = 0;
-    for (offset, row) in range.rows().enumerate().skip(header + 1) {
+    for (offset, row) in range.rows().enumerate().skip(layout.last_header_row + 1) {
         if row.iter().all(is_empty) {
             continue;
         }
-        let Some(occurred_at) = row.first().and_then(parse_datetime) else {
+        let Some(occurred_at) = row.get(layout.date).and_then(parse_datetime) else {
             if !is_statement_footer(row) {
                 rejected += 1;
             }
             continue;
         };
-        let Some(signed_amount) = row.get(4).and_then(parse_amount) else {
+        let Some(signed_amount) = row.get(layout.amount).and_then(parse_amount) else {
             rejected += 1;
             continue;
         };
@@ -2369,12 +2369,18 @@ fn parse_kb_card(range: &Range<Data>) -> Result<(Vec<ParsedExpenseRow>, usize), 
             rejected += 1;
             continue;
         };
-        let card_fingerprint_source = row
-            .get(1)
+        let card_fingerprint_source = layout
+            .card
+            .and_then(|column| row.get(column))
             .map(cell_text)
             .filter(|value| !value.trim().is_empty());
-        let usage_type = bounded_optional(row.get(2).map(cell_text));
-        let merchant = bounded_optional(row.get(3).map(cell_text));
+        let usage_type = bounded_optional(
+            layout
+                .usage_type
+                .and_then(|column| row.get(column))
+                .map(cell_text),
+        );
+        let merchant = bounded_optional(row.get(layout.merchant).map(cell_text));
         let payment_method_fingerprint = card_fingerprint_source
             .as_deref()
             .map(|value| hex_sha256(format!("tm-expense:payment-method:v1:{value}").as_bytes()));
@@ -2403,6 +2409,110 @@ fn parse_kb_card(range: &Range<Data>) -> Result<(Vec<ParsedExpenseRow>, usize), 
         ));
     }
     Ok((rows, rejected))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KbCardLayout {
+    last_header_row: usize,
+    date: usize,
+    card: Option<usize>,
+    usage_type: Option<usize>,
+    merchant: usize,
+    amount: usize,
+}
+
+fn find_kb_card_layout(range: &Range<Data>) -> Result<KbCardLayout, String> {
+    let rows = range.rows().take(20).collect::<Vec<_>>();
+    for first_row in 0..rows.len() {
+        for depth in [2_usize, 1_usize] {
+            let Some(header_rows) = rows.get(first_row..first_row.saturating_add(depth)) else {
+                continue;
+            };
+            if depth == 2 && !is_kb_card_leaf_header_row(header_rows[1]) {
+                continue;
+            }
+            let Some(date) = find_preferred_header_column(header_rows, &["이용일자"]) else {
+                continue;
+            };
+            let Some(merchant) = find_preferred_header_column(header_rows, &["가맹점"]) else {
+                continue;
+            };
+            let Some(amount) =
+                find_preferred_header_column(header_rows, &["이용금액", "이용 금액", "금액"])
+            else {
+                continue;
+            };
+            if date == merchant || date == amount || merchant == amount {
+                continue;
+            }
+            let last_header_row = first_row + depth - 1;
+            if !range.rows().skip(last_header_row + 1).any(|row| {
+                row.get(date).and_then(parse_datetime).is_some()
+                    && row
+                        .get(amount)
+                        .and_then(parse_amount)
+                        .and_then(absolute_nonzero_amount)
+                        .is_some()
+            }) {
+                continue;
+            }
+            return Ok(KbCardLayout {
+                last_header_row,
+                date,
+                card: find_preferred_header_column(
+                    header_rows,
+                    &["카드번호", "카드 번호", "이용카드"],
+                )
+                .filter(|column| ![date, merchant, amount].contains(column)),
+                usage_type: find_preferred_header_column(header_rows, &["이용구분", "이용 구분"])
+                    .filter(|column| ![date, merchant, amount].contains(column)),
+                merchant,
+                amount,
+            });
+        }
+    }
+    Err("카드 이용내역의 헤더를 찾지 못했습니다.".to_owned())
+}
+
+fn is_kb_card_leaf_header_row(row: &[Data]) -> bool {
+    const LEAF_LABELS: &[&str] = &[
+        "이용일자",
+        "가맹점",
+        "이용금액",
+        "이용 금액",
+        "금액",
+        "카드번호",
+        "카드 번호",
+        "이용카드",
+        "이용구분",
+        "이용 구분",
+        "승인번호",
+        "승인 번호",
+    ];
+    row.iter()
+        .filter(|cell| {
+            let value = cell_text(cell);
+            LEAF_LABELS.contains(&value.trim())
+        })
+        .take(2)
+        .count()
+        >= 2
+}
+
+fn find_preferred_header_column(rows: &[&[Data]], aliases: &[&str]) -> Option<usize> {
+    for row in rows.iter().rev() {
+        for alias in aliases {
+            if let Some(column) = row.iter().position(|cell| cell_text(cell).trim() == *alias) {
+                return Some(column);
+            }
+        }
+        for alias in aliases {
+            if let Some(column) = row.iter().position(|cell| cell_text(cell).contains(alias)) {
+                return Some(column);
+            }
+        }
+    }
+    None
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2930,6 +3040,56 @@ mod tests {
         let (rows, rejected) = parse_kb_card(&range).expect("parse split card header");
         assert_eq!(rows.len(), 1);
         assert_eq!(rejected, 0);
+    }
+
+    #[test]
+    fn card_parser_uses_header_columns_from_the_current_kb_export() {
+        let range = string_range(&[
+            &[
+                "이용일자",
+                "이용카드",
+                "이용구분",
+                "가맹점",
+                "승인번호",
+                "이용금액",
+            ],
+            &[
+                "2026-07-21",
+                "합성카드",
+                "일시불",
+                "합성상점",
+                "승인식별자",
+                "7000",
+            ],
+        ]);
+
+        let (rows, rejected) = parse_kb_card(&range).expect("parse current KB card export");
+        assert_eq!(rejected, 0);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].amount_minor, 7_000);
+        assert_eq!(rows[0].merchant.as_deref(), Some("합성상점"));
+        assert!(rows[0].payment_method_fingerprint.is_some());
+    }
+
+    #[test]
+    fn card_parser_prefers_the_leaf_amount_column_in_a_grouped_header() {
+        let range = string_range(&[
+            &["이용일자", "이용카드", "이용구분", "가맹점", "이용금액", ""],
+            &["", "", "", "", "승인번호", "금액"],
+            &[
+                "2026-07-22",
+                "합성카드",
+                "일시불",
+                "합성상점",
+                "12345678",
+                "8100",
+            ],
+        ]);
+
+        let (rows, rejected) = parse_kb_card(&range).expect("parse grouped KB card export");
+        assert_eq!(rejected, 0);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].amount_minor, 8_100);
     }
 
     #[test]
