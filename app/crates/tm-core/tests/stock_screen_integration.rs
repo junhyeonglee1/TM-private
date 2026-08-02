@@ -1,5 +1,7 @@
+use std::path::PathBuf;
+
 use chrono::{Duration, NaiveDate};
-use rusqlite::Connection;
+use rusqlite::{Connection, functions::FunctionFlags, params};
 use tempfile::{Builder, TempDir};
 use tm_core::{
     DEFAULT_TM_HOME, Error, ListStockScreenResultsInput, Result, StockAiReportStart,
@@ -7,9 +9,24 @@ use tm_core::{
     StockScreenStartInput, StockUniverseMemberInput, StoreStockMarketDataInput,
     StoreStockUniverseInput, TmCore, TmHome,
 };
+use uuid::Uuid;
 
 const UNIVERSE_SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const MARKET_SHA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const SCHEMA_TWELVE_MIGRATIONS: [&str; 12] = [
+    include_str!("../migrations/0001_initial.sql"),
+    include_str!("../migrations/0002_change_requests.sql"),
+    include_str!("../migrations/0003_change_request_strict_cas.sql"),
+    include_str!("../migrations/0004_controlled_mutations.sql"),
+    include_str!("../migrations/0005_ai_budget_guard.sql"),
+    include_str!("../migrations/0006_assistant_action_approvals.sql"),
+    include_str!("../migrations/0007_assistant_memory.sql"),
+    include_str!("../migrations/0008_durable_scheduler.sql"),
+    include_str!("../migrations/0009_device_auth.sql"),
+    include_str!("../migrations/0010_task_reports.sql"),
+    include_str!("../migrations/0011_calendar_events.sql"),
+    include_str!("../migrations/0012_stock_watchlist.sql"),
+];
 
 fn fixture() -> Result<(TempDir, TmCore)> {
     let test_runs = std::path::Path::new(DEFAULT_TM_HOME)
@@ -21,6 +38,41 @@ fn fixture() -> Result<(TempDir, TmCore)> {
         .tempdir_in(test_runs)?;
     let core = TmCore::open(TmHome::new(temporary.path()))?;
     Ok((temporary, core))
+}
+
+fn schema_twelve_fixture(prefix: &str) -> Result<(TempDir, PathBuf)> {
+    let test_runs = std::path::Path::new(DEFAULT_TM_HOME)
+        .join("dist")
+        .join("test-runs");
+    std::fs::create_dir_all(&test_runs)?;
+    let temporary = Builder::new().prefix(prefix).tempdir_in(test_runs)?;
+    let database_path = temporary.path().join("data").join("tm.sqlite3");
+    std::fs::create_dir_all(
+        database_path.parent().ok_or_else(|| {
+            Error::Invariant("schema 12 fixture database has no parent".to_owned())
+        })?,
+    )?;
+    let connection = Connection::open(&database_path)?;
+    connection.create_scalar_function("tm_uuid_v7", 0, FunctionFlags::SQLITE_UTF8, |_| {
+        Ok(Uuid::now_v7().to_string())
+    })?;
+    connection.create_scalar_function("tm_now_utc", 0, FunctionFlags::SQLITE_UTF8, |_| {
+        Ok("2026-07-24T00:00:00.000Z".to_owned())
+    })?;
+    connection.execute_batch("PRAGMA foreign_keys = ON;")?;
+    for (index, migration) in SCHEMA_TWELVE_MIGRATIONS.iter().enumerate() {
+        let version = i64::try_from(index + 1)
+            .map_err(|error| Error::Invariant(format!("invalid fixture version: {error}")))?;
+        connection.execute_batch(migration)?;
+        connection.execute(
+            "INSERT INTO schema_migrations(version, name, applied_at)
+             VALUES (?1, ?2, '2026-07-24T00:00:00.000Z')",
+            params![version, format!("schema-{version}-fixture")],
+        )?;
+        connection.pragma_update(None, "user_version", version)?;
+    }
+    drop(connection);
+    Ok((temporary, database_path))
 }
 
 fn market_date() -> NaiveDate {
@@ -362,14 +414,20 @@ fn rejects_all_duplicate_bars_and_duplicate_sessions() -> Result<()> {
 
 #[test]
 fn schema_twelve_migration_preserves_scheduler_rows_and_foreign_keys() -> Result<()> {
-    let (temporary, core) = fixture()?;
-    let database_path = core.home().database_path();
-    core.ensure_scheduler_defaults(chrono::Utc::now())?;
-    drop(core);
-
+    let (temporary, database_path) = schema_twelve_fixture("tm-schema12-stock-screen-")?;
     let connection = Connection::open(&database_path)?;
     connection.execute_batch(
-        "INSERT INTO scheduler_runs(
+        "INSERT INTO scheduler_jobs(
+            id, job_key, kind, schedule_type, interval_seconds, local_time,
+            timezone, enabled, max_attempts, misfire_grace_seconds, coalesce,
+            next_run_at, last_scheduled_at, created_at, updated_at
+         ) VALUES (
+            'migration-canary-job', 'scheduler.canary', 'scheduler.canary',
+            'interval', 300, NULL, 'UTC', 1, 5, 60, 1,
+            '2026-06-01T00:00:00.000Z', NULL,
+            '2026-06-01T00:00:00.000Z', '2026-06-01T00:00:00.000Z'
+         );
+         INSERT INTO scheduler_runs(
             id, job_id, scheduled_for, status, attempt_count, max_attempts,
             idempotency_key, available_at, lease_owner, lease_acquired_at,
             lease_expires_at, last_error, result_json, created_at, updated_at,
@@ -406,39 +464,7 @@ fn schema_twelve_migration_preserves_scheduler_rows_and_foreign_keys() -> Result
                 '2026-06-01T02:00:00.000Z', '2026-06-01T02:00:00.000Z',
                 '2026-06-01T02:00:00.000Z', '2026-06-01T02:05:00.000Z',
                 '2026-06-01T02:05:00.000Z', NULL
-         FROM scheduler_jobs WHERE job_key = 'scheduler.canary';
-         DROP TRIGGER tasks_project_required_insert;
-         DROP TRIGGER tasks_project_required_update;
-         DROP TRIGGER projects_uncategorized_protect_update;
-         DROP TRIGGER projects_uncategorized_protect_delete;
-         DROP TRIGGER projects_uncategorized_name_reserved_insert;
-         DROP TRIGGER projects_uncategorized_name_reserved_update;
-         DROP INDEX idx_projects_system_key;
-         DELETE FROM projects WHERE system_key = 'uncategorized';
-         ALTER TABLE projects DROP COLUMN system_key;
-         DROP TRIGGER stock_ai_reports_no_delete;
-         DROP TRIGGER stock_ai_reports_identity_immutable;
-         DROP TRIGGER stock_screen_results_no_delete;
-         DROP TRIGGER stock_screen_results_no_update;
-         DROP TRIGGER stock_screen_runs_no_delete;
-         DROP TRIGGER stock_screen_runs_identity_immutable;
-         DROP TRIGGER stock_universe_members_no_delete;
-         DROP TRIGGER stock_universe_members_no_update;
-         DROP TRIGGER stock_universe_snapshots_no_delete;
-         DROP TRIGGER stock_universe_snapshots_no_update;
-         DROP TRIGGER stock_market_data_batches_no_delete;
-         DROP TRIGGER stock_market_data_batches_no_update;
-         DROP TABLE stock_ai_reports;
-         DROP TABLE stock_screen_results;
-         DROP TABLE stock_screen_runs;
-         DROP TABLE stock_daily_bars;
-         DROP TABLE stock_market_sessions;
-         DROP TABLE stock_market_data_batches;
-         DROP TABLE stock_universe_members;
-         DROP TABLE stock_universe_snapshots;
-         DELETE FROM schema_migrations WHERE version = 14;
-         DELETE FROM schema_migrations WHERE version = 13;
-         PRAGMA user_version = 12;",
+         FROM scheduler_jobs WHERE job_key = 'scheduler.canary';",
     )?;
     let before: i64 =
         connection.query_row("SELECT count(*) FROM scheduler_jobs", [], |row| row.get(0))?;
