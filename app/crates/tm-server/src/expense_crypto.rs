@@ -1,4 +1,7 @@
-use std::{env, fmt, sync::Arc};
+use std::{fmt, sync::Arc};
+
+#[cfg(not(test))]
+use std::env;
 
 use base64::{
     Engine as _,
@@ -12,6 +15,7 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use zeroize::{Zeroize, Zeroizing};
 
+#[cfg(not(test))]
 pub(super) const EXPENSE_DATA_KEY_ENV: &str = "TM_EXPENSE_DATA_KEY_V1";
 pub(super) const EXPENSE_DATA_KEY_VERSION: u32 = 1;
 
@@ -77,6 +81,7 @@ impl fmt::Display for ExpenseCryptoError {
 impl std::error::Error for ExpenseCryptoError {}
 
 impl ExpenseCrypto {
+    #[cfg(not(test))]
     pub(super) fn from_env() -> Result<Self, ExpenseCryptoError> {
         let encoded = Zeroizing::new(
             env::var(EXPENSE_DATA_KEY_ENV).map_err(|_| ExpenseCryptoError::MissingKey)?,

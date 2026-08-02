@@ -1238,7 +1238,7 @@ fn recurring_schedule_handles_month_edges_leap_years_intervals_and_statuses() ->
 #[test]
 fn matching_an_imported_transaction_atomically_replaces_manual_payment() -> Result<()> {
     let (_temporary, core) = fixture()?;
-    let item = core.create_recurring_expense(recurring_input(10_000))?;
+    core.create_recurring_expense(recurring_input(10_000))?;
     let february = NaiveDate::from_ymd_opt(2027, 2, 1).expect("valid date");
     let occurrence = core.recurring_expense_occurrences(february)?[0].clone();
     let paid = core.confirm_recurring_expense_paid(

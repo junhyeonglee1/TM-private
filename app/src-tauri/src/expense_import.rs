@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     fs,
     io::{Cursor, Read},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::Mutex,
     time::{Duration, Instant},
 };

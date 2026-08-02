@@ -27,6 +27,18 @@ fn temporary_root(prefix: &str) -> Result<TempDir> {
         .map_err(Into::into)
 }
 
+fn create_v1_database(path: &std::path::Path) -> Result<()> {
+    let connection = Connection::open(path)?;
+    connection.execute_batch(include_str!("../migrations/0001_initial.sql"))?;
+    connection.execute(
+        "INSERT INTO schema_migrations(version, name, applied_at)
+         VALUES (1, 'local-first-foundation', '2026-01-01T00:00:00.000Z')",
+        [],
+    )?;
+    connection.pragma_update(None, "user_version", 1_i64)?;
+    Ok(())
+}
+
 fn create_input(title: &str, priority: u8) -> CreateChangeRequestInput {
     CreateChangeRequestInput {
         kind: ChangeRequestKind::Feature,
@@ -113,15 +125,7 @@ fn opening_v1_database_creates_pre_migration_backup_and_applies_all_migrations()
     let temporary = temporary_root("tm-change-request-v1-")?;
     let data = temporary.path().join("data");
     std::fs::create_dir_all(&data)?;
-    let connection = Connection::open(data.join("tm.sqlite3"))?;
-    connection.execute_batch(include_str!("../migrations/0001_initial.sql"))?;
-    connection.execute(
-        "INSERT INTO schema_migrations(version, name, applied_at)
-         VALUES (1, 'local-first-foundation', '2026-01-01T00:00:00.000Z')",
-        [],
-    )?;
-    connection.pragma_update(None, "user_version", 1_i64)?;
-    drop(connection);
+    create_v1_database(&data.join("tm.sqlite3"))?;
 
     let core = TmCore::open(TmHome::new(temporary.path()))?;
     assert_eq!(core.health()?.schema_version, 15);
@@ -400,69 +404,9 @@ fn priority_order_and_cancellation_contract_are_enforced() -> Result<()> {
 
 #[test]
 fn restoring_v1_backup_migrates_and_preserves_non_rewindable_ledger() -> Result<()> {
-    let (_temporary, core) = fixture()?;
-    let backup = core.create_backup()?;
-    let backup_path = std::path::Path::new(&backup.path);
-    let v1 = Connection::open(backup_path)?;
-    v1.execute_batch(
-        "DROP TRIGGER tasks_project_required_insert;
-         DROP TRIGGER tasks_project_required_update;
-         DROP TRIGGER projects_uncategorized_protect_update;
-         DROP TRIGGER projects_uncategorized_protect_delete;
-         DROP TRIGGER projects_uncategorized_name_reserved_insert;
-         DROP TRIGGER projects_uncategorized_name_reserved_update;
-         DROP INDEX idx_projects_system_key;
-         DELETE FROM projects WHERE system_key = 'uncategorized';
-         ALTER TABLE projects DROP COLUMN system_key;
-         DROP TRIGGER stock_ai_reports_no_delete;
-         DROP TRIGGER stock_ai_reports_identity_immutable;
-         DROP TRIGGER stock_screen_results_no_delete;
-         DROP TRIGGER stock_screen_results_no_update;
-         DROP TRIGGER stock_screen_runs_no_delete;
-         DROP TRIGGER stock_screen_runs_identity_immutable;
-         DROP TRIGGER stock_universe_members_no_delete;
-         DROP TRIGGER stock_universe_members_no_update;
-         DROP TRIGGER stock_universe_snapshots_no_delete;
-         DROP TRIGGER stock_universe_snapshots_no_update;
-         DROP TRIGGER stock_market_data_batches_no_delete;
-         DROP TRIGGER stock_market_data_batches_no_update;
-         DROP TABLE stock_ai_reports;
-         DROP TABLE stock_screen_results;
-         DROP TABLE stock_screen_runs;
-         DROP TABLE stock_daily_bars;
-         DROP TABLE stock_market_sessions;
-         DROP TABLE stock_market_data_batches;
-         DROP TABLE stock_universe_members;
-         DROP TABLE stock_universe_snapshots;
-         DROP TABLE stock_watchlist_items;
-         DROP TABLE calendar_events;
-         DROP TABLE task_report_feedback;
-         DROP TABLE task_report_runs;
-         DROP TABLE device_auth_events;
-         DROP TABLE registered_devices;
-         DROP TABLE device_pairings;
-         DROP TABLE scheduler_effects;
-         DROP TABLE scheduler_attempts;
-         DROP TABLE scheduler_runs;
-         DROP TABLE scheduler_jobs;
-         DROP TABLE assistant_memory_search;
-         DROP TABLE assistant_memory_events;
-         DROP TABLE assistant_memory_sources;
-         DROP TABLE assistant_memories;
-         DROP TABLE assistant_action_events;
-         DROP TABLE assistant_action_requests;
-         DROP TABLE ai_budget_ledger;
-         DROP TABLE mutation_audit_events;
-         DROP TABLE mutation_idempotency_records;
-         ALTER TABLE tasks DROP COLUMN version;
-         ALTER TABLE checklist_items DROP COLUMN version;
-         ALTER TABLE notes DROP COLUMN version;
-         DROP TABLE change_request_events;
-         DROP TABLE change_requests;
-         DELETE FROM schema_migrations WHERE version >= 2;
-         PRAGMA user_version = 1;",
-    )?;
-    drop(v1);
+    let (temporary, core) = fixture()?;
+    let backup_path = temporary.path().join("v1-restore.sqlite3");
+    create_v1_database(&backup_path)?;
 
     let claimed = core.create_change_request(create_input("보존 claimed", 3))?;
     core.approve_change_request(&claimed.id, 1, 0, "reviewer")?;

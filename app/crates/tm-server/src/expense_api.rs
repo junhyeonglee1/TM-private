@@ -174,7 +174,7 @@ pub(super) struct ExpenseTransactionDto {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ExpenseTransactionPageDto {
+pub(super) struct ExpenseTransactionPageDto {
     items: Vec<ExpenseTransactionDto>,
     next_cursor: Option<String>,
 }
@@ -197,14 +197,14 @@ struct ExpenseReviewDto {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ExpenseReviewPageDto {
+pub(super) struct ExpenseReviewPageDto {
     items: Vec<ExpenseReviewDto>,
     next_cursor: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct RecurringExpenseItemDto {
+pub(super) struct RecurringExpenseItemDto {
     id: String,
     name: String,
     category: ExpenseCategory,

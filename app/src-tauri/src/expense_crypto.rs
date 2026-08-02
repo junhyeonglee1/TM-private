@@ -269,6 +269,7 @@ impl ExpenseCrypto {
     }
 }
 
+#[cfg(any(windows, test))]
 fn ensure_ledger_allows_new_key(core: &TmCore) -> Result<(), String> {
     let has_probe = core
         .expense_crypto_probe()
