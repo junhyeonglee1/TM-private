@@ -386,7 +386,7 @@ fn regenerate_rollup(
         transaction.prepare(&format!(
             "SELECT {MEMORY_COLUMNS} FROM assistant_memories
              WHERE deleted_at IS NULL AND kind = 'summary' AND period_kind = ?1
-               AND period_start >= ?2 AND period_start <= ?3
+               AND period_end >= ?2 AND period_start <= ?3
              ORDER BY period_start, id"
         ))?
     } else {

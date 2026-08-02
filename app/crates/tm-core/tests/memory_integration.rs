@@ -1,9 +1,11 @@
-use chrono::{Duration, Utc};
+use chrono::{Duration, NaiveDate, Utc};
+use rusqlite::{Connection, params};
 use tempfile::{Builder, TempDir};
 use tm_core::{
     ASSISTANT_ACTION_APPROVAL_TTL_SECONDS, CreateMemoryInput, DEFAULT_TM_HOME, Error, MemoryKind,
-    MemoryPatch, MemoryRetention, MemorySearchFilter, MemorySensitivity, MutationApprovalPolicy,
-    MutationCommand, MutationExpectedVersion, MutationRequest, Result, TmCore, TmHome,
+    MemoryPatch, MemoryPeriodKind, MemoryRetention, MemorySearchFilter, MemorySensitivity,
+    MutationApprovalPolicy, MutationCommand, MutationExpectedVersion, MutationRequest, Result,
+    TmCore, TmHome,
 };
 
 fn fixture() -> Result<(TempDir, TmCore)> {
@@ -205,14 +207,21 @@ fn retrieval_budget_stays_bounded_as_memory_count_grows() -> Result<()> {
 
 #[test]
 fn local_rollups_are_hierarchical_non_billable_and_retention_expires_them() -> Result<()> {
-    let (_temporary, core) = fixture()?;
+    let (temporary, core) = fixture()?;
     let source_id = create_direct(
         &core,
         1,
         memory_input("아침 루틴", "아침에는 스트레칭을 한다", true),
     )?;
-    let today = Utc::now().date_naive();
-    let report = core.regenerate_memory_summaries(today)?;
+    let boundary_day = NaiveDate::from_ymd_opt(2099, 8, 2).expect("valid boundary date");
+    let connection = Connection::open(TmHome::new(temporary.path()).database_path())?;
+    connection.execute(
+        "UPDATE assistant_memories SET updated_at = ?1 WHERE id = ?2",
+        params![format!("{boundary_day}T12:00:00.000Z"), &source_id],
+    )?;
+    drop(connection);
+
+    let report = core.regenerate_memory_summaries(boundary_day)?;
     assert!(report.daily.is_some());
     assert!(report.weekly.is_some());
     assert!(report.monthly.is_some());
@@ -223,6 +232,28 @@ fn local_rollups_are_hierarchical_non_billable_and_retention_expires_them() -> R
         .filter(|memory| memory.kind == MemoryKind::Summary)
         .collect::<Vec<_>>();
     assert_eq!(summaries.len(), 3);
+    let weekly = summaries
+        .iter()
+        .find(|memory| memory.period_kind == Some(MemoryPeriodKind::Weekly))
+        .expect("weekly summary");
+    let monthly = summaries
+        .iter()
+        .find(|memory| memory.period_kind == Some(MemoryPeriodKind::Monthly))
+        .expect("monthly summary");
+    let weekly_start = weekly.period_start.expect("weekly start");
+    let weekly_end = weekly.period_end.expect("weekly end");
+    let monthly_start = monthly.period_start.expect("monthly start");
+    assert!(weekly_start < monthly_start);
+    assert!(weekly_end >= monthly_start);
+    let connection = Connection::open(TmHome::new(temporary.path()).database_path())?;
+    let monthly_weekly_links = connection.query_row(
+        "SELECT COUNT(*) FROM assistant_memory_sources
+         WHERE memory_id = ?1 AND source_id = ?2",
+        params![&monthly.id, &weekly.id],
+        |row| row.get::<_, i64>(0),
+    )?;
+    assert_eq!(monthly_weekly_links, 1);
+    drop(connection);
 
     let source = core.get_assistant_memory(&source_id)?;
     let delete = core.propose_memory_delete_action(
@@ -235,8 +266,13 @@ fn local_rollups_are_hierarchical_non_billable_and_retention_expires_them() -> R
     let maintenance = core.run_memory_maintenance(Utc::now())?;
     assert!(maintenance.source_deleted >= 1);
 
-    let expiry = core.run_memory_maintenance(Utc::now() + Duration::days(1_200))?;
-    assert!(expiry.expired >= 1 || core.list_assistant_memories(false)?.is_empty());
+    let expiry_as_of = boundary_day
+        .and_hms_opt(0, 0, 0)
+        .expect("valid boundary timestamp")
+        .and_utc()
+        + Duration::days(1_200);
+    let expiry = core.run_memory_maintenance(expiry_as_of)?;
+    assert!(expiry.expired >= 1);
     Ok(())
 }
 
