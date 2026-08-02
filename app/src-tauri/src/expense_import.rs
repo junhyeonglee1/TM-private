@@ -2572,30 +2572,6 @@ fn find_header_row(range: &Range<Data>, required: &[&str]) -> Result<usize, Stri
         .ok_or_else(|| "지출 파일의 헤더를 찾지 못했습니다.".to_owned())
 }
 
-fn find_compound_header_row(range: &Range<Data>, required: &[&str]) -> Result<usize, String> {
-    let rows = range.rows().take(20).collect::<Vec<_>>();
-    rows.iter()
-        .enumerate()
-        .find_map(|(index, row)| {
-            let current = row.iter().map(cell_text).collect::<Vec<_>>().join("|");
-            if required.iter().all(|value| current.contains(value)) {
-                return Some(index);
-            }
-            let next = rows.get(index + 1).copied().unwrap_or(&[]);
-            let joined = row
-                .iter()
-                .chain(next.iter())
-                .map(cell_text)
-                .collect::<Vec<_>>()
-                .join("|");
-            required
-                .iter()
-                .all(|value| joined.contains(value))
-                .then_some(index + 1)
-        })
-        .ok_or_else(|| "카드 이용내역의 헤더를 찾지 못했습니다.".to_owned())
-}
-
 fn parse_datetime(cell: &Data) -> Option<String> {
     if let Some(value) = cell.as_datetime() {
         return Some(value.format("%Y-%m-%dT%H:%M:%S").to_string());
@@ -2770,7 +2746,7 @@ mod tests {
         BiffSheetStats, ExpenseAdapter, MAX_BIFF_SST_CONTINUE_RECORDS, MAX_CELL_CHARS,
         MAX_CFB_ENTRIES, MAX_COLUMNS, MAX_RANGE_CELLS, MAX_ROWS, MAX_SAFE_AMOUNT_MINOR,
         MAX_STYLE_CELL_XFS, MAX_STYLE_NUMFMTS, MAX_STYLES_METADATA_BYTES, absolute_nonzero_amount,
-        declared_coverage_period, detect_adapter, find_compound_header_row, parse_amount,
+        declared_coverage_period, detect_adapter, find_kb_card_layout, parse_amount,
         parse_datetime, parse_kakao_pay, parse_kb_account, parse_kb_card,
         redact_financial_identifiers, source_discriminator_fingerprint, validate_biff_dimensions,
         validate_biff_sheet, validate_biff_sst, validate_biff_workbook_stream,
@@ -3033,8 +3009,9 @@ mod tests {
             &["2026-08-04", "1234-****-5678", "일시불", "합성상점", "7000"],
         ]);
         assert_eq!(
-            find_compound_header_row(&range, &["이용일자", "가맹점", "이용금액"])
-                .expect("find split header"),
+            find_kb_card_layout(&range)
+                .expect("find split header")
+                .last_header_row,
             1
         );
         let (rows, rejected) = parse_kb_card(&range).expect("parse split card header");
