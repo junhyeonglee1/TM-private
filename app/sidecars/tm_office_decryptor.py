@@ -15,6 +15,7 @@ import struct
 import sys
 
 import msoffcrypto
+from msoffcrypto.exceptions import DecryptionError, FileFormatError, InvalidKeyError, ParseError
 
 
 MAX_PASSWORD_BYTES = 1_024
@@ -35,6 +36,37 @@ def respond(payload: dict[str, object], body: bytes = b"") -> None:
 def fail(code: str, message: str) -> int:
     respond({"ok": False, "code": code, "message": message})
     return 1
+
+
+def decrypt_office_file(encrypted: bytes, password: str) -> tuple[str | None, bytes]:
+    try:
+        office_file = msoffcrypto.OfficeFile(io.BytesIO(encrypted))
+    except (FileFormatError, ParseError, ValueError):
+        return "unsupported_encryption", b""
+    except Exception:
+        return "decryptor_internal", b""
+
+    try:
+        office_file.load_key(password=password, verify_password=True)
+    except InvalidKeyError:
+        return "wrong_password", b""
+    except (FileFormatError, ParseError, DecryptionError, ValueError):
+        return "key_load_failed", b""
+    except Exception:
+        return "decryptor_internal", b""
+
+    output = io.BytesIO()
+    try:
+        office_file.decrypt(output, verify_integrity=True)
+        return None, output.getvalue()
+    except InvalidKeyError:
+        return "integrity_failed", b""
+    except (FileFormatError, ParseError, DecryptionError, ValueError):
+        return "decrypt_failed", b""
+    except Exception:
+        return "decryptor_internal", b""
+    finally:
+        output.close()
 
 
 def main() -> int:
@@ -67,19 +99,18 @@ def main() -> int:
             password_bytes[index] = 0
         return fail("invalid_password", "The workbook password is invalid.")
 
-    output = io.BytesIO()
     try:
-        office_file = msoffcrypto.OfficeFile(io.BytesIO(encrypted))
-        office_file.load_key(password=password, verify_password=True)
-        office_file.decrypt(output, verify_integrity=True)
-        decrypted = output.getvalue()
-    except Exception:
-        return fail("wrong_password_or_corrupt", "The password is wrong or the workbook is corrupt.")
+        error_code, decrypted = decrypt_office_file(encrypted, password)
+        if error_code == "wrong_password":
+            return fail(error_code, "The workbook password is wrong.")
+        if error_code == "integrity_failed":
+            return fail(error_code, "The workbook integrity check failed.")
+        if error_code is not None:
+            return fail(error_code, "The workbook could not be decrypted safely.")
     finally:
         password = ""
         for index in range(len(password_bytes)):
             password_bytes[index] = 0
-        output.close()
         gc.collect()
 
     if len(decrypted) > MAX_OUTPUT_BYTES:

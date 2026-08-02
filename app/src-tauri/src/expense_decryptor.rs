@@ -19,9 +19,10 @@ const MAX_HEADER_BYTES: usize = 4_096;
 const DECRYPTOR_TIMEOUT: Duration = Duration::from_secs(30);
 const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const TIMEOUT_ERROR: &str = "카카오페이 보안 해제 시간이 30초를 초과해 안전하게 중단했습니다.";
-const PASSWORD_RETRY_ERROR: &str =
-    "TM_EXPENSE_PASSWORD_RETRY:비밀번호가 맞지 않거나 파일이 손상되었습니다.";
-const DECRYPTOR_REJECTED_ERROR: &str = "카카오페이 파일을 안전하게 열 수 없습니다.";
+const PASSWORD_RETRY_ERROR: &str = "TM_EXPENSE_PASSWORD_RETRY:비밀번호가 맞지 않습니다.";
+const INTEGRITY_ERROR: &str = "카카오페이 파일의 암호는 확인됐지만 무결성 검증에 실패했습니다. 카카오페이에서 새 파일을 내려받아 다시 시도하세요.";
+const DECRYPTOR_REJECTED_ERROR: &str = "카카오페이 파일을 안전하게 해제할 수 없습니다. 새 파일을 내려받거나 지원되는 XLSX인지 확인하세요.";
+const DECRYPTOR_INTERNAL_ERROR: &str = "카카오페이 보안 해제 모듈에서 내부 오류가 발생했습니다.";
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -135,12 +136,7 @@ pub(crate) fn decrypt_ooxml(encrypted: &[u8], password: &str) -> Result<Vec<u8>,
     let header: DecryptorHeader = serde_json::from_slice(&output[..newline])
         .map_err(|_| "카카오페이 보안 해제 응답이 올바르지 않습니다.".to_owned())?;
     if !header.ok {
-        let retryable = matches!(header.code.as_deref(), Some("wrong_password_or_corrupt"));
-        return Err(if retryable {
-            PASSWORD_RETRY_ERROR.to_owned()
-        } else {
-            DECRYPTOR_REJECTED_ERROR.to_owned()
-        });
+        return Err(decryptor_failure_message(header.code.as_deref()).to_owned());
     }
     if !status.success() {
         return Err("카카오페이 보안 해제 모듈이 실패했습니다.".to_owned());
@@ -154,6 +150,23 @@ pub(crate) fn decrypt_ooxml(encrypted: &[u8], password: &str) -> Result<Vec<u8>,
         return Err("카카오페이 보안 해제 결과 무결성 검증에 실패했습니다.".to_owned());
     }
     Ok(decrypted.to_vec())
+}
+
+fn decryptor_failure_message(code: Option<&str>) -> &'static str {
+    match code {
+        Some("wrong_password") => PASSWORD_RETRY_ERROR,
+        Some("integrity_failed") => INTEGRITY_ERROR,
+        Some(
+            "unsupported_encryption"
+            | "key_load_failed"
+            | "decrypt_failed"
+            | "invalid_password"
+            | "file_too_large"
+            | "decrypted_file_too_large"
+            | "invalid_ooxml",
+        ) => DECRYPTOR_REJECTED_ERROR,
+        _ => DECRYPTOR_INTERNAL_ERROR,
+    }
 }
 
 fn spawn_stdout_reader(
@@ -276,8 +289,9 @@ mod tests {
     use std::process::{Command, Stdio};
 
     use super::{
-        DECRYPTOR_REJECTED_ERROR, DECRYPTOR_TIMEOUT, MAX_HEADER_BYTES, MAX_OUTPUT_BYTES,
-        PASSWORD_RETRY_ERROR, TIMEOUT_ERROR, read_bounded,
+        DECRYPTOR_INTERNAL_ERROR, DECRYPTOR_REJECTED_ERROR, DECRYPTOR_TIMEOUT, INTEGRITY_ERROR,
+        MAX_HEADER_BYTES, MAX_OUTPUT_BYTES, PASSWORD_RETRY_ERROR, TIMEOUT_ERROR,
+        decryptor_failure_message, read_bounded,
     };
 
     #[cfg(windows)]
@@ -302,14 +316,38 @@ mod tests {
     fn security_errors_do_not_echo_sidecar_content() {
         assert_eq!(
             PASSWORD_RETRY_ERROR,
-            "TM_EXPENSE_PASSWORD_RETRY:비밀번호가 맞지 않거나 파일이 손상되었습니다."
+            "TM_EXPENSE_PASSWORD_RETRY:비밀번호가 맞지 않습니다."
         );
         assert_eq!(
             DECRYPTOR_REJECTED_ERROR,
-            "카카오페이 파일을 안전하게 열 수 없습니다."
+            "카카오페이 파일을 안전하게 해제할 수 없습니다. 새 파일을 내려받거나 지원되는 XLSX인지 확인하세요."
         );
         assert!(!TIMEOUT_ERROR.contains("경로"));
         assert!(!TIMEOUT_ERROR.contains("비밀번호"));
+    }
+
+    #[test]
+    fn decryptor_failures_keep_password_and_integrity_errors_separate() {
+        assert_eq!(
+            decryptor_failure_message(Some("wrong_password")),
+            PASSWORD_RETRY_ERROR
+        );
+        assert_eq!(
+            decryptor_failure_message(Some("integrity_failed")),
+            INTEGRITY_ERROR
+        );
+        assert_eq!(
+            decryptor_failure_message(Some("decrypt_failed")),
+            DECRYPTOR_REJECTED_ERROR
+        );
+        assert_eq!(
+            decryptor_failure_message(Some("decrypted_file_too_large")),
+            DECRYPTOR_REJECTED_ERROR
+        );
+        assert_eq!(
+            decryptor_failure_message(Some("unexpected")),
+            DECRYPTOR_INTERNAL_ERROR
+        );
     }
 
     #[cfg(windows)]

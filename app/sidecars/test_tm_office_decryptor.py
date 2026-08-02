@@ -8,8 +8,12 @@ import sys
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 from msoffcrypto.format.ooxml import OOXMLFile
+from msoffcrypto.exceptions import DecryptionError, InvalidKeyError
+
+import tm_office_decryptor
 
 
 SCRIPT = Path(__file__).with_name("tm_office_decryptor.py")
@@ -112,9 +116,41 @@ class OfficeDecryptorTests(unittest.TestCase):
         returncode, header, body, stderr = invoke(self.encrypted, wrong)
         self.assertNotEqual(returncode, 0)
         self.assertEqual(header["ok"], False)
-        self.assertEqual(header["code"], "wrong_password_or_corrupt")
+        self.assertEqual(header["code"], "wrong_password")
         self.assertEqual(body, b"")
         self.assertNotIn(wrong.encode(), json.dumps(header).encode() + stderr)
+
+    def test_integrity_failure_is_not_reported_as_wrong_password(self) -> None:
+        office_file = mock.Mock()
+        office_file.load_key.return_value = None
+        office_file.decrypt.side_effect = InvalidKeyError("synthetic integrity failure")
+        with mock.patch.object(tm_office_decryptor.msoffcrypto, "OfficeFile", return_value=office_file):
+            code, body = tm_office_decryptor.decrypt_office_file(self.encrypted, PASSWORD)
+        self.assertEqual(code, "integrity_failed")
+        self.assertEqual(body, b"")
+        office_file.load_key.assert_called_once_with(password=PASSWORD, verify_password=True)
+        office_file.decrypt.assert_called_once_with(mock.ANY, verify_integrity=True)
+
+    def test_key_verification_failure_is_reported_as_wrong_password(self) -> None:
+        office_file = mock.Mock()
+        office_file.load_key.side_effect = InvalidKeyError("synthetic password failure")
+        with mock.patch.object(tm_office_decryptor.msoffcrypto, "OfficeFile", return_value=office_file):
+            code, body = tm_office_decryptor.decrypt_office_file(self.encrypted, PASSWORD)
+        self.assertEqual(code, "wrong_password")
+        self.assertEqual(body, b"")
+        office_file.load_key.assert_called_once_with(password=PASSWORD, verify_password=True)
+        office_file.decrypt.assert_not_called()
+
+    def test_decryption_failure_is_not_reported_as_wrong_password(self) -> None:
+        office_file = mock.Mock()
+        office_file.load_key.return_value = None
+        office_file.decrypt.side_effect = DecryptionError("synthetic decryption failure")
+        with mock.patch.object(tm_office_decryptor.msoffcrypto, "OfficeFile", return_value=office_file):
+            code, body = tm_office_decryptor.decrypt_office_file(self.encrypted, PASSWORD)
+        self.assertEqual(code, "decrypt_failed")
+        self.assertEqual(body, b"")
+        office_file.load_key.assert_called_once_with(password=PASSWORD, verify_password=True)
+        office_file.decrypt.assert_called_once_with(mock.ANY, verify_integrity=True)
 
     def test_plain_zip_is_rejected_without_echoing_payload(self) -> None:
         returncode, header, body, _ = invoke(self.plaintext, PASSWORD)
