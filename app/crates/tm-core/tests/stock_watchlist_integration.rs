@@ -1,9 +1,26 @@
-use rusqlite::Connection;
+use std::path::PathBuf;
+
+use rusqlite::{Connection, functions::FunctionFlags, params};
 use tempfile::{Builder, TempDir};
 use tm_core::{
     DEFAULT_TM_HOME, Error, Result, STOCK_WATCHLIST_LIMIT, StockMarket, TmCore, TmHome,
     UpsertStockWatchlistItemInput,
 };
+use uuid::Uuid;
+
+const SCHEMA_ELEVEN_MIGRATIONS: [&str; 11] = [
+    include_str!("../migrations/0001_initial.sql"),
+    include_str!("../migrations/0002_change_requests.sql"),
+    include_str!("../migrations/0003_change_request_strict_cas.sql"),
+    include_str!("../migrations/0004_controlled_mutations.sql"),
+    include_str!("../migrations/0005_ai_budget_guard.sql"),
+    include_str!("../migrations/0006_assistant_action_approvals.sql"),
+    include_str!("../migrations/0007_assistant_memory.sql"),
+    include_str!("../migrations/0008_durable_scheduler.sql"),
+    include_str!("../migrations/0009_device_auth.sql"),
+    include_str!("../migrations/0010_task_reports.sql"),
+    include_str!("../migrations/0011_calendar_events.sql"),
+];
 
 fn fixture() -> Result<(TempDir, TmCore)> {
     let test_runs = std::path::Path::new(DEFAULT_TM_HOME)
@@ -15,6 +32,41 @@ fn fixture() -> Result<(TempDir, TmCore)> {
         .tempdir_in(test_runs)?;
     let core = TmCore::open(TmHome::new(temporary.path()))?;
     Ok((temporary, core))
+}
+
+fn schema_eleven_fixture(prefix: &str) -> Result<(TempDir, PathBuf)> {
+    let test_runs = std::path::Path::new(DEFAULT_TM_HOME)
+        .join("dist")
+        .join("test-runs");
+    std::fs::create_dir_all(&test_runs)?;
+    let temporary = Builder::new().prefix(prefix).tempdir_in(test_runs)?;
+    let database_path = temporary.path().join("data").join("tm.sqlite3");
+    std::fs::create_dir_all(
+        database_path.parent().ok_or_else(|| {
+            Error::Invariant("schema 11 fixture database has no parent".to_owned())
+        })?,
+    )?;
+    let connection = Connection::open(&database_path)?;
+    connection.create_scalar_function("tm_uuid_v7", 0, FunctionFlags::SQLITE_UTF8, |_| {
+        Ok(Uuid::now_v7().to_string())
+    })?;
+    connection.create_scalar_function("tm_now_utc", 0, FunctionFlags::SQLITE_UTF8, |_| {
+        Ok("2026-07-24T00:00:00.000Z".to_owned())
+    })?;
+    connection.execute_batch("PRAGMA foreign_keys = ON;")?;
+    for (index, migration) in SCHEMA_ELEVEN_MIGRATIONS.iter().enumerate() {
+        let version = i64::try_from(index + 1)
+            .map_err(|error| Error::Invariant(format!("invalid fixture version: {error}")))?;
+        connection.execute_batch(migration)?;
+        connection.execute(
+            "INSERT INTO schema_migrations(version, name, applied_at)
+             VALUES (?1, ?2, '2026-07-24T00:00:00.000Z')",
+            params![version, format!("schema-{version}-fixture")],
+        )?;
+        connection.pragma_update(None, "user_version", version)?;
+    }
+    drop(connection);
+    Ok((temporary, database_path))
 }
 
 fn input(
@@ -101,48 +153,7 @@ fn enforces_fifty_item_limit_without_blocking_existing_updates() -> Result<()> {
 
 #[test]
 fn migrates_schema_eleven_with_a_pre_migration_backup() -> Result<()> {
-    let (temporary, core) = fixture()?;
-    let database_path = core.home().database_path();
-    drop(core);
-
-    let connection = Connection::open(&database_path)?;
-    connection.execute_batch(
-        "DROP TRIGGER tasks_project_required_insert;
-         DROP TRIGGER tasks_project_required_update;
-         DROP TRIGGER projects_uncategorized_protect_update;
-         DROP TRIGGER projects_uncategorized_protect_delete;
-         DROP TRIGGER projects_uncategorized_name_reserved_insert;
-         DROP TRIGGER projects_uncategorized_name_reserved_update;
-         DROP INDEX idx_projects_system_key;
-         DELETE FROM projects WHERE system_key = 'uncategorized';
-         ALTER TABLE projects DROP COLUMN system_key;
-         DROP TRIGGER stock_ai_reports_no_delete;
-         DROP TRIGGER stock_ai_reports_identity_immutable;
-         DROP TRIGGER stock_screen_results_no_delete;
-         DROP TRIGGER stock_screen_results_no_update;
-         DROP TRIGGER stock_screen_runs_no_delete;
-         DROP TRIGGER stock_screen_runs_identity_immutable;
-         DROP TRIGGER stock_universe_members_no_delete;
-         DROP TRIGGER stock_universe_members_no_update;
-         DROP TRIGGER stock_universe_snapshots_no_delete;
-         DROP TRIGGER stock_universe_snapshots_no_update;
-         DROP TRIGGER stock_market_data_batches_no_delete;
-         DROP TRIGGER stock_market_data_batches_no_update;
-         DROP TABLE stock_ai_reports;
-         DROP TABLE stock_screen_results;
-         DROP TABLE stock_screen_runs;
-         DROP TABLE stock_daily_bars;
-         DROP TABLE stock_market_sessions;
-         DROP TABLE stock_market_data_batches;
-         DROP TABLE stock_universe_members;
-         DROP TABLE stock_universe_snapshots;
-         DROP TABLE stock_watchlist_items;
-         DELETE FROM schema_migrations WHERE version = 14;
-         DELETE FROM schema_migrations WHERE version = 13;
-         DELETE FROM schema_migrations WHERE version = 12;
-         PRAGMA user_version = 11;",
-    )?;
-    drop(connection);
+    let (temporary, _database_path) = schema_eleven_fixture("tm-schema11-stock-watchlist-")?;
 
     let migrated = TmCore::open(TmHome::new(temporary.path()))?;
     assert_eq!(migrated.health()?.schema_version, 15);
