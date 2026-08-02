@@ -2907,8 +2907,10 @@ mod tests {
         }
         let mut bytes = compound.into_inner().into_inner();
         let sector_size = 512_usize;
+        bytes[40..44].copy_from_slice(&0_u32.to_le_bytes());
         assert_eq!(u16::from_le_bytes(bytes[26..28].try_into().unwrap()), 3);
         assert_eq!(u16::from_le_bytes(bytes[30..32].try_into().unwrap()), 9);
+        assert_eq!(u32::from_le_bytes(bytes[40..44].try_into().unwrap()), 0);
         assert_eq!(bytes.len() % sector_size, 0);
         assert_eq!(u32::from_le_bytes(bytes[44..48].try_into().unwrap()), 1);
         assert_eq!(u32::from_le_bytes(bytes[72..76].try_into().unwrap()), 0);
