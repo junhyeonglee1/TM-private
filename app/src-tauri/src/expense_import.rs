@@ -657,12 +657,12 @@ fn read_cfb_u64(bytes: &[u8], offset: usize) -> Result<u64, String> {
     ]))
 }
 
-fn cfb_sector<'a>(
-    bytes: &'a [u8],
+fn cfb_sector(
+    bytes: &[u8],
     sector_size: usize,
     sector_count: usize,
     sector_id: u32,
-) -> Result<&'a [u8], String> {
+) -> Result<&[u8], String> {
     let sector_index = usize::try_from(sector_id)
         .ok()
         .filter(|index| *index < sector_count)
@@ -776,7 +776,7 @@ fn preflight_xls_container(bytes: &[u8]) -> Result<PathBuf, String> {
     let sector_size = 1_usize
         .checked_shl(u32::from(sector_shift))
         .ok_or_else(|| "The XLS compound document sector size is invalid.".to_owned())?;
-    if bytes.len() < sector_size.saturating_mul(2) || bytes.len() % sector_size != 0 {
+    if bytes.len() < sector_size.saturating_mul(2) || !bytes.len().is_multiple_of(sector_size) {
         return Err("The XLS compound document length is invalid.".to_owned());
     }
     let sector_count = bytes.len() / sector_size - 1;
@@ -1663,7 +1663,7 @@ fn validate_biff_cell_string(payload: &[u8], biff_version: u16) -> Result<(), St
 }
 
 fn validate_biff_mul_rk(payload: &[u8], stats: &mut BiffSheetStats) -> Result<(), String> {
-    if payload.len() < 12 || (payload.len() - 6) % 6 != 0 {
+    if payload.len() < 12 || !(payload.len() - 6).is_multiple_of(6) {
         return Err("The XLS MulRK record is invalid.".to_owned());
     }
     let row = u16::from_le_bytes([payload[0], payload[1]]);
@@ -2046,7 +2046,7 @@ fn validate_relationships_xml(bytes: &[u8]) -> Result<(), String> {
 fn validate_ooxml_container(bytes: &[u8]) -> Result<(), String> {
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
         .map_err(|_| "XLSX ZIP 구조가 올바르지 않습니다.".to_owned())?;
-    if archive.len() == 0 || archive.len() > MAX_ZIP_ENTRIES {
+    if archive.is_empty() || archive.len() > MAX_ZIP_ENTRIES {
         return Err("XLSX 내부 파일 수가 안전 제한을 초과했습니다.".to_owned());
     }
 

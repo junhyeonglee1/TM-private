@@ -605,6 +605,7 @@ fn configured_expense_crypto() -> Result<ExpenseCrypto, ExpenseCryptoError> {
     ExpenseCrypto::for_test()
 }
 
+#[cfg(test)]
 fn load_expense_crypto(core: &TmCore) -> Result<ExpenseCrypto, ExpenseCryptoError> {
     load_expense_crypto_with_rollout(core, &ExpenseRolloutConfig::local_enabled()).crypto
 }
