@@ -501,7 +501,14 @@ fn canonical_expense_path(value: &str) -> Result<PathBuf, String> {
 
 fn validate_range(range: &Range<Data>) -> Result<(), String> {
     let (height, width) = range.get_size();
-    if height > MAX_ROWS || width > MAX_COLUMNS {
+    let max_rows = u32::try_from(MAX_ROWS)
+        .map_err(|_| "지출 시트 행 안전 제한이 올바르지 않습니다.".to_owned())?;
+    let max_columns = u32::try_from(MAX_COLUMNS)
+        .map_err(|_| "지출 시트 열 안전 제한이 올바르지 않습니다.".to_owned())?;
+    let exceeds_address_limit = range
+        .end()
+        .is_some_and(|(last_row, last_column)| last_row >= max_rows || last_column >= max_columns);
+    if height > MAX_ROWS || width > MAX_COLUMNS || exceeds_address_limit {
         return Err("지출 시트의 행 또는 열 수가 안전 제한을 초과했습니다.".to_owned());
     }
     for cell in range.used_cells().map(|(_, _, cell)| cell) {
@@ -1363,28 +1370,43 @@ fn parse_datetime(cell: &Data) -> Option<String> {
 }
 
 fn parse_amount(cell: &Data) -> Option<i64> {
-    if let Some(value) = cell.as_i64() {
-        return Some(value);
-    }
-    if let Some(value) = cell.as_f64() {
-        if value.is_finite() && value.fract().abs() < f64::EPSILON {
-            return i64::try_from(value as i128).ok();
+    let parsed = match cell {
+        Data::Int(value) => *value,
+        Data::Float(value) => {
+            if !value.is_finite()
+                || value.fract() != 0.0
+                || value.abs() > MAX_SAFE_AMOUNT_MINOR as f64
+            {
+                return None;
+            }
+            *value as i64
         }
-    }
-    let value = cell_text(cell);
-    let trimmed = value.trim();
-    let negative_parentheses = trimmed.starts_with('(') && trimmed.ends_with(')');
-    let normalized = trimmed
-        .trim_matches(['(', ')'])
-        .chars()
-        .filter(|character| !matches!(character, ',' | '₩' | '원' | ' '))
-        .collect::<String>();
-    let parsed = normalized.parse::<i64>().ok()?;
-    if negative_parentheses {
-        parsed.checked_abs()?.checked_neg()
-    } else {
-        Some(parsed)
-    }
+        Data::String(value) => {
+            let trimmed = value.trim();
+            let negative_parentheses = trimmed.starts_with('(') && trimmed.ends_with(')');
+            if trimmed.starts_with('(') != trimmed.ends_with(')') {
+                return None;
+            }
+            let normalized = trimmed
+                .trim_matches(['(', ')'])
+                .chars()
+                .filter(|character| !matches!(character, ',' | '₩' | '원' | ' '))
+                .collect::<String>();
+            let parsed = normalized.parse::<i64>().ok()?;
+            if negative_parentheses {
+                parsed.checked_abs()?.checked_neg()?
+            } else {
+                parsed
+            }
+        }
+        Data::Empty
+        | Data::Bool(_)
+        | Data::DateTime(_)
+        | Data::DateTimeIso(_)
+        | Data::DurationIso(_)
+        | Data::Error(_) => return None,
+    };
+    (parsed.unsigned_abs() <= MAX_SAFE_AMOUNT_MINOR.unsigned_abs()).then_some(parsed)
 }
 
 fn absolute_nonzero_amount(value: i64) -> Option<i64> {
@@ -1576,7 +1598,44 @@ mod tests {
             parse_amount(&Data::String("(5,000)".to_owned())),
             Some(-5_000)
         );
+        assert_eq!(parse_amount(&Data::Float(1.0)), Some(1));
         assert_eq!(parse_amount(&Data::Float(1.5)), None);
+        assert_eq!(parse_amount(&Data::Float(f64::EPSILON / 2.0)), None);
+        assert_eq!(parse_amount(&Data::Float(f64::NAN)), None);
+        assert_eq!(parse_amount(&Data::Float(f64::INFINITY)), None);
+        assert_eq!(parse_amount(&Data::Float(f64::NEG_INFINITY)), None);
+        assert_eq!(
+            parse_amount(&Data::Float(MAX_SAFE_AMOUNT_MINOR as f64)),
+            Some(MAX_SAFE_AMOUNT_MINOR)
+        );
+        assert_eq!(
+            parse_amount(&Data::Float(-(MAX_SAFE_AMOUNT_MINOR as f64))),
+            Some(-MAX_SAFE_AMOUNT_MINOR)
+        );
+        assert_eq!(
+            parse_amount(&Data::Float((MAX_SAFE_AMOUNT_MINOR + 1) as f64)),
+            None
+        );
+        assert_eq!(
+            parse_amount(&Data::Int(MAX_SAFE_AMOUNT_MINOR)),
+            Some(MAX_SAFE_AMOUNT_MINOR)
+        );
+        assert_eq!(
+            parse_amount(&Data::Int(-MAX_SAFE_AMOUNT_MINOR)),
+            Some(-MAX_SAFE_AMOUNT_MINOR)
+        );
+        assert_eq!(parse_amount(&Data::Int(MAX_SAFE_AMOUNT_MINOR + 1)), None);
+        assert_eq!(parse_amount(&Data::Int(i64::MIN)), None);
+        assert_eq!(
+            parse_amount(&Data::String(MAX_SAFE_AMOUNT_MINOR.to_string())),
+            Some(MAX_SAFE_AMOUNT_MINOR)
+        );
+        assert_eq!(
+            parse_amount(&Data::String((MAX_SAFE_AMOUNT_MINOR + 1).to_string())),
+            None
+        );
+        assert_eq!(parse_amount(&Data::String("1.5".to_owned())), None);
+        assert_eq!(parse_amount(&Data::Bool(true)), None);
         assert_eq!(absolute_nonzero_amount(0), None);
         assert_eq!(absolute_nonzero_amount(i64::MIN), None);
         assert_eq!(
@@ -1816,6 +1875,12 @@ mod tests {
 
     #[test]
     fn sheet_dimensions_and_cell_strings_are_bounded() {
+        let last_allowed_cell = Range::from_sparse(vec![Cell::new(
+            ((MAX_ROWS - 1) as u32, (MAX_COLUMNS - 1) as u32),
+            Data::String("x".to_owned()),
+        )]);
+        assert!(validate_range(&last_allowed_cell).is_ok());
+
         let too_many_rows = Range::from_sparse(vec![Cell::new(
             (MAX_ROWS as u32, 0),
             Data::String("x".to_owned()),
