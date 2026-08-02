@@ -107,6 +107,12 @@ fn schema_fifteen_migrates_schema_fourteen_without_losing_existing_work() -> Res
     let project_id = Uuid::now_v7().to_string();
     let task_id = Uuid::now_v7().to_string();
     let connection = Connection::open(&database_path)?;
+    connection.create_scalar_function("tm_uuid_v7", 0, FunctionFlags::SQLITE_UTF8, |_| {
+        Ok(Uuid::now_v7().to_string())
+    })?;
+    connection.create_scalar_function("tm_now_utc", 0, FunctionFlags::SQLITE_UTF8, |_| {
+        Ok("2026-07-30T00:00:00.000Z".to_owned())
+    })?;
     connection.execute(
         "INSERT INTO projects(
             id, name, description, color, sort_order, created_at, updated_at,
