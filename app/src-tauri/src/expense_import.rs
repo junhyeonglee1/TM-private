@@ -301,7 +301,7 @@ pub(crate) fn parse_expense_file(
     let encrypted_bytes =
         fs::read(&path).map_err(|_| "지출 파일을 읽을 수 없습니다.".to_owned())?;
     let file_sha256 = hex_sha256(&encrypted_bytes);
-    let workbook_bytes = if extension == "xlsx" && encrypted_bytes.starts_with(OLE_MAGIC) {
+    let mut workbook_bytes = if extension == "xlsx" && encrypted_bytes.starts_with(OLE_MAGIC) {
         let Some(password) = input.password.as_deref().filter(|value| !value.is_empty()) else {
             return Ok(None);
         };
@@ -323,7 +323,7 @@ pub(crate) fn parse_expense_file(
     if extension == "xlsx" {
         validate_ooxml_container(&workbook_bytes)?;
     } else {
-        validate_xls_container(&workbook_bytes)?;
+        validate_xls_container_for_import(&mut workbook_bytes)?;
     }
 
     let mut workbook = open_workbook_auto_from_rs(Cursor::new(workbook_bytes))
@@ -701,13 +701,12 @@ fn add_cfb_fat_sector(
     Ok(())
 }
 
-fn cfb_fat_entry(
-    bytes: &[u8],
+fn cfb_fat_entry_offset(
     sector_size: usize,
     sector_count: usize,
     fat_sectors: &[u32],
     sector_id: u32,
-) -> Result<u32, String> {
+) -> Result<usize, String> {
     let index = usize::try_from(sector_id)
         .ok()
         .filter(|index| *index < sector_count)
@@ -718,8 +717,26 @@ fn cfb_fat_entry(
     let fat_sector_id = *fat_sectors
         .get(fat_sector_index)
         .ok_or_else(|| "The XLS FAT table is incomplete.".to_owned())?;
-    let fat_sector = cfb_sector(bytes, sector_size, sector_count, fat_sector_id)?;
-    read_cfb_u32(fat_sector, entry_index * 4)
+    let fat_sector_index = usize::try_from(fat_sector_id)
+        .ok()
+        .filter(|index| *index < sector_count)
+        .ok_or_else(|| "The XLS compound document references an invalid sector.".to_owned())?;
+    fat_sector_index
+        .checked_add(1)
+        .and_then(|index| index.checked_mul(sector_size))
+        .and_then(|offset| offset.checked_add(entry_index * 4))
+        .ok_or_else(|| "The XLS compound document sector offset overflowed.".to_owned())
+}
+
+fn cfb_fat_entry(
+    bytes: &[u8],
+    sector_size: usize,
+    sector_count: usize,
+    fat_sectors: &[u32],
+    sector_id: u32,
+) -> Result<u32, String> {
+    let offset = cfb_fat_entry_offset(sector_size, sector_count, fat_sectors, sector_id)?;
+    read_cfb_u32(bytes, offset)
 }
 
 fn decode_cfb_entry_name(entry: &[u8]) -> Result<String, String> {
@@ -760,7 +777,12 @@ fn is_forbidden_cfb_entry_name(name: &str) -> bool {
         || visible.starts_with("olepres")
 }
 
-fn preflight_xls_container(bytes: &[u8]) -> Result<PathBuf, String> {
+struct XlsContainerPreflight {
+    workbook_path: PathBuf,
+    legacy_fat_marker_offset: Option<usize>,
+}
+
+fn preflight_xls_container(bytes: &[u8]) -> Result<XlsContainerPreflight, String> {
     if bytes.len() < 512
         || bytes.len() as u64 > MAX_EXPENSE_FILE_BYTES
         || bytes.get(..OLE_MAGIC.len()) != Some(OLE_MAGIC)
@@ -837,13 +859,54 @@ fn preflight_xls_container(bytes: &[u8]) -> Result<PathBuf, String> {
     {
         return Err("The XLS FAT and DIFAT sectors overlap.".to_owned());
     }
-    for (index, is_fat) in seen_fat.iter().enumerate() {
-        if *is_fat
-            && cfb_fat_entry(bytes, sector_size, sector_count, &fat_sectors, index as u32)?
-                != CFB_FAT_SECTOR
+    for sector_id in 0..sector_count {
+        let next = cfb_fat_entry(
+            bytes,
+            sector_size,
+            sector_count,
+            &fat_sectors,
+            sector_id as u32,
+        )?;
+        if let Ok(next_index) = usize::try_from(next)
+            && next_index < sector_count
+            && (seen_fat[next_index] || seen_difat[next_index])
         {
+            return Err("The XLS FAT chain references a reserved metadata sector.".to_owned());
+        }
+    }
+
+    let mut legacy_fat_marker_offset = None;
+    for (index, is_fat) in seen_fat.iter().enumerate() {
+        if !*is_fat {
+            continue;
+        }
+        let marker = cfb_fat_entry(bytes, sector_size, sector_count, &fat_sectors, index as u32)?;
+        if marker == CFB_FAT_SECTOR {
+            continue;
+        }
+        let fat_sector = cfb_sector(bytes, sector_size, sector_count, fat_sectors[0])?;
+        let mut unused_fat_entries_are_free = true;
+        for entry_index in sector_count..(sector_size / 4) {
+            if read_cfb_u32(fat_sector, entry_index * 4)? != CFB_FREE_SECTOR {
+                unused_fat_entries_are_free = false;
+                break;
+            }
+        }
+        let is_supported_legacy_marker = marker == CFB_END_OF_CHAIN
+            && major_version == 3
+            && fat_sector_count == 1
+            && difat_sector_count == 0
+            && index + 1 == sector_count
+            && unused_fat_entries_are_free;
+        if !is_supported_legacy_marker || legacy_fat_marker_offset.is_some() {
             return Err("The XLS FAT sector marker is invalid.".to_owned());
         }
+        legacy_fat_marker_offset = Some(cfb_fat_entry_offset(
+            sector_size,
+            sector_count,
+            &fat_sectors,
+            index as u32,
+        )?);
     }
     for (index, is_difat) in seen_difat.iter().enumerate() {
         if *is_difat
@@ -951,18 +1014,29 @@ fn preflight_xls_container(bytes: &[u8]) -> Result<PathBuf, String> {
     }
     let workbook_name = workbook_name
         .ok_or_else(|| "The XLS file must contain exactly one workbook stream.".to_owned())?;
-    Ok(PathBuf::from(format!("/{workbook_name}")))
+    Ok(XlsContainerPreflight {
+        workbook_path: PathBuf::from(format!("/{workbook_name}")),
+        legacy_fat_marker_offset,
+    })
 }
 
-fn validate_xls_container(bytes: &[u8]) -> Result<(), String> {
+fn validate_xls_container_for_import(bytes: &mut [u8]) -> Result<(), String> {
     // Parse and bound the raw directory/FAT first. cfb::Entries::walk intentionally is not used:
     // an adversarial unbalanced sibling tree can otherwise allocate before caller-side limits run.
-    let workbook_path = preflight_xls_container(bytes)?;
-    let mut compound = cfb::CompoundFile::open(Cursor::new(bytes))
+    let preflight = preflight_xls_container(bytes)?;
+    if let Some(offset) = preflight.legacy_fat_marker_offset {
+        bytes
+            .get_mut(offset..offset.saturating_add(4))
+            .ok_or_else(|| "The XLS FAT sector marker is truncated.".to_owned())?
+            .copy_from_slice(&CFB_FAT_SECTOR.to_le_bytes());
+    }
+    let mut compound = cfb::CompoundFile::open(Cursor::new(&*bytes))
         .map_err(|_| "The XLS compound document is invalid.".to_owned())?;
-    let mut stream = compound.open_stream(&workbook_path).map_err(|_| {
-        "The XLS workbook stream must be located directly under the root.".to_owned()
-    })?;
+    let mut stream = compound
+        .open_stream(&preflight.workbook_path)
+        .map_err(|_| {
+            "The XLS workbook stream must be located directly under the root.".to_owned()
+        })?;
     let mut workbook = Vec::new();
     (&mut stream)
         .take(MAX_EXPENSE_FILE_BYTES + 1)
@@ -972,6 +1046,12 @@ fn validate_xls_container(bytes: &[u8]) -> Result<(), String> {
         return Err("The XLS workbook stream exceeds the safety limit.".to_owned());
     }
     validate_biff_workbook_stream(&workbook)
+}
+
+#[cfg(test)]
+fn validate_xls_container(bytes: &[u8]) -> Result<(), String> {
+    let mut normalized = bytes.to_vec();
+    validate_xls_container_for_import(&mut normalized)
 }
 
 fn validate_biff_workbook_stream(bytes: &[u8]) -> Result<(), String> {
@@ -2743,16 +2823,17 @@ mod tests {
     use zip::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
     use super::{
-        BiffSheetStats, ExpenseAdapter, MAX_BIFF_SST_CONTINUE_RECORDS, MAX_CELL_CHARS,
-        MAX_CFB_ENTRIES, MAX_COLUMNS, MAX_RANGE_CELLS, MAX_ROWS, MAX_SAFE_AMOUNT_MINOR,
-        MAX_STYLE_CELL_XFS, MAX_STYLE_NUMFMTS, MAX_STYLES_METADATA_BYTES, absolute_nonzero_amount,
-        declared_coverage_period, detect_adapter, find_kb_card_layout, parse_amount,
-        parse_datetime, parse_kakao_pay, parse_kb_account, parse_kb_card,
-        redact_financial_identifiers, source_discriminator_fingerprint, validate_biff_dimensions,
-        validate_biff_sheet, validate_biff_sst, validate_biff_workbook_stream,
-        validate_ooxml_container, validate_range, validate_relationships_xml,
-        validate_shared_strings_xml, validate_styles_xml, validate_workbook_xml,
-        validate_xls_container, validate_xlsx_workbook_ranges,
+        BiffSheetStats, CFB_END_OF_CHAIN, CFB_FAT_SECTOR, CFB_FREE_SECTOR, ExpenseAdapter,
+        MAX_BIFF_SST_CONTINUE_RECORDS, MAX_CELL_CHARS, MAX_CFB_ENTRIES, MAX_COLUMNS,
+        MAX_RANGE_CELLS, MAX_ROWS, MAX_SAFE_AMOUNT_MINOR, MAX_STYLE_CELL_XFS, MAX_STYLE_NUMFMTS,
+        MAX_STYLES_METADATA_BYTES, absolute_nonzero_amount, declared_coverage_period,
+        detect_adapter, find_kb_card_layout, parse_amount, parse_datetime, parse_kakao_pay,
+        parse_kb_account, parse_kb_card, redact_financial_identifiers,
+        source_discriminator_fingerprint, validate_biff_dimensions, validate_biff_sheet,
+        validate_biff_sst, validate_biff_workbook_stream, validate_ooxml_container, validate_range,
+        validate_relationships_xml, validate_shared_strings_xml, validate_styles_xml,
+        validate_workbook_xml, validate_xls_container, validate_xls_container_for_import,
+        validate_xlsx_workbook_ranges,
     };
 
     fn string_range(rows: &[&[&str]]) -> Range<Data> {
@@ -2810,6 +2891,31 @@ mod tests {
                 .expect("write synthetic BIFF records");
         }
         compound.into_inner().into_inner()
+    }
+
+    fn cfb_with_legacy_terminal_fat_marker(records: &[u8]) -> (Vec<u8>, usize, usize, u32) {
+        let mut bytes = cfb_with_workbook(records, None);
+        let sector_size = 512_usize;
+        assert_eq!(bytes.len() % sector_size, 0);
+        assert_eq!(u32::from_le_bytes(bytes[44..48].try_into().unwrap()), 1);
+        assert_eq!(u32::from_le_bytes(bytes[72..76].try_into().unwrap()), 0);
+
+        let old_fat_sector =
+            u32::from_le_bytes(bytes[76..80].try_into().expect("synthetic FAT sector id"));
+        let old_fat_start = (old_fat_sector as usize + 1) * sector_size;
+        let fat_sector = bytes[old_fat_start..old_fat_start + sector_size].to_vec();
+        let new_fat_sector = (bytes.len() / sector_size - 1) as u32;
+        assert!((new_fat_sector as usize) < sector_size / 4);
+        bytes.extend_from_slice(&fat_sector);
+        bytes[76..80].copy_from_slice(&new_fat_sector.to_le_bytes());
+
+        let new_fat_start = (new_fat_sector as usize + 1) * sector_size;
+        let old_fat_entry_offset = new_fat_start + old_fat_sector as usize * 4;
+        bytes[old_fat_entry_offset..old_fat_entry_offset + 4]
+            .copy_from_slice(&CFB_FREE_SECTOR.to_le_bytes());
+        let marker_offset = new_fat_start + new_fat_sector as usize * 4;
+        bytes[marker_offset..marker_offset + 4].copy_from_slice(&CFB_END_OF_CHAIN.to_le_bytes());
+        (bytes, marker_offset, old_fat_entry_offset, new_fat_sector)
     }
 
     fn push_biff_record(records: &mut Vec<u8>, record_type: u16, payload: &[u8]) {
@@ -3791,6 +3897,59 @@ mod tests {
             0x0a, 0x00, 0x00, 0x00, // EOF
         ];
         assert!(validate_xls_container(&cfb_with_workbook(&embedded_object, None)).is_err());
+    }
+
+    #[test]
+    fn legacy_terminal_fat_marker_is_canonicalized_in_memory() {
+        let safe_records = [
+            0x09, 0x08, 0x04, 0x00, 0x00, 0x06, 0x05, 0x00, // BIFF8 workbook BOF
+            0x0a, 0x00, 0x00, 0x00, // EOF
+        ];
+        let (mut legacy, marker_offset, _, _) = cfb_with_legacy_terminal_fat_marker(&safe_records);
+        assert_eq!(
+            u32::from_le_bytes(legacy[marker_offset..marker_offset + 4].try_into().unwrap()),
+            CFB_END_OF_CHAIN
+        );
+
+        validate_xls_container_for_import(&mut legacy)
+            .expect("canonicalize a bounded legacy FAT marker");
+
+        assert_eq!(
+            u32::from_le_bytes(legacy[marker_offset..marker_offset + 4].try_into().unwrap()),
+            CFB_FAT_SECTOR
+        );
+    }
+
+    #[test]
+    fn malformed_legacy_fat_marker_variants_remain_rejected() {
+        let safe_records = [
+            0x09, 0x08, 0x04, 0x00, 0x00, 0x06, 0x05, 0x00, // BIFF8 workbook BOF
+            0x0a, 0x00, 0x00, 0x00, // EOF
+        ];
+
+        let (mut free_marker, marker_offset, _, _) =
+            cfb_with_legacy_terminal_fat_marker(&safe_records);
+        free_marker[marker_offset..marker_offset + 4]
+            .copy_from_slice(&CFB_FREE_SECTOR.to_le_bytes());
+        assert!(validate_xls_container(&free_marker).is_err());
+
+        let (mut nonterminal_fat, _, _, _) = cfb_with_legacy_terminal_fat_marker(&safe_records);
+        nonterminal_fat.extend_from_slice(&[0_u8; 512]);
+        assert!(validate_xls_container(&nonterminal_fat).is_err());
+
+        let (mut reserved_pointer, _, spare_entry_offset, fat_sector) =
+            cfb_with_legacy_terminal_fat_marker(&safe_records);
+        reserved_pointer[spare_entry_offset..spare_entry_offset + 4]
+            .copy_from_slice(&fat_sector.to_le_bytes());
+        assert!(validate_xls_container(&reserved_pointer).is_err());
+
+        let (mut nonfree_tail, _, _, fat_sector) =
+            cfb_with_legacy_terminal_fat_marker(&safe_records);
+        let sector_count = nonfree_tail.len() / 512 - 1;
+        let first_tail_entry_offset = (fat_sector as usize + 1) * 512 + sector_count * 4;
+        nonfree_tail[first_tail_entry_offset..first_tail_entry_offset + 4]
+            .copy_from_slice(&CFB_END_OF_CHAIN.to_le_bytes());
+        assert!(validate_xls_container(&nonfree_tail).is_err());
     }
 
     #[test]
