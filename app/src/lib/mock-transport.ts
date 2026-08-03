@@ -1353,6 +1353,8 @@ export class MemoryTransport implements CommandTransport {
     const filtered = this.expenses.reviews
       .filter((item) => !input.month || item.transaction.occurredAt.startsWith(`${input.month}-`))
       .filter((item) => !input.status || item.status === input.status)
+      .filter((item) => input.scope !== "required" || item.reason !== "category_confirmation")
+      .filter((item) => input.scope !== "category_confirmation" || item.reason === "category_confirmation")
       .sort((left, right) => right.transaction.occurredAt.localeCompare(left.transaction.occurredAt));
     return {
       items: filtered.slice(offset, offset + limit),

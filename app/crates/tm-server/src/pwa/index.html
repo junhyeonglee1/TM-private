@@ -170,9 +170,11 @@
           </section>
           <section id="expense-view-reviews" class="expense-view hidden" aria-labelledby="expense-reviews-heading">
             <div class="expense-subheading"><h2 id="expense-reviews-heading">확인 필요</h2><span id="expense-reviews-count">0건</span></div>
-            <p class="muted">목적이 불명확한 송금은 결정하기 전까지 확정 지출에서 제외됩니다.</p>
+            <p class="muted">구매 카테고리는 검토하지 않아도 현재 분류로 합계에 반영됩니다. 목적이 불명확한 송금만 결정 전까지 확정 지출에서 제외됩니다.</p>
+            <button id="expense-review-categories-toggle" class="secondary hidden" type="button">선택 분류 보기</button>
             <div id="expense-reviews-list" class="card-list"></div>
             <button id="expense-reviews-more" class="secondary pagination-more hidden" type="button">검토 더 보기</button>
+            <button id="expense-category-reviews-more" class="secondary pagination-more hidden" type="button">선택 분류 더 보기</button>
           </section>
           <section id="expense-view-recurring" class="expense-view hidden" aria-labelledby="expense-recurring-heading">
             <div class="expense-subheading"><h2 id="expense-recurring-heading">정기지출</h2><button id="expense-recurring-add" class="primary" type="button">항목 추가</button></div>

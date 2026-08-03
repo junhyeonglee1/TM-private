@@ -2397,32 +2397,54 @@ fn parse_kb_account(range: &Range<Data>) -> Result<(Vec<ParsedExpenseRow>, usize
         let memo = bounded_optional(row.get(3).map(cell_text));
         let transaction_code = row.get(8).map(cell_text).unwrap_or_default();
         let combined = format!("{summary} {transaction_code}");
+        let summary_only_check_card = withdrawal > 0
+            && summary.contains("체크카드")
+            && !transaction_code.contains("체크카드");
         let (kind, category, direction, needs_review, excluded) = if withdrawal > 0
             && (combined.contains("국민카드") || combined.contains("카드대금"))
         {
             ("card_settlement", "transfer_settlement", "out", false, true)
-        } else if withdrawal > 0 && transaction_code.contains("체크카드") {
+        } else if withdrawal > 0 && combined.contains("체크카드") {
             ("purchase", "unresolved", "out", false, false)
         } else if withdrawal > 0 {
             ("bank_out", "unresolved", "out", true, false)
         } else {
             ("bank_in", "unresolved", "in", true, false)
         };
-        rows.push(parsed_row(
+        let amount_minor = withdrawal.max(deposit);
+        let note = memo.or_else(|| bounded_optional(Some(summary)));
+        let mut parsed = parsed_row(
             ExpenseAdapter::KbAccountHistoryV1,
             offset + 1,
             occurred_at,
             kind,
             category,
             direction,
-            withdrawal.max(deposit),
+            amount_minor,
             (kind == "purchase").then(|| display.clone()).flatten(),
-            (kind != "purchase").then_some(display).flatten(),
-            memo.or_else(|| bounded_optional(Some(summary))),
+            (kind != "purchase").then(|| display.clone()).flatten(),
+            note.clone(),
             None,
             needs_review,
             excluded,
-        ));
+        );
+        if kind == "purchase" && summary_only_check_card {
+            // V1 originally looked only at transaction_code and stored these rows as bank_out.
+            // Retain that old stable identity so an overlapping statement fails closed on changed
+            // content instead of inserting the same source row under a second stable key.
+            parsed.row_fingerprint = row_identity_fingerprint(
+                ExpenseAdapter::KbAccountHistoryV1,
+                &parsed.occurred_at,
+                "bank_out",
+                "out",
+                amount_minor,
+                None,
+                display.as_deref(),
+                note.as_deref(),
+                None,
+            );
+        }
+        rows.push(parsed);
     }
     Ok((rows, rejected))
 }
@@ -2611,18 +2633,17 @@ fn parsed_row(
     needs_review: bool,
     excluded: bool,
 ) -> ParsedExpenseRow {
-    let fingerprint = [
-        adapter.as_str(),
+    let row_fingerprint = row_identity_fingerprint(
+        adapter,
         &occurred_at,
         kind,
         direction,
-        &amount_minor.to_string(),
-        merchant.as_deref().unwrap_or_default(),
-        counterparty.as_deref().unwrap_or_default(),
-        note.as_deref().unwrap_or_default(),
-        payment_method_fingerprint.as_deref().unwrap_or_default(),
-    ]
-    .join("\u{1f}");
+        amount_minor,
+        merchant.as_deref(),
+        counterparty.as_deref(),
+        note.as_deref(),
+        payment_method_fingerprint.as_deref(),
+    );
     ParsedExpenseRow {
         row_number,
         occurred_at,
@@ -2635,10 +2656,37 @@ fn parsed_row(
         counterparty,
         note,
         payment_method_fingerprint,
-        row_fingerprint: hex_sha256(fingerprint.as_bytes()),
+        row_fingerprint,
         needs_review,
         excluded,
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn row_identity_fingerprint(
+    adapter: ExpenseAdapter,
+    occurred_at: &str,
+    kind: &str,
+    direction: &str,
+    amount_minor: i64,
+    merchant: Option<&str>,
+    counterparty: Option<&str>,
+    note: Option<&str>,
+    payment_method_fingerprint: Option<&str>,
+) -> String {
+    let fingerprint = [
+        adapter.as_str(),
+        occurred_at,
+        kind,
+        direction,
+        &amount_minor.to_string(),
+        merchant.unwrap_or_default(),
+        counterparty.unwrap_or_default(),
+        note.unwrap_or_default(),
+        payment_method_fingerprint.unwrap_or_default(),
+    ]
+    .join("\u{1f}");
+    hex_sha256(fingerprint.as_bytes())
 }
 
 fn find_header_row(range: &Range<Data>, required: &[&str]) -> Result<usize, String> {
@@ -2828,7 +2876,7 @@ mod tests {
         MAX_RANGE_CELLS, MAX_ROWS, MAX_SAFE_AMOUNT_MINOR, MAX_STYLE_CELL_XFS, MAX_STYLE_NUMFMTS,
         MAX_STYLES_METADATA_BYTES, absolute_nonzero_amount, declared_coverage_period,
         detect_adapter, find_kb_card_layout, parse_amount, parse_datetime, parse_kakao_pay,
-        parse_kb_account, parse_kb_card, redact_financial_identifiers,
+        parse_kb_account, parse_kb_card, redact_financial_identifiers, row_identity_fingerprint,
         source_discriminator_fingerprint, validate_biff_dimensions, validate_biff_sheet,
         validate_biff_sst, validate_biff_workbook_stream, validate_ooxml_container, validate_range,
         validate_relationships_xml, validate_shared_strings_xml, validate_styles_xml,
@@ -3238,6 +3286,104 @@ mod tests {
 
         let no_period = string_range(&[&["출력일시", "2026.08.31"], &["2026-08-12", "5000", ""]]);
         assert_eq!(declared_coverage_period(&no_period), None);
+    }
+
+    #[test]
+    fn kb_account_detects_check_card_marker_from_summary_with_legacy_v1_identity() {
+        let account = string_range(&[
+            &[
+                "거래일시",
+                "거래내용",
+                "거래처",
+                "메모",
+                "출금액",
+                "입금액",
+                "",
+                "",
+                "거래구분",
+            ],
+            &[
+                "2026-08-03 09:00",
+                "체크카드",
+                "합성 편의점",
+                "",
+                "5000",
+                "",
+                "",
+                "",
+                "전자금융",
+            ],
+        ]);
+
+        let (rows, rejected) = parse_kb_account(&account).expect("parse KB account purchase");
+        assert_eq!(rejected, 0);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].kind, "purchase");
+        assert_eq!(rows[0].category, "unresolved");
+        assert_eq!(rows[0].merchant.as_deref(), Some("합성 편의점"));
+        assert_eq!(rows[0].counterparty, None);
+        assert!(!rows[0].needs_review);
+        assert_eq!(
+            rows[0].row_fingerprint,
+            row_identity_fingerprint(
+                super::ExpenseAdapter::KbAccountHistoryV1,
+                "2026-08-03T09:00:00",
+                "bank_out",
+                "out",
+                5_000,
+                None,
+                Some("합성 편의점"),
+                Some("체크카드"),
+                None,
+            ),
+            "summary-only check-card rows must retain their legacy V1 identity"
+        );
+    }
+
+    #[test]
+    fn kb_account_transaction_code_check_card_keeps_purchase_identity() {
+        let account = string_range(&[
+            &[
+                "거래일시",
+                "거래내용",
+                "거래처",
+                "메모",
+                "출금액",
+                "입금액",
+                "",
+                "",
+                "거래구분",
+            ],
+            &[
+                "2026-08-03 09:00",
+                "승인",
+                "합성 가맹점",
+                "",
+                "5000",
+                "",
+                "",
+                "",
+                "체크카드",
+            ],
+        ]);
+
+        let (rows, rejected) = parse_kb_account(&account).expect("parse KB account purchase");
+        assert_eq!(rejected, 0);
+        assert_eq!(rows[0].kind, "purchase");
+        assert_eq!(
+            rows[0].row_fingerprint,
+            row_identity_fingerprint(
+                super::ExpenseAdapter::KbAccountHistoryV1,
+                "2026-08-03T09:00:00",
+                "purchase",
+                "out",
+                5_000,
+                Some("합성 가맹점"),
+                None,
+                Some("승인"),
+                None,
+            )
+        );
     }
 
     #[test]

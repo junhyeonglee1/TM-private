@@ -261,6 +261,20 @@ string_enum!(ExpenseReviewReason {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum ExpenseReviewScope {
+    All,
+    Required,
+    CategoryConfirmation,
+}
+
+string_enum!(ExpenseReviewScope {
+    All => "all",
+    Required => "required",
+    CategoryConfirmation => "category_confirmation",
+});
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RecurringAmountKind {
     Fixed,
     Estimate,
@@ -1442,6 +1456,14 @@ impl TmCore {
     }
 
     pub fn list_expense_reviews(&self, filter: ExpenseReviewFilter) -> Result<ExpenseReviewPage> {
+        self.list_expense_reviews_scoped(filter, ExpenseReviewScope::All)
+    }
+
+    pub fn list_expense_reviews_scoped(
+        &self,
+        filter: ExpenseReviewFilter,
+        scope: ExpenseReviewScope,
+    ) -> Result<ExpenseReviewPage> {
         if let Some(month) = filter.month_start {
             validate_month_start(month)?;
         }
@@ -1459,16 +1481,20 @@ impl TmCore {
              JOIN expense_events AS e ON e.id = r.event_id
              WHERE (?1 IS NULL OR (e.posted_date >= ?1 AND e.posted_date < ?2))
                AND (?3 IS NULL OR r.review_status = ?3)
-               AND (?4 IS NULL OR r.created_at < ?4
-                    OR (r.created_at = ?4 AND r.id < ?5))
-             ORDER BY r.created_at DESC, r.id DESC
-             LIMIT ?6",
+               AND (?4 = 'all'
+                    OR (?4 = 'required' AND r.review_reason != 'category_confirmation')
+                    OR (?4 = 'category_confirmation' AND r.review_reason = 'category_confirmation'))
+               AND (?5 IS NULL OR r.created_at < ?5
+                    OR (r.created_at = ?5 AND r.id < ?6))
+              ORDER BY r.created_at DESC, r.id DESC
+              LIMIT ?7",
         )?;
         let rows = statement.query_map(
             params![
                 filter.month_start,
                 month_end,
                 status,
+                scope.as_str(),
                 cursor_at,
                 cursor_id,
                 i64::from(limit + 1),
@@ -2428,16 +2454,19 @@ fn classification_rule(
     let Some(merchant) = row.merchant.as_ref() else {
         return Ok(None);
     };
+    let Some(payment_method_fingerprint) = row.payment_method_fingerprint.as_deref() else {
+        return Ok(None);
+    };
     transaction
         .query_row(
             "SELECT event_kind, category
              FROM expense_rules
              WHERE rule_kind = 'classification'
                AND merchant_blind_index = ?1
-               AND payment_method_fingerprint IS ?2
+               AND payment_method_fingerprint = ?2
              ORDER BY created_at DESC, id DESC
              LIMIT 1",
-            params![merchant.blind_index, row.payment_method_fingerprint],
+            params![merchant.blind_index, payment_method_fingerprint],
             |record| Ok((record.get::<_, String>(0)?, record.get::<_, String>(1)?)),
         )
         .optional()?
@@ -3539,9 +3568,9 @@ fn resolve_expense_review_in_transaction(
                 },
             )
             .optional()?;
-        let Some((Some(merchant), payment_method)) = rule_source else {
+        let Some((Some(merchant), Some(payment_method))) = rule_source else {
             return Err(invalid(
-                "a classification rule requires an encrypted merchant blind index",
+                "a classification rule requires merchant and payment method fingerprints",
             ));
         };
         let changed = transaction.execute(
@@ -3574,6 +3603,21 @@ fn resolve_expense_review_in_transaction(
                 ],
             )?;
         }
+        if input.kind == ExpenseEventKind::Purchase
+            && input.duplicate_of_event_id.is_none()
+            && input.related_event_id.is_none()
+            && input.personal_amount_minor.is_none()
+        {
+            resolve_matching_pending_category_confirmations(
+                transaction,
+                &current.0,
+                review_id,
+                &merchant,
+                &payment_method,
+                input.category,
+                &now,
+            )?;
+        }
     }
     let changed = transaction.execute(
         "UPDATE expense_reviews
@@ -3603,10 +3647,10 @@ fn resolve_expense_review_in_transaction(
              resolved_at = ?5, version = version + 1
          WHERE event_id = ?1 AND id != ?6 AND review_status = 'pending'
            AND (
-               review_reason IN (
+               (?8 != 'category_confirmation' AND review_reason IN (
                    'unknown_p2p', 'ambiguous_mirror',
                    'category_confirmation', 'import_rejected'
-               )
+               ))
                OR ?7 != 'confirmed' OR ?2 != 'purchase'
            )",
         params![
@@ -3617,8 +3661,98 @@ fn resolve_expense_review_in_transaction(
             now,
             review_id,
             event_status.as_str(),
+            current.7,
         ],
     )?;
+    Ok(())
+}
+
+fn resolve_matching_pending_category_confirmations(
+    transaction: &Transaction<'_>,
+    current_event_id: &str,
+    current_review_id: &str,
+    merchant_blind_index: &str,
+    payment_method_fingerprint: &str,
+    category: ExpenseCategory,
+    resolved_at: &str,
+) -> Result<()> {
+    let candidates = {
+        let mut statement = transaction.prepare(
+            "SELECT e.id, r.id
+             FROM expense_reviews AS r
+             JOIN expense_events AS e ON e.id = r.event_id
+             JOIN expense_postings AS p ON p.id = e.primary_posting_id
+             WHERE r.id != ?1 AND e.id != ?2
+               AND r.review_status = 'pending'
+               AND r.review_reason = 'category_confirmation'
+               AND e.event_kind = 'purchase'
+               AND e.event_status = 'confirmed'
+               AND e.is_provisional = 0
+               AND e.duplicate_of_event_id IS NULL
+               AND e.exclusion_reason IS NULL
+               AND p.merchant_blind_index = ?3
+               AND p.payment_method_fingerprint = ?4
+               AND NOT EXISTS(
+                   SELECT 1 FROM expense_reviews AS critical
+                   WHERE critical.event_id = e.id
+                     AND critical.review_status = 'pending'
+                     AND critical.review_reason IN (
+                         'unknown_p2p', 'ambiguous_mirror',
+                         'import_rejected', 'manual_override'
+                     )
+               )
+               AND NOT EXISTS(
+                   SELECT 1 FROM expense_allocations AS allocation
+                   WHERE allocation.event_id = e.id
+                      OR allocation.related_event_id = e.id
+               )
+             ORDER BY e.created_at, e.id, r.created_at, r.id",
+        )?;
+        statement
+            .query_map(
+                params![
+                    current_review_id,
+                    current_event_id,
+                    merchant_blind_index,
+                    payment_method_fingerprint,
+                ],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+    };
+
+    for (event_id, review_id) in candidates {
+        let changed_event = transaction.execute(
+            "UPDATE expense_events
+             SET category = ?2, updated_at = ?3, version = version + 1
+             WHERE id = ?1
+               AND event_kind = 'purchase'
+               AND event_status = 'confirmed'
+               AND is_provisional = 0
+               AND duplicate_of_event_id IS NULL
+               AND exclusion_reason IS NULL",
+            params![event_id, category.as_str(), resolved_at],
+        )?;
+        if changed_event != 1 {
+            return Err(Error::Invariant(
+                "a matching category confirmation changed during rule application".to_owned(),
+            ));
+        }
+        let changed_review = transaction.execute(
+            "UPDATE expense_reviews
+             SET review_status = 'resolved', resolved_kind = 'purchase',
+                 resolved_category = ?2, duplicate_of_event_id = NULL,
+                 create_rule = 1, resolved_at = ?3, version = version + 1
+             WHERE id = ?1 AND review_status = 'pending'
+               AND review_reason = 'category_confirmation'",
+            params![review_id, category.as_str(), resolved_at],
+        )?;
+        if changed_review != 1 {
+            return Err(Error::Invariant(
+                "a matching category review changed during rule application".to_owned(),
+            ));
+        }
+    }
     Ok(())
 }
 

@@ -426,6 +426,13 @@ impl CloudClient {
                 if let Some(status) = optional_enum(input, "status", &["pending", "resolved"])? {
                     query.push(("status", status.to_owned()));
                 }
+                if let Some(scope) = optional_enum(
+                    input,
+                    "scope",
+                    &["all", "required", "category_confirmation"],
+                )? {
+                    query.push(("scope", scope.to_owned()));
+                }
                 append_optional_page_query(input, &mut query)?;
                 Method::GET
             }

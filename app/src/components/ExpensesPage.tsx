@@ -678,9 +678,9 @@ function ExpenseTransactionOverrideForm({
       {item.relatedEventId && <label className="check-field"><input checked={clearRelatedEvent} onChange={(event) => { setClearRelatedEvent(event.target.checked); if (event.target.checked) setRelatedEventId(""); else setRelatedEventId(item.relatedEventId ?? ""); }} type="checkbox" /> 기존 정산 연결 명시적으로 해제</label>}
       <label><span>내 부담액 (minor unit·선택)</span><input disabled={kind !== "purchase" || Boolean(duplicateOfEventId) || clearPersonalAmount} max={Math.abs(item.amountMinor)} min="1" onChange={(event) => { setPersonalAmountMinor(event.target.value); setClearPersonalAmount(false); if (event.target.value) { setDuplicateOfEventId(""); setRelatedEventId(""); setClearRelatedEvent(Boolean(item.relatedEventId)); } }} placeholder="전체 금액" step="1" type="number" value={personalAmountMinor} /><small>{kind === "purchase" ? "구매액 중 내 부담액만 따로 지정합니다." : "구매로 처리할 때만 지정할 수 있습니다."}</small></label>
       {item.personalAmountMinor !== null && <label className="check-field"><input checked={clearPersonalAmount} onChange={(event) => { setClearPersonalAmount(event.target.checked); if (event.target.checked) setPersonalAmountMinor(""); else setPersonalAmountMinor(String(item.personalAmountMinor)); }} type="checkbox" /> 기존 내 부담액 {formatMoney(item.personalAmountMinor, item.currency)} 명시적으로 해제</label>}
-      {item.merchant
+      {item.merchant && item.paymentMethodFingerprint
         ? <label className="check-field"><input checked={createRule} onChange={(event) => setCreateRule(event.target.checked)} type="checkbox" /> 앞으로 같은 업체에 적용</label>
-        : <small>업체 정보가 없는 송금·이체는 자동 분류 규칙을 만들 수 없습니다.</small>}
+        : <small>업체와 결제수단을 모두 확인할 수 있는 거래만 자동 분류 규칙을 만들 수 있습니다.</small>}
       <button className="primary-button" disabled={saving} type="submit">{saving ? "저장 중…" : "재분류 저장"}</button>
     </form>
   );
@@ -692,28 +692,41 @@ function ExpenseReviews({ api, month, onNotify, onRegisterRecurring }: Pick<Expe
 }) {
   const [reviews, setReviews] = useState<ExpenseReview[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [categoryNextCursor, setCategoryNextCursor] = useState<string | null>(null);
   const [transactions, setTransactions] = useState<ExpenseTransaction[]>([]);
   const [occurrences, setOccurrences] = useState<RecurringExpenseOccurrence[]>([]);
   const [loading, setLoading] = useState(true);
+  const [showPurchaseCategories, setShowPurchaseCategories] = useState(false);
+  const purchaseCategoryCount = reviews.filter((review) => review.reason === "category_confirmation").length;
+  const visibleReviews = showPurchaseCategories
+    ? reviews
+    : reviews.filter((review) => review.reason !== "category_confirmation");
 
   const load = useCallback(async (cursor?: string) => {
     setLoading(true);
-    if (!cursor) setNextCursor(null);
+    if (!cursor) {
+      setNextCursor(null);
+      setCategoryNextCursor(null);
+    }
     try {
       const transactionMonths = [shiftMonth(month, -1), month, shiftMonth(month, 1)];
-      const [reviewPage, transactionPages, nextOccurrences] = await Promise.all([
-        api.listExpenseReviews({ month, status: "pending", cursor, limit: 100 }),
+      const [reviewPage, categoryPage, transactionPages, nextOccurrences] = await Promise.all([
+        api.listExpenseReviews({ month, status: "pending", scope: "required", cursor, limit: 100 }),
+        cursor
+          ? Promise.resolve(null)
+          : api.listExpenseReviews({ month, status: "pending", scope: "category_confirmation", limit: 100 }),
         Promise.all(transactionMonths.map((transactionMonth) =>
           api.listExpenseTransactions({ month: transactionMonth, limit: 100 }))),
         api.listRecurringExpenseOccurrences(month),
       ]);
       setReviews((current) => {
-        if (!cursor) return reviewPage.items;
+        if (!cursor) return [...reviewPage.items, ...(categoryPage?.items ?? [])];
         const merged = new Map(current.map((review) => [review.id, review]));
         reviewPage.items.forEach((review) => merged.set(review.id, review));
         return [...merged.values()];
       });
       setNextCursor(reviewPage.nextCursor);
+      if (categoryPage) setCategoryNextCursor(categoryPage.nextCursor);
       setTransactions([...new Map(transactionPages
         .flatMap((page) => page.items)
         .map((transaction) => [transaction.id, transaction])).values()]);
@@ -725,6 +738,30 @@ function ExpenseReviews({ api, month, onNotify, onRegisterRecurring }: Pick<Expe
     }
   }, [api, month, onNotify]);
   useEffect(() => { void load(); }, [load]);
+
+  const loadMoreCategories = async () => {
+    if (!categoryNextCursor) return;
+    setLoading(true);
+    try {
+      const page = await api.listExpenseReviews({
+        month,
+        status: "pending",
+        scope: "category_confirmation",
+        cursor: categoryNextCursor,
+        limit: 100,
+      });
+      setReviews((current) => {
+        const merged = new Map(current.map((review) => [review.id, review]));
+        page.items.forEach((review) => merged.set(review.id, review));
+        return [...merged.values()];
+      });
+      setCategoryNextCursor(page.nextCursor);
+    } catch (error) {
+      onNotify(errorText(error), "error");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const resolve = async (
     review: ExpenseReview,
@@ -775,9 +812,10 @@ function ExpenseReviews({ api, month, onNotify, onRegisterRecurring }: Pick<Expe
 
   return (
     <section className="panel expense-list-panel">
-      <div className="panel__header"><div><span className="eyebrow">합계 반영 전</span><h2>확인 필요</h2><p>불명확한 개인 간 송금은 결정하기 전까지 확정 지출에서 제외됩니다.</p></div><span className="count-pill count-pill--attention">{reviews.length}</span></div>
+      <div className="panel__header"><div><span className="eyebrow">필수 확인 우선</span><h2>확인 필요</h2><p>구매 카테고리는 검토하지 않아도 현재 분류로 합계에 반영됩니다. 불명확한 개인 간 송금만 결정 전까지 확정 지출에서 제외됩니다.</p></div><span className="count-pill count-pill--attention">{visibleReviews.length}</span></div>
+      {purchaseCategoryCount > 0 && <button className="secondary-button expense-more" onClick={() => setShowPurchaseCategories((current) => !current)} type="button">{showPurchaseCategories ? "선택 분류 숨기기" : `선택 분류 ${purchaseCategoryCount}${categoryNextCursor ? "+" : ""}건 보기`}</button>}
       <div className="expense-review-list" aria-busy={loading}>
-        {reviews.map((review) => (
+        {visibleReviews.map((review) => (
           <ExpenseReviewCard
             key={review.id}
             occurrences={occurrences}
@@ -788,9 +826,10 @@ function ExpenseReviews({ api, month, onNotify, onRegisterRecurring }: Pick<Expe
             transactions={transactions}
           />
         ))}
-        {!loading && reviews.length === 0 && <EmptyState icon="check" title="확인할 거래가 없습니다" description="현재 월의 거래 결정이 모두 완료되었습니다." />}
+        {!loading && visibleReviews.length === 0 && <EmptyState icon="check" title="필수 확인 거래가 없습니다" description={purchaseCategoryCount > 0 ? "구매 분류는 선택 사항이며 합계에는 이미 반영되었습니다." : "현재 월의 거래 결정이 모두 완료되었습니다."} />}
       </div>
       {nextCursor && <button className="secondary-button expense-more" disabled={loading} onClick={() => void load(nextCursor)} type="button">검토 더 보기</button>}
+      {showPurchaseCategories && categoryNextCursor && <button className="secondary-button expense-more" disabled={loading} onClick={() => void loadMoreCategories()} type="button">선택 분류 더 보기</button>}
     </section>
   );
 }
@@ -819,7 +858,11 @@ function ExpenseReviewCard({ review, onResolve, transactions, occurrences, onMat
     isEditableEventKind(review.suggestedKind) ? review.suggestedKind : "purchase",
   );
   const [category, setCategory] = useState<ExpenseCategory>(review.suggestedCategory ?? (decision.startsWith("settlement") ? "transfer_settlement" : "other"));
-  const [remember, setRemember] = useState(false);
+  const [remember, setRemember] = useState(
+    review.reason === "category_confirmation"
+      && Boolean(review.transaction.merchant)
+      && Boolean(review.transaction.paymentMethodFingerprint),
+  );
   const [relatedEventId, setRelatedEventId] = useState("");
   const [personalAmountMinor, setPersonalAmountMinor] = useState("");
   const [duplicateEventId, setDuplicateEventId] = useState(review.suggestedDuplicateOfEventId ?? "");
@@ -909,9 +952,9 @@ function ExpenseReviewCard({ review, onResolve, transactions, occurrences, onMat
       {review.reason === "ambiguous_mirror" && <label className="expense-review-related"><span>중복 대상</span><select onChange={(event) => { setDuplicateEventId(event.target.value); if (event.target.value) { setRelatedEventId(""); setPersonalAmountMinor(""); } }} value={duplicateEventId}><option value="">중복 아님</option>{suggestedDuplicateMissing && <option value={review.suggestedDuplicateOfEventId ?? ""}>제안된 동일 거래</option>}{duplicateCandidates.map((transaction) => <option key={transaction.id} value={transaction.id}>{transaction.postedDate} · {transaction.merchant ?? transaction.counterparty ?? "표시 이름 없음"} · {formatMoney(transaction.amountMinor, transaction.currency)}</option>)}</select><small>서버 제안을 수락하거나 같은 금액·통화의 다른 거래를 선택합니다.</small></label>}
       <label className="expense-review-related"><span>정산·연결 대상 (선택)</span><select disabled={!settlementDecision || Boolean(duplicateEventId)} onChange={(event) => { setRelatedEventId(event.target.value); if (event.target.value) { setPersonalAmountMinor(""); setDuplicateEventId(""); } }} value={relatedEventId}><option value="">연결하지 않음</option>{relatedCandidates.map((transaction) => <option key={transaction.id} value={transaction.id}>{transaction.postedDate} · {transaction.merchant ?? transaction.counterparty ?? "표시 이름 없음"} · {formatMoney(transaction.amountMinor, transaction.currency)}</option>)}</select><small>{settlementDecision ? "앞뒤 달의 확정 구매·환불만 표시합니다." : "정산받음·정산보냄으로 처리할 때 연결할 수 있습니다."}</small></label>
       <label><span>내 부담액 (minor unit·선택)</span><input disabled={decision !== "purchase" || Boolean(duplicateEventId)} max={Math.abs(review.transaction.amountMinor)} min="1" onChange={(event) => { setPersonalAmountMinor(event.target.value); if (event.target.value) { setRelatedEventId(""); setDuplicateEventId(""); } }} placeholder="전체 금액" step="1" type="number" value={personalAmountMinor} /><small>{decision === "purchase" ? "중복·연결 대상·내 부담액 중 하나만 선택합니다." : "구매로 처리할 때만 지정할 수 있습니다."}</small></label>
-      {review.transaction.merchant
-        ? <label className="check-field"><input checked={remember} onChange={(event) => setRemember(event.target.checked)} type="checkbox" /> 앞으로 같은 업체에 적용</label>
-        : <small>업체 정보가 없는 송금·이체는 자동 분류 규칙을 만들 수 없습니다.</small>}
+      {review.transaction.merchant && review.transaction.paymentMethodFingerprint
+        ? <label className="check-field"><input checked={remember} onChange={(event) => setRemember(event.target.checked)} type="checkbox" /> {review.reason === "category_confirmation" ? "이 거래와 안전하게 일치하는 같은 업체·결제수단에 적용" : "앞으로 같은 업체에 적용"}</label>
+        : <small>업체와 결제수단을 모두 확인할 수 있는 거래만 자동 분류 규칙을 만들 수 있습니다.</small>}
       <button className="primary-button" disabled={saving} type="submit">{saving ? "저장 중…" : "결정 저장"}</button>
     </form>
   );

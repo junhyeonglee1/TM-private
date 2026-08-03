@@ -34,6 +34,8 @@ const state = {
   expenseTransactionsTotal: 0,
   expenseReviews: [],
   expenseReviewsNextCursor: null,
+  expenseCategoryReviewsNextCursor: null,
+  showExpensePurchaseCategories: false,
   recurringExpenses: [],
   recurringExpenseOccurrences: [],
   editingRecurringExpense: null,
@@ -1387,16 +1389,18 @@ async function loadExpenses(month = state.expenseMonth || todaySeoul().slice(0, 
   loadingList(byId("expense-recurring-list"));
   loadingList(byId("expense-occurrences-list"));
   state.expenseReviewsNextCursor = null;
+  state.expenseCategoryReviewsNextCursor = null;
   show("expense-reviews-more", false);
   try {
     const transactionMonths = [shiftMonth(month, -1), month, shiftMonth(month, 1)];
-    const [summary, sources, transactionPage, recurringTransactionPages, reviewPage, recurring, occurrences, report] = await Promise.all([
+    const [summary, sources, transactionPage, recurringTransactionPages, reviewPage, categoryReviewPage, recurring, occurrences, report] = await Promise.all([
       api(expenseQuery("/api/v1/expenses/summary", { month })),
       api("/api/v1/expenses/sources"),
       api(expenseQuery("/api/v1/expenses/transactions", { month, limit: 100 })),
       Promise.all(transactionMonths.map((transactionMonth) =>
         api(expenseQuery("/api/v1/expenses/transactions", { month: transactionMonth, limit: 100 })))),
-      api(expenseQuery("/api/v1/expenses/reviews", { month, status: "pending", limit: 100 })),
+      api(expenseQuery("/api/v1/expenses/reviews", { month, status: "pending", scope: "required", limit: 100 })),
+      api(expenseQuery("/api/v1/expenses/reviews", { month, status: "pending", scope: "category_confirmation", limit: 100 })),
       api("/api/v1/expenses/recurring"),
       api(expenseQuery("/api/v1/expenses/recurring/occurrences", { month })),
       api(expenseQuery("/api/v1/expenses/reports/latest", { month })).catch(() => null)
@@ -1409,8 +1413,9 @@ async function loadExpenses(month = state.expenseMonth || todaySeoul().slice(0, 
       .flatMap((page) => page.items)
       .map((transaction) => [transaction.id, transaction])).values()];
     state.expenseTransactionsNextCursor = transactionPage.nextCursor;
-    state.expenseReviews = reviewPage.items;
+    state.expenseReviews = [...reviewPage.items, ...categoryReviewPage.items];
     state.expenseReviewsNextCursor = reviewPage.nextCursor;
+    state.expenseCategoryReviewsNextCursor = categoryReviewPage.nextCursor;
     state.recurringExpenses = recurring;
     state.recurringExpenseOccurrences = occurrences;
     renderExpenses();
@@ -1782,10 +1787,11 @@ function renderExpenseTransactionOverride(item, card) {
   });
   syncAlternatives();
   const createRule = document.createElement("input"); createRule.type = "checkbox";
-  const rule = item.merchant
+  const canCreateRule = Boolean(item.merchant && item.paymentMethodFingerprint);
+  const rule = canCreateRule
     ? text("label", "", "expense-checkbox")
-    : text("small", "업체 정보가 없는 송금·이체는 자동 분류 규칙을 만들 수 없습니다.");
-  if (item.merchant) rule.append(createRule, document.createTextNode(" 앞으로 같은 업체에 적용"));
+    : text("small", "업체와 결제수단을 모두 확인할 수 있는 거래만 자동 분류 규칙을 만들 수 있습니다.");
+  if (canCreateRule) rule.append(createRule, document.createTextNode(" 앞으로 같은 업체에 적용"));
   const actions = text("div", "", "expense-form-actions");
   const cancel = text("button", "재분류 취소", "secondary"); cancel.type = "button";
   const save = text("button", "재분류 저장", "primary"); save.type = "submit";
@@ -1823,7 +1829,7 @@ function renderExpenseTransactionOverride(item, card) {
       personalAmountMinor: clearPersonal.checked || personal.value === (item.personalAmountMinor === null ? "" : String(item.personalAmountMinor)) ? null : personal.value === "" ? null : Number(personal.value),
       clearPersonalAmount: clearPersonal.checked,
       clearRelatedEvent: clearRelated.checked,
-      createRule: item.merchant ? createRule.checked : false
+      createRule: canCreateRule ? createRule.checked : false
     };
     setBusy(save, true, "재분류 저장");
     try {
@@ -1860,8 +1866,18 @@ function expenseSelect(options, selected) {
 function renderExpenseReviews() {
   const list = byId("expense-reviews-list");
   clear(list);
-  byId("expense-reviews-count").textContent = `${state.expenseReviews.length}건`;
-  state.expenseReviews.forEach((review) => {
+  const purchaseCategoryCount = state.expenseReviews
+    .filter((review) => review.reason === "category_confirmation").length;
+  const visibleReviews = state.showExpensePurchaseCategories
+    ? state.expenseReviews
+    : state.expenseReviews.filter((review) => review.reason !== "category_confirmation");
+  byId("expense-reviews-count").textContent = `${visibleReviews.length}건`;
+  const categoryToggle = byId("expense-review-categories-toggle");
+  categoryToggle.textContent = state.showExpensePurchaseCategories
+    ? "선택 분류 숨기기"
+    : `선택 분류 ${purchaseCategoryCount}${state.expenseCategoryReviewsNextCursor ? "+" : ""}건 보기`;
+  categoryToggle.classList.toggle("hidden", purchaseCategoryCount === 0);
+  visibleReviews.forEach((review) => {
     const transaction = review.transaction;
     const heading = text("div", "", "expense-card-heading");
     const title = text("div");
@@ -2018,10 +2034,17 @@ function renderExpenseReviews() {
     relatedLabel.append(text("small", "정산 처리에는 앞뒤 달의 확정 구매·환불만 표시합니다."));
     const personalAmountLabel = text("label", "내 부담액 (minor unit·선택)"); personalAmountLabel.append(personalAmount, text("small", "구매 처리에서만 지정하며 중복·연결 대상과 함께 저장할 수 없습니다."));
     const createRule = document.createElement("input"); createRule.type = "checkbox";
-    const ruleLabel = transaction.merchant
+    const canCreateRule = Boolean(transaction.merchant && transaction.paymentMethodFingerprint);
+    createRule.checked = review.reason === "category_confirmation" && canCreateRule;
+    const ruleLabel = canCreateRule
       ? text("label", "", "expense-checkbox")
-      : text("small", "업체 정보가 없는 송금·이체는 자동 분류 규칙을 만들 수 없습니다.");
-    if (transaction.merchant) ruleLabel.append(createRule, document.createTextNode(" 앞으로 같은 업체에 적용"));
+      : text("small", "업체와 결제수단을 모두 확인할 수 있는 거래만 자동 분류 규칙을 만들 수 있습니다.");
+    if (canCreateRule) ruleLabel.append(
+      createRule,
+      document.createTextNode(review.reason === "category_confirmation"
+        ? " 이 거래와 안전하게 일치하는 같은 업체·결제수단에 적용"
+        : " 앞으로 같은 업체에 적용")
+    );
     const save = text("button", "결정 저장", "primary"); save.type = "submit";
     form.append(kindLabel, categoryLabel);
     if (duplicateLabel) form.append(duplicateLabel);
@@ -2036,7 +2059,7 @@ function renderExpenseReviews() {
           duplicateOfEventId: duplicateEvent?.value || null,
           relatedEventId: relatedEvent.value || null,
           personalAmountMinor: personalAmount.value === "" ? null : Number(personalAmount.value),
-          createRule: transaction.merchant ? createRule.checked : false
+          createRule: canCreateRule ? createRule.checked : false
         };
         await expenseMutation(`/api/v1/expenses/reviews/${encodeURIComponent(review.id)}/resolve`, {
           operation: "expense-review-resolve",
@@ -2044,7 +2067,9 @@ function renderExpenseReviews() {
           resource: review.id,
           body
         });
-        toast("거래 검토 결정을 저장했습니다.");
+        toast(body.createRule
+          ? "이 거래와 서버에서 안전하게 일치한 거래 및 향후 규칙에 적용했습니다."
+          : "거래 검토 결정을 저장했습니다.");
         await loadExpenses();
       } catch (error) {
         toast(`${error.message} 자동으로 다시 시도하지 않았습니다.`);
@@ -2054,8 +2079,17 @@ function renderExpenseReviews() {
     });
     list.append(form);
   });
-  if (!state.expenseReviews.length) list.append(text("p", "확인할 거래가 없습니다.", "empty"));
+  if (!visibleReviews.length) list.append(text(
+    "p",
+    purchaseCategoryCount > 0
+      ? "필수 확인 거래가 없습니다. 구매 분류는 선택 사항이며 합계에는 이미 반영되었습니다."
+      : "확인할 거래가 없습니다.",
+    "empty"
+  ));
   show("expense-reviews-more", Boolean(state.expenseReviewsNextCursor));
+  show("expense-category-reviews-more", Boolean(
+    state.showExpensePurchaseCategories && state.expenseCategoryReviewsNextCursor
+  ));
 }
 
 async function loadMoreExpenseReviews(button) {
@@ -2065,6 +2099,7 @@ async function loadMoreExpenseReviews(button) {
     const page = await api(expenseQuery("/api/v1/expenses/reviews", {
       month: state.expenseMonth,
       status: "pending",
+      scope: "required",
       cursor: state.expenseReviewsNextCursor,
       limit: 100
     }));
@@ -2077,6 +2112,29 @@ async function loadMoreExpenseReviews(button) {
     toast(`${error.message} 자동으로 다시 시도하지 않았습니다.`);
   } finally {
     setBusy(button, false, "검토 더 보기");
+  }
+}
+
+async function loadMoreExpenseCategoryReviews(button) {
+  if (!state.expenseCategoryReviewsNextCursor) return;
+  setBusy(button, true, "선택 분류 더 보기");
+  try {
+    const page = await api(expenseQuery("/api/v1/expenses/reviews", {
+      month: state.expenseMonth,
+      status: "pending",
+      scope: "category_confirmation",
+      cursor: state.expenseCategoryReviewsNextCursor,
+      limit: 100
+    }));
+    const merged = new Map(state.expenseReviews.map((review) => [review.id, review]));
+    page.items.forEach((review) => merged.set(review.id, review));
+    state.expenseReviews = [...merged.values()];
+    state.expenseCategoryReviewsNextCursor = page.nextCursor;
+    renderExpenseReviews();
+  } catch (error) {
+    toast(`${error.message} 자동으로 다시 시도하지 않았습니다.`);
+  } finally {
+    setBusy(button, false, "선택 분류 더 보기");
   }
 }
 
@@ -2372,6 +2430,11 @@ byId("expense-prev").addEventListener("click", () => void loadExpenses(shiftMont
 byId("expense-next").addEventListener("click", () => void loadExpenses(shiftMonth(state.expenseMonth || todaySeoul().slice(0, 7), 1)));
 byId("expense-transactions-more").addEventListener("click", (event) => void loadMoreExpenseTransactions(event.currentTarget));
 byId("expense-reviews-more").addEventListener("click", (event) => void loadMoreExpenseReviews(event.currentTarget));
+byId("expense-category-reviews-more").addEventListener("click", (event) => void loadMoreExpenseCategoryReviews(event.currentTarget));
+byId("expense-review-categories-toggle").addEventListener("click", () => {
+  state.showExpensePurchaseCategories = !state.showExpensePurchaseCategories;
+  renderExpenseReviews();
+});
 byId("expense-recurring-add").addEventListener("click", () => openRecurringExpenseForm());
 byId("expense-recurring-form-close").addEventListener("click", closeRecurringExpenseForm);
 byId("expense-recurring-due-rule").addEventListener("change", updateRecurringDueFields);

@@ -15,12 +15,13 @@ use tm_core::{
     ConfirmRecurringPaidInput, CreateRecurringExpenseInput, EncryptedExpenseText,
     Error as CoreError, ExpenseCategory, ExpenseEventKind, ExpenseImportPreview,
     ExpenseImportPreviewInput, ExpenseMonthSummary, ExpenseMutationCommand, ExpenseMutationRequest,
-    ExpenseReview, ExpenseReviewFilter, ExpenseReviewPage, ExpenseReviewStatus, ExpenseSourceKind,
-    ExpenseSourceStatus, ExpenseTransaction, ExpenseTransactionFilter, ExpenseTransactionPage,
-    MatchRecurringExpenseInput, NormalizedExpenseImport, NormalizedExpenseRow,
-    OverrideExpenseTransactionInput, RecurringAmountKind, RecurringDueRule, RecurringExpenseItem,
-    RecurringExpenseOccurrence, RecurringExpenseStatus, ResolveExpenseReviewInput, TmCore,
-    UpdateExpenseSourceStatusInput, UpdateRecurringExpenseInput, expense_text_aad,
+    ExpenseReview, ExpenseReviewFilter, ExpenseReviewPage, ExpenseReviewScope, ExpenseReviewStatus,
+    ExpenseSourceKind, ExpenseSourceStatus, ExpenseTransaction, ExpenseTransactionFilter,
+    ExpenseTransactionPage, MatchRecurringExpenseInput, NormalizedExpenseImport,
+    NormalizedExpenseRow, OverrideExpenseTransactionInput, RecurringAmountKind, RecurringDueRule,
+    RecurringExpenseItem, RecurringExpenseOccurrence, RecurringExpenseStatus,
+    ResolveExpenseReviewInput, TmCore, UpdateExpenseSourceStatusInput, UpdateRecurringExpenseInput,
+    expense_text_aad,
 };
 use zeroize::Zeroizing;
 
@@ -143,6 +144,7 @@ pub(super) struct TransactionQuery {
 pub(super) struct ReviewQuery {
     month: Option<String>,
     status: Option<ExpenseReviewStatus>,
+    scope: Option<ExpenseReviewScope>,
     cursor: Option<String>,
     limit: Option<u32>,
 }
@@ -582,12 +584,15 @@ pub(super) async fn reviews(
     let limit = page_limit(query.limit, &request_id)?;
     validate_cursor(query.cursor.as_deref(), &request_id)?;
     let page = core_read(state.core.clone(), &request_id, move |core| {
-        core.list_expense_reviews(ExpenseReviewFilter {
-            month_start,
-            status: query.status,
-            cursor: query.cursor,
-            limit,
-        })
+        core.list_expense_reviews_scoped(
+            ExpenseReviewFilter {
+                month_start,
+                status: query.status,
+                cursor: query.cursor,
+                limit,
+            },
+            query.scope.unwrap_or(ExpenseReviewScope::All),
+        )
     })
     .await?;
     let data = decrypt_review_page(page, expense_crypto(&state, &request_id)?, &request_id)?;

@@ -8,12 +8,12 @@ use tm_core::{
     CalendarMonth, ConfirmRecurringPaidInput, CreateRecurringExpenseInput, EncryptedExpenseText,
     ExpenseCategory, ExpenseDirection, ExpenseEventKind, ExpenseImportAdapter, ExpenseImportResult,
     ExpenseMutationCommand, ExpenseMutationRequest, ExpenseReview, ExpenseReviewFilter,
-    ExpenseReviewPage, ExpenseReviewStatus, ExpenseSourceKind, ExpenseTransaction,
-    ExpenseTransactionFilter, ExpenseTransactionPage, MatchRecurringExpenseInput,
-    NormalizedExpenseImport, NormalizedExpenseRow, OverrideExpenseTransactionInput,
-    RecurringAmountKind, RecurringDueRule, RecurringExpenseItem, RecurringExpenseOccurrence,
-    RecurringExpenseStatus, ResolveExpenseReviewInput, UpdateExpenseSourceStatusInput,
-    UpdateRecurringExpenseInput, expense_text_aad,
+    ExpenseReviewPage, ExpenseReviewScope, ExpenseReviewStatus, ExpenseSourceKind,
+    ExpenseTransaction, ExpenseTransactionFilter, ExpenseTransactionPage,
+    MatchRecurringExpenseInput, NormalizedExpenseImport, NormalizedExpenseRow,
+    OverrideExpenseTransactionInput, RecurringAmountKind, RecurringDueRule, RecurringExpenseItem,
+    RecurringExpenseOccurrence, RecurringExpenseStatus, ResolveExpenseReviewInput,
+    UpdateExpenseSourceStatusInput, UpdateRecurringExpenseInput, expense_text_aad,
 };
 use uuid::Uuid;
 use zeroize::Zeroize;
@@ -45,6 +45,7 @@ pub(crate) struct ListExpenseTransactionsInput {
 pub(crate) struct ListExpenseReviewsInput {
     month: Option<String>,
     status: Option<ExpenseReviewStatus>,
+    scope: Option<ExpenseReviewScope>,
     cursor: Option<String>,
     limit: Option<u32>,
 }
@@ -312,12 +313,15 @@ pub(crate) fn list_expense_reviews(
     require_local(&state)?;
     let page = state
         .core
-        .list_expense_reviews(ExpenseReviewFilter {
-            month_start: input.month.as_deref().map(parse_month).transpose()?,
-            status: input.status,
-            cursor: input.cursor,
-            limit: input.limit.unwrap_or(50),
-        })
+        .list_expense_reviews_scoped(
+            ExpenseReviewFilter {
+                month_start: input.month.as_deref().map(parse_month).transpose()?,
+                status: input.status,
+                cursor: input.cursor,
+                limit: input.limit.unwrap_or(50),
+            },
+            input.scope.unwrap_or(ExpenseReviewScope::All),
+        )
         .map_err(command_error)?;
     review_page_value(local_crypto(&state)?, page)
 }

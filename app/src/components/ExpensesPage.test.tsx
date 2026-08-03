@@ -31,7 +31,13 @@ const transportWithReview = (
   async invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
     const override = await intercept?.(command, args);
     if (override?.handled) return override.value as T;
-    if (command === "list_expense_reviews") return { items: [review], nextCursor: null } as T;
+    if (command === "list_expense_reviews") {
+      const scope = (args.input as { scope?: string } | undefined)?.scope;
+      const included = scope === "required"
+        ? review.reason !== "category_confirmation"
+        : scope === "category_confirmation" ? review.reason === "category_confirmation" : true;
+      return { items: included ? [review] : [], nextCursor: null } as T;
+    }
     if (command === "list_expense_transactions") return { items: transactions, nextCursor: null } as T;
     return base.invoke<T>(command, args);
   },
@@ -103,7 +109,7 @@ describe("지출·정기지출 UI", () => {
     await user.selectOptions(screen.getByLabelText("카테고리"), "transfer_settlement");
     await user.click(screen.getByRole("button", { name: "결정 저장" }));
 
-    expect(await screen.findByText("확인할 거래가 없습니다")).toBeInTheDocument();
+    expect(await screen.findByText("필수 확인 거래가 없습니다")).toBeInTheDocument();
     expect((await api.listExpenseReviews({ limit: 10 })).items).toHaveLength(0);
   });
 
@@ -166,7 +172,7 @@ describe("지출·정기지출 UI", () => {
       };
       return {
         id,
-        reason: "category_confirmation",
+        reason: "unknown_p2p",
         status: "pending",
         transaction,
         recurringExpenseId: null,
@@ -185,7 +191,10 @@ describe("지출·정기지출 UI", () => {
     const transport: CommandTransport = {
       async invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
         if (command === "list_expense_reviews") {
-          const input = args.input as { cursor?: string; status?: string };
+          const input = args.input as { cursor?: string; status?: string; scope?: string };
+          if (input.scope === "category_confirmation") {
+            return { items: [], nextCursor: null } as T;
+          }
           const cursor = input.cursor;
           requestedCursors.push(cursor);
           requestedStatuses.push(input.status);
@@ -212,6 +221,155 @@ describe("지출·정기지출 UI", () => {
     expect(requestedCursors).toEqual([undefined, "reviews-next"]);
     expect(requestedStatuses).toEqual(["pending", "pending"]);
     expect(screen.queryByRole("button", { name: "검토 더 보기" })).not.toBeInTheDocument();
+  });
+
+  it("선택 구매 분류는 기본으로 숨기고 정확 일치 규칙을 사용자가 열어 적용한다", async () => {
+    const user = userEvent.setup();
+    const base = createMemoryTransport();
+    const baseApi = createApi(base);
+    const month = (await baseApi.getSnapshot()).today.slice(0, 7);
+    const source = (await baseApi.listExpenseTransactions({ month, limit: 100 })).items[0];
+    const makeReview = (
+      id: string,
+      merchant: string,
+      sourceKind: ExpenseTransaction["sourceKind"],
+      suggestedCategory: ExpenseReview["suggestedCategory"],
+    ): ExpenseReview => {
+      const transaction: ExpenseTransaction = {
+        ...source,
+        id: `expense-${id}`,
+        category: "shopping",
+        merchant,
+        pendingReviewId: id,
+        sourceKind,
+        status: "unconfirmed",
+      };
+      return {
+        id,
+        reason: "category_confirmation",
+        status: "pending",
+        transaction,
+        recurringExpenseId: null,
+        suggestedKind: "purchase",
+        suggestedCategory,
+        suggestedDuplicateOfEventId: null,
+        createdAt: transaction.occurredAt,
+        resolvedAt: null,
+        version: 1,
+      };
+    };
+    const reviews = [
+      makeReview("review-card-first", "  STARBUCKS　KOREA  ", "card", "cafe"),
+      makeReview("review-card-second", "starbucks korea", "card", null),
+      makeReview("review-wallet", "Starbucks Korea", "wallet", "food"),
+    ];
+    let resolvedReviewId: string | null = null;
+    let resolved: ResolveExpenseReviewInput | null = null;
+    const transport: CommandTransport = {
+      async invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
+        if (command === "list_expense_reviews") {
+          const scope = (args.input as { scope?: string }).scope;
+          const items = reviews.filter((review) => scope === "required"
+            ? review.reason !== "category_confirmation"
+            : scope === "category_confirmation" ? review.reason === "category_confirmation" : true);
+          return { items, nextCursor: null } as T;
+        }
+        if (command === "list_expense_transactions") {
+          return { items: reviews.map((review) => review.transaction), nextCursor: null } as T;
+        }
+        if (command === "resolve_expense_review") {
+          resolvedReviewId = args.reviewId as string;
+          resolved = args.input as ResolveExpenseReviewInput;
+          return undefined as T;
+        }
+        return base.invoke<T>(command, args);
+      },
+    };
+    render(<App api={createApi(transport)} />);
+    await openExpenses(user);
+    await user.click(screen.getByRole("button", { name: "확인 필요" }));
+
+    expect(screen.getByText(/구매 카테고리는 검토하지 않아도 현재 분류로 합계에 반영됩니다/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "결정 저장" })).not.toBeInTheDocument();
+    const showOptional = screen.getByRole("button", { name: "선택 분류 3건 보기" });
+    expect(showOptional.closest("section")?.querySelector(".count-pill")).toHaveTextContent("0");
+    await user.click(showOptional);
+
+    expect(screen.getAllByRole("button", { name: "결정 저장" })).toHaveLength(3);
+    const firstHeading = await screen.findByRole("heading", { name: /STARBUCKS/ });
+    const firstForm = firstHeading.closest("form");
+    expect(firstForm).not.toBeNull();
+    const category = within(firstForm as HTMLElement).getByRole("combobox", { name: "카테고리" });
+    const createRule = within(firstForm as HTMLElement).getByRole("checkbox", {
+      name: "이 거래와 안전하게 일치하는 같은 업체·결제수단에 적용",
+    });
+    expect(category).toHaveValue("cafe");
+    expect(createRule).toBeChecked();
+
+    await user.click(within(firstForm as HTMLElement).getByRole("button", { name: "결정 저장" }));
+    await waitFor(() => expect(resolved).not.toBeNull());
+    expect(resolvedReviewId).toBe("review-card-first");
+    expect(resolved).toMatchObject({ category: "cafe", createRule: true });
+  });
+
+  it("카테고리 확인 이외의 검토는 업체와 출처가 같아도 거래별로 유지한다", async () => {
+    const user = userEvent.setup();
+    const base = createMemoryTransport();
+    const baseApi = createApi(base);
+    const month = (await baseApi.getSnapshot()).today.slice(0, 7);
+    const source = (await baseApi.listExpenseTransactions({ month, limit: 100 })).items[0];
+    const reviews: ExpenseReview[] = ["first", "second"].map((suffix) => {
+      const transaction: ExpenseTransaction = {
+        ...source,
+        id: `expense-p2p-${suffix}`,
+        merchant: "동일 업체",
+        pendingReviewId: `review-p2p-${suffix}`,
+        sourceKind: "wallet",
+        status: "unconfirmed",
+      };
+      return {
+        id: `review-p2p-${suffix}`,
+        reason: "unknown_p2p",
+        status: "pending",
+        transaction,
+        recurringExpenseId: null,
+        suggestedKind: null,
+        suggestedCategory: null,
+        suggestedDuplicateOfEventId: null,
+        createdAt: transaction.occurredAt,
+        resolvedAt: null,
+        version: 1,
+      };
+    });
+    const transport: CommandTransport = {
+      async invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
+        if (command === "list_expense_reviews") {
+          const scope = (args.input as { scope?: string }).scope;
+          const items = reviews.filter((review) => scope === "required"
+            ? review.reason !== "category_confirmation"
+            : scope === "category_confirmation" ? review.reason === "category_confirmation" : true);
+          return { items, nextCursor: null } as T;
+        }
+        if (command === "list_expense_transactions") {
+          return { items: reviews.map((review) => review.transaction), nextCursor: null } as T;
+        }
+        return base.invoke<T>(command, args);
+      },
+    };
+    render(<App api={createApi(transport)} />);
+    await openExpenses(user);
+    await user.click(screen.getByRole("button", { name: "확인 필요" }));
+
+    const headings = await screen.findAllByRole("heading", { name: "동일 업체", level: 3 });
+    expect(headings).toHaveLength(2);
+    expect(screen.getAllByRole("button", { name: "결정 저장" })).toHaveLength(2);
+    expect(screen.queryByText(/같은 업체 \d+건/)).not.toBeInTheDocument();
+    const firstForm = headings[0].closest("form");
+    expect(firstForm).not.toBeNull();
+    expect(within(firstForm as HTMLElement).getByRole("combobox", { name: "처리" })).toHaveValue("purchase");
+    expect(within(firstForm as HTMLElement).getByRole("combobox", { name: "카테고리" })).toHaveValue("other");
+    screen.getAllByRole("checkbox", { name: "앞으로 같은 업체에 적용" })
+      .forEach((checkbox) => expect(checkbox).not.toBeChecked());
   });
 
   it("정기지출 연결 후보는 발생 건 버전과 별도 자동 연결 동의를 사용한다", async () => {
@@ -448,7 +606,7 @@ describe("지출·정기지출 UI", () => {
     expect(within(kind).queryByRole("option", { name: "미확인 송금" })).not.toBeInTheDocument();
     expect(within(kind).queryByRole("option", { name: "수동 정기지출" })).not.toBeInTheDocument();
     expect(screen.queryByRole("checkbox", { name: "앞으로 같은 업체에 적용" })).not.toBeInTheDocument();
-    expect(screen.getByText("업체 정보가 없는 송금·이체는 자동 분류 규칙을 만들 수 없습니다.")).toBeInTheDocument();
+    expect(screen.getByText("업체와 결제수단을 모두 확인할 수 있는 거래만 자동 분류 규칙을 만들 수 있습니다.")).toBeInTheDocument();
   });
 
   it("월말 구매는 다음 달 정산 검토의 안전한 연결 후보로 표시한다", async () => {

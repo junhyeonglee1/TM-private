@@ -39,8 +39,9 @@ describe("모바일 PWA 지출", () => {
     expect(app).toContain("clearPersonalAmount: clearPersonal.checked");
     expect(app).toContain("clearRelatedEvent: clearRelated.checked");
     expect(app).toContain('!["external_transfer", "unknown_p2p", "manual_recurring"].includes(value)');
-    expect(app).toContain("createRule: item.merchant ? createRule.checked : false");
-    expect(app).toContain("createRule: transaction.merchant ? createRule.checked : false");
+    expect(app).toContain("const canCreateRule = Boolean(item.merchant && item.paymentMethodFingerprint)");
+    expect(app).toContain("createRule: canCreateRule ? createRule.checked : false");
+    expect(app).toContain("createRule: canCreateRule ? createRule.checked : false");
     expect(app).toContain('status: "pending"');
   });
 
@@ -156,9 +157,25 @@ describe("모바일 PWA 지출", () => {
     expect(shell).toContain('id="expense-reviews-more"');
     expect(app).toContain("expenseReviewsNextCursor: null");
     expect(app).toContain('status: "pending"');
+    expect(app).toContain('scope: "required"');
     expect(app).toContain("cursor: state.expenseReviewsNextCursor");
     expect(app).toContain("const merged = new Map(state.expenseReviews.map");
     expect(app).toContain('byId("expense-reviews-more").addEventListener');
+  });
+
+  it("선택 구매 분류는 기본으로 숨기고 서버 정확 일치 규칙만 명시한다", () => {
+    expect(shell).toContain('id="expense-review-categories-toggle"');
+    expect(shell).toContain('id="expense-category-reviews-more"');
+    expect(app).toContain("showExpensePurchaseCategories: false");
+    expect(app).toContain('scope: "category_confirmation"');
+    expect(app).toContain("expenseCategoryReviewsNextCursor: null");
+    expect(app).toContain('review.reason !== "category_confirmation"');
+    expect(app).toContain("state.showExpensePurchaseCategories = !state.showExpensePurchaseCategories");
+    expect(app).toContain('const canCreateRule = Boolean(transaction.merchant && transaction.paymentMethodFingerprint)');
+    expect(app).toContain('createRule.checked = review.reason === "category_confirmation" && canCreateRule');
+    expect(app).toContain("이 거래와 안전하게 일치하는 같은 업체·결제수단에 적용");
+    expect(app).toContain("이 거래와 서버에서 안전하게 일치한 거래 및 향후 규칙에 적용했습니다.");
+    expect(shell).toContain("구매 카테고리는 검토하지 않아도 현재 분류로 합계에 반영됩니다.");
   });
 
   it("Today는 지난 12개월 미납·다음 달과 현재 월 금액 변동만 조회한다", () => {

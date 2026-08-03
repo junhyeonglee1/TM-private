@@ -7,8 +7,8 @@ use tm_core::{
     ExpenseCategory, ExpenseCryptoProbe, ExpenseDirection, ExpenseEventKind, ExpenseImportAdapter,
     ExpenseImportPreview, ExpenseImportPreviewInput, ExpenseImportPreviewRow,
     ExpenseMutationCommand, ExpenseMutationRequest, ExpenseReportFact, ExpenseReportObservation,
-    ExpenseReportStatus, ExpenseReviewFilter, ExpenseReviewReason, ExpenseReviewStatus,
-    ExpenseSourceKind, ExpenseTransactionFilter, MatchRecurringExpenseInput,
+    ExpenseReportStatus, ExpenseReviewFilter, ExpenseReviewReason, ExpenseReviewScope,
+    ExpenseReviewStatus, ExpenseSourceKind, ExpenseTransactionFilter, MatchRecurringExpenseInput,
     NormalizedExpenseImport, NormalizedExpenseRow, OverrideExpenseTransactionInput,
     RecurringAmountKind, RecurringDueRule, RecurringExpenseItem, RecurringExpenseStatus,
     RecurringOccurrenceStatus, ResolveExpenseReviewInput, Result, SaveExpenseReportInput, TmCore,
@@ -126,6 +126,38 @@ fn row(
         payment_method_fingerprint: Some(digest('f')),
         external_reference_fingerprint: Some(digest(reference_fingerprint)),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn grouped_purchase_row(
+    source_fingerprint: &str,
+    stable_key: &str,
+    row_number: u32,
+    date: NaiveDate,
+    amount_minor: i64,
+    row_fingerprint: char,
+    merchant_fingerprint: char,
+    payment_method_fingerprint: char,
+) -> NormalizedExpenseRow {
+    let mut value = row(
+        source_fingerprint,
+        stable_key,
+        row_number,
+        date,
+        ExpenseEventKind::Purchase,
+        ExpenseDirection::Debit,
+        amount_minor,
+        Some(ExpenseCategory::Other),
+        row_fingerprint,
+    );
+    value.merchant = Some(encrypted(
+        &format!("{source_fingerprint}:{stable_key}"),
+        "merchant",
+        merchant_fingerprint,
+    ));
+    value.payment_method_fingerprint = Some(digest(payment_method_fingerprint));
+    value.external_reference_fingerprint = None;
+    value
 }
 
 fn july_import() -> NormalizedExpenseImport {
@@ -470,6 +502,15 @@ fn overlapping_statement_content_is_deduplicated_only_within_the_same_source() -
     let original_result = preview_and_import(&core, original.clone())?;
     assert_eq!(original_result.new_count, 1);
     assert_eq!(original_result.duplicate_count, 0);
+
+    let mut changed_content = original.clone();
+    changed_content.file_sha256 = digest('7');
+    changed_content.normalized_sha256 = digest('8');
+    changed_content.rows[0].row_sha256 = digest('9');
+    assert!(matches!(
+        core.preview_expense_import(&changed_content),
+        Err(Error::Conflict(_))
+    ));
 
     let mut overlap = original;
     overlap.file_sha256 = digest('3');
@@ -2370,6 +2411,416 @@ fn recurring_candidate_requires_a_stable_interval_and_is_not_duplicated() -> Res
 }
 
 #[test]
+fn classification_rule_retroactively_resolves_matching_pending_category_reviews() -> Result<()> {
+    let (_temporary, core) = fixture()?;
+    let source_fingerprint = digest('g');
+    let month = NaiveDate::from_ymd_opt(2027, 6, 1).expect("valid date");
+    let second_day = NaiveDate::from_ymd_opt(2027, 6, 2).expect("valid date");
+    preview_and_import(
+        &core,
+        NormalizedExpenseImport {
+            adapter: ExpenseImportAdapter::KbCardUsageV1,
+            source_kind: ExpenseSourceKind::Card,
+            source_fingerprint: source_fingerprint.clone(),
+            file_sha256: digest('h'),
+            normalized_sha256: digest('i'),
+            coverage_start: month,
+            coverage_end: second_day,
+            rejected_count: 0,
+            rows: vec![
+                grouped_purchase_row(
+                    &source_fingerprint,
+                    "retroactive-rule-source",
+                    1,
+                    month,
+                    10_000,
+                    '1',
+                    'm',
+                    'p',
+                ),
+                grouped_purchase_row(
+                    &source_fingerprint,
+                    "retroactive-rule-match",
+                    2,
+                    second_day,
+                    20_000,
+                    '2',
+                    'm',
+                    'p',
+                ),
+            ],
+        },
+    )?;
+
+    let source_review = core
+        .list_expense_reviews(ExpenseReviewFilter {
+            month_start: Some(month),
+            status: Some(ExpenseReviewStatus::Pending),
+            cursor: None,
+            limit: 50,
+        })?
+        .items
+        .into_iter()
+        .find(|review| {
+            review.reason == ExpenseReviewReason::CategoryConfirmation
+                && review.transaction.posted_date == month
+        })
+        .expect("source category review");
+    core.resolve_expense_review(
+        &source_review.id,
+        ResolveExpenseReviewInput {
+            expected_version: source_review.version,
+            kind: ExpenseEventKind::Purchase,
+            category: ExpenseCategory::Food,
+            duplicate_of_event_id: None,
+            related_event_id: None,
+            personal_amount_minor: None,
+            create_rule: true,
+        },
+    )?;
+
+    let transactions = core.list_expense_transactions(ExpenseTransactionFilter {
+        month_start: month,
+        cursor: None,
+        limit: 50,
+    })?;
+    assert_eq!(transactions.items.len(), 2);
+    assert!(
+        transactions
+            .items
+            .iter()
+            .all(|item| item.category == ExpenseCategory::Food)
+    );
+    assert!(
+        core.list_expense_reviews(ExpenseReviewFilter {
+            month_start: Some(month),
+            status: Some(ExpenseReviewStatus::Pending),
+            cursor: None,
+            limit: 50,
+        })?
+        .items
+        .iter()
+        .all(|review| review.reason != ExpenseReviewReason::CategoryConfirmation)
+    );
+
+    let third_day = NaiveDate::from_ymd_opt(2027, 6, 3).expect("valid date");
+    preview_and_import(
+        &core,
+        NormalizedExpenseImport {
+            adapter: ExpenseImportAdapter::KbCardUsageV1,
+            source_kind: ExpenseSourceKind::Card,
+            source_fingerprint: source_fingerprint.clone(),
+            file_sha256: digest('j'),
+            normalized_sha256: digest('k'),
+            coverage_start: third_day,
+            coverage_end: third_day,
+            rejected_count: 0,
+            rows: vec![grouped_purchase_row(
+                &source_fingerprint,
+                "future-rule-match",
+                1,
+                third_day,
+                30_000,
+                '3',
+                'm',
+                'p',
+            )],
+        },
+    )?;
+    let future = core
+        .list_expense_transactions(ExpenseTransactionFilter {
+            month_start: month,
+            cursor: None,
+            limit: 50,
+        })?
+        .items
+        .into_iter()
+        .find(|item| item.posted_date == third_day)
+        .expect("future matching purchase");
+    assert_eq!(future.category, ExpenseCategory::Food);
+    assert!(future.pending_review_id.is_none());
+    Ok(())
+}
+
+#[test]
+fn classification_rule_retroactive_resolution_keeps_other_payment_methods_pending() -> Result<()> {
+    let (_temporary, core) = fixture()?;
+    let source_fingerprint = digest('l');
+    let month = NaiveDate::from_ymd_opt(2027, 7, 1).expect("valid date");
+    let second_day = NaiveDate::from_ymd_opt(2027, 7, 2).expect("valid date");
+    preview_and_import(
+        &core,
+        NormalizedExpenseImport {
+            adapter: ExpenseImportAdapter::KbCardUsageV1,
+            source_kind: ExpenseSourceKind::Card,
+            source_fingerprint: source_fingerprint.clone(),
+            file_sha256: digest('m'),
+            normalized_sha256: digest('n'),
+            coverage_start: month,
+            coverage_end: second_day,
+            rejected_count: 0,
+            rows: vec![
+                grouped_purchase_row(
+                    &source_fingerprint,
+                    "payment-rule-source",
+                    1,
+                    month,
+                    10_000,
+                    '4',
+                    'v',
+                    'a',
+                ),
+                grouped_purchase_row(
+                    &source_fingerprint,
+                    "different-payment-method",
+                    2,
+                    second_day,
+                    20_000,
+                    '5',
+                    'v',
+                    'b',
+                ),
+            ],
+        },
+    )?;
+    let source_review = core
+        .list_expense_reviews(ExpenseReviewFilter {
+            month_start: Some(month),
+            status: Some(ExpenseReviewStatus::Pending),
+            cursor: None,
+            limit: 50,
+        })?
+        .items
+        .into_iter()
+        .find(|review| review.transaction.posted_date == month)
+        .expect("source category review");
+    core.resolve_expense_review(
+        &source_review.id,
+        ResolveExpenseReviewInput {
+            expected_version: source_review.version,
+            kind: ExpenseEventKind::Purchase,
+            category: ExpenseCategory::Shopping,
+            duplicate_of_event_id: None,
+            related_event_id: None,
+            personal_amount_minor: None,
+            create_rule: true,
+        },
+    )?;
+
+    let other_payment = core
+        .list_expense_transactions(ExpenseTransactionFilter {
+            month_start: month,
+            cursor: None,
+            limit: 50,
+        })?
+        .items
+        .into_iter()
+        .find(|item| item.posted_date == second_day)
+        .expect("different payment-method purchase");
+    assert_eq!(other_payment.category, ExpenseCategory::Other);
+    let pending = core.list_expense_reviews(ExpenseReviewFilter {
+        month_start: Some(month),
+        status: Some(ExpenseReviewStatus::Pending),
+        cursor: None,
+        limit: 50,
+    })?;
+    assert!(pending.items.iter().any(|review| {
+        review.reason == ExpenseReviewReason::CategoryConfirmation
+            && review.transaction.id == other_payment.id
+    }));
+    Ok(())
+}
+
+#[test]
+fn classification_rule_retroactive_resolution_preserves_critical_reviews() -> Result<()> {
+    let (temporary, core) = fixture()?;
+    let source_fingerprint = digest('o');
+    let month = NaiveDate::from_ymd_opt(2027, 8, 1).expect("valid date");
+    let guarded_day = NaiveDate::from_ymd_opt(2027, 8, 2).expect("valid date");
+    let transfer_day = NaiveDate::from_ymd_opt(2027, 8, 3).expect("valid date");
+    let mut unknown_transfer = row(
+        &source_fingerprint,
+        "critical-unknown-transfer",
+        3,
+        transfer_day,
+        ExpenseEventKind::UnknownP2p,
+        ExpenseDirection::Debit,
+        30_000,
+        None,
+        '8',
+    );
+    unknown_transfer.merchant = Some(encrypted(
+        &format!("{source_fingerprint}:critical-unknown-transfer"),
+        "merchant",
+        'z',
+    ));
+    unknown_transfer.payment_method_fingerprint = Some(digest('c'));
+    unknown_transfer.external_reference_fingerprint = None;
+    preview_and_import(
+        &core,
+        NormalizedExpenseImport {
+            adapter: ExpenseImportAdapter::KbAccountHistoryV1,
+            source_kind: ExpenseSourceKind::Account,
+            source_fingerprint: source_fingerprint.clone(),
+            file_sha256: digest('p'),
+            normalized_sha256: digest('q'),
+            coverage_start: month,
+            coverage_end: transfer_day,
+            rejected_count: 0,
+            rows: vec![
+                grouped_purchase_row(
+                    &source_fingerprint,
+                    "critical-rule-source",
+                    1,
+                    month,
+                    10_000,
+                    '6',
+                    'z',
+                    'c',
+                ),
+                grouped_purchase_row(
+                    &source_fingerprint,
+                    "critical-guarded-purchase",
+                    2,
+                    guarded_day,
+                    20_000,
+                    '7',
+                    'z',
+                    'c',
+                ),
+                unknown_transfer,
+            ],
+        },
+    )?;
+
+    let transactions = core.list_expense_transactions(ExpenseTransactionFilter {
+        month_start: month,
+        cursor: None,
+        limit: 50,
+    })?;
+    let guarded_event_id = transactions
+        .items
+        .iter()
+        .find(|item| item.posted_date == guarded_day)
+        .map(|item| item.id.clone())
+        .expect("guarded purchase");
+    {
+        let connection = Connection::open(TmHome::new(temporary.path()).database_path())?;
+        for (reason, created_at) in [
+            ("ambiguous_mirror", "2027-08-02T12:00:01Z"),
+            ("import_rejected", "2027-08-02T12:00:02Z"),
+        ] {
+            connection.execute(
+                "INSERT INTO expense_reviews(
+                    id, event_id, review_reason, review_status, created_at, version
+                 ) VALUES (?1, ?2, ?3, 'pending', ?4, 1)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    guarded_event_id,
+                    reason,
+                    created_at,
+                ],
+            )?;
+        }
+    }
+
+    let source_review = core
+        .list_expense_reviews(ExpenseReviewFilter {
+            month_start: Some(month),
+            status: Some(ExpenseReviewStatus::Pending),
+            cursor: None,
+            limit: 50,
+        })?
+        .items
+        .into_iter()
+        .find(|review| {
+            review.reason == ExpenseReviewReason::CategoryConfirmation
+                && review.transaction.posted_date == month
+        })
+        .expect("source category review");
+    core.resolve_expense_review(
+        &source_review.id,
+        ResolveExpenseReviewInput {
+            expected_version: source_review.version,
+            kind: ExpenseEventKind::Purchase,
+            category: ExpenseCategory::Food,
+            duplicate_of_event_id: None,
+            related_event_id: None,
+            personal_amount_minor: None,
+            create_rule: true,
+        },
+    )?;
+
+    let guarded = core
+        .list_expense_transactions(ExpenseTransactionFilter {
+            month_start: month,
+            cursor: None,
+            limit: 50,
+        })?
+        .items
+        .into_iter()
+        .find(|item| item.id == guarded_event_id)
+        .expect("guarded purchase after rule");
+    assert_eq!(guarded.category, ExpenseCategory::Other);
+    let pending = core.list_expense_reviews(ExpenseReviewFilter {
+        month_start: Some(month),
+        status: Some(ExpenseReviewStatus::Pending),
+        cursor: None,
+        limit: 50,
+    })?;
+    let guarded_reasons = pending
+        .items
+        .iter()
+        .filter(|review| review.transaction.id == guarded_event_id)
+        .map(|review| review.reason)
+        .collect::<Vec<_>>();
+    assert!(guarded_reasons.contains(&ExpenseReviewReason::CategoryConfirmation));
+    assert!(guarded_reasons.contains(&ExpenseReviewReason::AmbiguousMirror));
+    assert!(guarded_reasons.contains(&ExpenseReviewReason::ImportRejected));
+    assert!(pending.items.iter().any(|review| {
+        review.reason == ExpenseReviewReason::UnknownP2p
+            && review.transaction.posted_date == transfer_day
+    }));
+
+    let guarded_category = pending
+        .items
+        .iter()
+        .find(|review| {
+            review.transaction.id == guarded_event_id
+                && review.reason == ExpenseReviewReason::CategoryConfirmation
+        })
+        .expect("guarded category confirmation");
+    core.resolve_expense_review(
+        &guarded_category.id,
+        ResolveExpenseReviewInput {
+            expected_version: guarded_category.version,
+            kind: ExpenseEventKind::Purchase,
+            category: ExpenseCategory::Shopping,
+            duplicate_of_event_id: None,
+            related_event_id: None,
+            personal_amount_minor: None,
+            create_rule: false,
+        },
+    )?;
+    let after_category = core.list_expense_reviews(ExpenseReviewFilter {
+        month_start: Some(month),
+        status: Some(ExpenseReviewStatus::Pending),
+        cursor: None,
+        limit: 50,
+    })?;
+    let remaining_guarded_reasons = after_category
+        .items
+        .iter()
+        .filter(|review| review.transaction.id == guarded_event_id)
+        .map(|review| review.reason)
+        .collect::<Vec<_>>();
+    assert!(!remaining_guarded_reasons.contains(&ExpenseReviewReason::CategoryConfirmation));
+    assert!(remaining_guarded_reasons.contains(&ExpenseReviewReason::AmbiguousMirror));
+    assert!(remaining_guarded_reasons.contains(&ExpenseReviewReason::ImportRejected));
+    Ok(())
+}
+
+#[test]
 fn classification_rules_only_reclassify_allowed_rows_and_preserve_accounting_semantics()
 -> Result<()> {
     let (_temporary, core) = fixture()?;
@@ -3812,6 +4263,240 @@ fn near_time_cross_source_mirrors_require_review_without_pagination_duplicates()
     assert_eq!(
         core.get_expense_month_summary(month)?.currencies[0].gross_purchase_minor,
         10_000
+    );
+    Ok(())
+}
+
+#[test]
+fn required_review_scope_is_not_hidden_behind_optional_category_pages() -> Result<()> {
+    let (_temporary, core) = fixture()?;
+    let month = NaiveDate::from_ymd_opt(2027, 10, 1).expect("valid date");
+    let source_fingerprint = digest('7');
+    let mut rows = Vec::new();
+    for index in 0_u32..101 {
+        let mut purchase = row(
+            &source_fingerprint,
+            &format!("optional-{index:03}"),
+            index + 1,
+            month,
+            ExpenseEventKind::Purchase,
+            ExpenseDirection::Debit,
+            10_000 + i64::from(index),
+            Some(ExpenseCategory::Other),
+            'a',
+        );
+        purchase.external_reference_fingerprint = None;
+        rows.push(purchase);
+    }
+    let mut required = row(
+        &source_fingerprint,
+        "required-transfer",
+        102,
+        month,
+        ExpenseEventKind::UnknownP2p,
+        ExpenseDirection::Debit,
+        99_999,
+        Some(ExpenseCategory::Unconfirmed),
+        'b',
+    );
+    required.merchant = None;
+    required.counterparty = Some(encrypted(
+        &format!("{source_fingerprint}:required-transfer"),
+        "counterparty",
+        'b',
+    ));
+    required.payment_method_fingerprint = None;
+    required.external_reference_fingerprint = None;
+    rows.push(required);
+    preview_and_import(
+        &core,
+        NormalizedExpenseImport {
+            adapter: ExpenseImportAdapter::KbAccountHistoryV1,
+            source_kind: ExpenseSourceKind::Account,
+            source_fingerprint,
+            file_sha256: digest('8'),
+            normalized_sha256: digest('8'),
+            coverage_start: month,
+            coverage_end: month,
+            rejected_count: 0,
+            rows,
+        },
+    )?;
+
+    let required_page = core.list_expense_reviews_scoped(
+        ExpenseReviewFilter {
+            month_start: Some(month),
+            status: Some(ExpenseReviewStatus::Pending),
+            cursor: None,
+            limit: 100,
+        },
+        ExpenseReviewScope::Required,
+    )?;
+    assert_eq!(required_page.items.len(), 1);
+    assert_eq!(
+        required_page.items[0].reason,
+        ExpenseReviewReason::UnknownP2p
+    );
+    assert!(required_page.next_cursor.is_none());
+
+    let optional_page = core.list_expense_reviews_scoped(
+        ExpenseReviewFilter {
+            month_start: Some(month),
+            status: Some(ExpenseReviewStatus::Pending),
+            cursor: None,
+            limit: 100,
+        },
+        ExpenseReviewScope::CategoryConfirmation,
+    )?;
+    assert_eq!(optional_page.items.len(), 100);
+    assert!(optional_page.next_cursor.is_some());
+    assert!(
+        optional_page
+            .items
+            .iter()
+            .all(|review| review.reason == ExpenseReviewReason::CategoryConfirmation)
+    );
+    Ok(())
+}
+
+#[test]
+fn classification_rule_requires_a_payment_method_fingerprint() -> Result<()> {
+    let (_temporary, core) = fixture()?;
+    let month = NaiveDate::from_ymd_opt(2027, 11, 1).expect("valid date");
+    let source_fingerprint = digest('9');
+    let mut purchase = row(
+        &source_fingerprint,
+        "merchant-without-payment-method",
+        1,
+        month,
+        ExpenseEventKind::Purchase,
+        ExpenseDirection::Debit,
+        12_345,
+        Some(ExpenseCategory::Other),
+        'c',
+    );
+    purchase.payment_method_fingerprint = None;
+    purchase.external_reference_fingerprint = None;
+    preview_and_import(
+        &core,
+        NormalizedExpenseImport {
+            adapter: ExpenseImportAdapter::KbAccountHistoryV1,
+            source_kind: ExpenseSourceKind::Account,
+            source_fingerprint,
+            file_sha256: digest('d'),
+            normalized_sha256: digest('d'),
+            coverage_start: month,
+            coverage_end: month,
+            rejected_count: 0,
+            rows: vec![purchase],
+        },
+    )?;
+    let review = core
+        .list_expense_reviews(ExpenseReviewFilter {
+            month_start: Some(month),
+            status: Some(ExpenseReviewStatus::Pending),
+            cursor: None,
+            limit: 10,
+        })?
+        .items
+        .into_iter()
+        .find(|review| review.reason == ExpenseReviewReason::CategoryConfirmation)
+        .expect("category confirmation");
+
+    let error = core
+        .resolve_expense_review(
+            &review.id,
+            ResolveExpenseReviewInput {
+                expected_version: review.version,
+                kind: ExpenseEventKind::Purchase,
+                category: ExpenseCategory::Food,
+                duplicate_of_event_id: None,
+                related_event_id: None,
+                personal_amount_minor: None,
+                create_rule: true,
+            },
+        )
+        .expect_err("missing payment method must reject classification rule");
+    assert!(
+        error
+            .to_string()
+            .contains("requires merchant and payment method fingerprints")
+    );
+    assert_eq!(
+        core.list_expense_reviews(ExpenseReviewFilter {
+            month_start: Some(month),
+            status: Some(ExpenseReviewStatus::Pending),
+            cursor: None,
+            limit: 10,
+        })?
+        .items
+        .len(),
+        1
+    );
+    Ok(())
+}
+
+#[test]
+fn legacy_null_payment_classification_rule_is_not_applied() -> Result<()> {
+    let (temporary, core) = fixture()?;
+    let month = NaiveDate::from_ymd_opt(2027, 12, 1).expect("valid date");
+    let source_fingerprint = digest('0');
+    Connection::open(TmHome::new(temporary.path()).database_path())?.execute(
+        "INSERT INTO expense_rules(
+             id, rule_kind, merchant_blind_index, payment_method_fingerprint,
+             event_kind, category, recurring_expense_id, created_at
+         ) VALUES (?1, 'classification', ?2, NULL, 'purchase', 'food', NULL, ?3)",
+        params![
+            Uuid::new_v4().to_string(),
+            digest('c'),
+            "2027-11-30T00:00:00Z"
+        ],
+    )?;
+    let mut purchase = row(
+        &source_fingerprint,
+        "legacy-null-rule-candidate",
+        1,
+        month,
+        ExpenseEventKind::Purchase,
+        ExpenseDirection::Debit,
+        54_321,
+        Some(ExpenseCategory::Other),
+        'c',
+    );
+    purchase.payment_method_fingerprint = None;
+    purchase.external_reference_fingerprint = None;
+    preview_and_import(
+        &core,
+        NormalizedExpenseImport {
+            adapter: ExpenseImportAdapter::KbAccountHistoryV1,
+            source_kind: ExpenseSourceKind::Account,
+            source_fingerprint,
+            file_sha256: digest('1'),
+            normalized_sha256: digest('1'),
+            coverage_start: month,
+            coverage_end: month,
+            rejected_count: 0,
+            rows: vec![purchase],
+        },
+    )?;
+
+    let transactions = core.list_expense_transactions(ExpenseTransactionFilter {
+        month_start: month,
+        cursor: None,
+        limit: 10,
+    })?;
+    assert_eq!(transactions.items.len(), 1);
+    assert_eq!(transactions.items[0].category, ExpenseCategory::Other);
+    assert!(
+        core.list_expense_reviews(ExpenseReviewFilter {
+            month_start: Some(month),
+            status: Some(ExpenseReviewStatus::Pending),
+            cursor: None,
+            limit: 10,
+        })?
+        .items
+        .iter()
+        .any(|review| review.reason == ExpenseReviewReason::CategoryConfirmation)
     );
     Ok(())
 }

@@ -40,7 +40,7 @@ UI는 POST/PATCH를 자동 재시도하지 않는다. 상태 변경과 빠른 �
 
 - 관리자 bearer token은 모바일 JavaScript, cookie, 응답 또는 Cache Storage로 전달하지 않는다.
 - 모바일에는 `__Host-tm_device` HttpOnly cookie와 browser-readable `__Host-tm_csrf` cookie만 발급한다. 서버 DB에는 기기 token과 CSRF 원문이 아니라 SHA-256만 저장한다.
-- service worker의 cache 이름은 `tm-mobile-shell-v15-expenses`이다. 활성화할 때 이전 shell cache를 제거한다.
+- service worker의 cache 이름은 `tm-mobile-shell-v15-expense-review-v2`이다. 활성화할 때 이전 shell cache를 제거한다.
 - `/api/`와 모든 non-GET 요청은 service worker가 가로채거나 저장하지 않는다. 오프라인에서는 app shell만 열리며 프로젝트·Task 데이터 조회 및 변경은 연결이 필요하다.
 - Task·프로젝트 데이터는 localStorage, sessionStorage 또는 Cache Storage에 저장하지 않는다.
 - 조회·생성·변경은 OpenAI API를 호출하지 않으며 AI 비용 원장을 변경하지 않는다.
@@ -102,7 +102,7 @@ baseline에는 기존 프로젝트·Task ID와 개수, 비내용 필드, 제목�
 
 1. PWA shell에서 프로젝트·Task 폼, 필터, 페이지 조회 UI를 확인한다.
 2. `app.js`에서 `project.create`, `task.create`, `task.update`, idempotency, `If-None-Match`·`If-Match`, 사용자 확인 계약을 확인한다.
-3. service worker가 `tm-mobile-shell-v15-expenses`이고 API·non-GET을 cache하지 않는지 확인한다.
+3. service worker가 `tm-mobile-shell-v15-expense-review-v2`이고 API·non-GET을 cache하지 않는지 확인한다.
 4. 임시 등록 기기로 프로젝트와 Task 전체를 페이지 조회해 메모리 안에서 SHA-256 digest를 만든다.
 5. 프로젝트 생성 요청에는 confirmation만 누락하고 빈 프로젝트 이름을 사용해 `428`을 확인한다. confirmation 검사가 회귀해도 빈 이름 검증이 성공 생성을 막는다.
 6. 정확한 CSRF·idempotency·`If-Match`·confirmation을 갖춘 Task PATCH를 존재하지 않는 임의 UUID에 보내 `404`를 확인한다.

@@ -658,6 +658,7 @@ export interface ExpenseReviewPage {
 export interface ListExpenseReviewsInput {
   month?: string;
   status?: "pending" | "resolved";
+  scope?: "all" | "required" | "category_confirmation";
   cursor?: string;
   limit?: number;
 }
