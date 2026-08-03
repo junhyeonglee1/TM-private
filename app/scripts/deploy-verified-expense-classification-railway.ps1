@@ -123,8 +123,8 @@ function Invoke-ProductionOperationsStatus {
         if ($cacheControl -notmatch '(?i)(^|,|\s)no-store($|,|\s)') {
             throw 'Production operations status did not return Cache-Control: no-store.'
         }
-        if ($response.Content.Headers.ContentLength.HasValue -and
-            $response.Content.Headers.ContentLength.Value -gt 1048576) {
+        $contentLength = $response.Content.Headers.ContentLength
+        if ($null -ne $contentLength -and [long]$contentLength -gt 1048576) {
             throw 'Production operations status exceeded the fixed response limit.'
         }
         $bytes = $response.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()

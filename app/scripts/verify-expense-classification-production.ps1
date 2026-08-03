@@ -74,8 +74,8 @@ function Invoke-TmReadOnlyGet {
                 [System.Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer', $Token)
         }
         $response = $Client.SendAsync($request).GetAwaiter().GetResult()
-        if ($response.Content.Headers.ContentLength.HasValue -and
-            $response.Content.Headers.ContentLength.Value -gt $maximumResponseBytes) {
+        $contentLength = $response.Content.Headers.ContentLength
+        if ($null -ne $contentLength -and [long]$contentLength -gt $maximumResponseBytes) {
             throw 'TM production returned an oversized response.'
         }
         $bytes = $response.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
