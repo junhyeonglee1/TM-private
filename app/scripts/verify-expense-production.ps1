@@ -136,24 +136,85 @@ function Get-RailwayDeployments {
 function Assert-ExpectedRailwayDeployment {
     param(
         [Parameter(Mandatory = $true)][string]$RailwayPath,
-        [Parameter(Mandatory = $true)]$DeploymentResult
+        [Parameter(Mandatory = $true)]$DeploymentResult,
+        [Parameter(Mandatory = $true)]$Operations
     )
     $deployments = @(Get-RailwayDeployments -RailwayPath $RailwayPath)
-    $matching = @($deployments | Where-Object {
-        ([string]$_.id).ToLowerInvariant() -eq $ExpectedDeploymentId
-    })
-    if ($matching.Count -ne 1) {
-        throw 'The expected Railway deployment could not be proven uniquely.'
+    $timeline = [System.Collections.Generic.List[object]]::new()
+    $ids = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase
+    )
+    foreach ($item in $deployments) {
+        $parsedId = [Guid]::Empty
+        $createdAt = [DateTimeOffset]::MinValue
+        if (-not [Guid]::TryParse([string]$item.id, [ref]$parsedId) -or
+            -not [DateTimeOffset]::TryParse(
+                [string]$item.createdAt,
+                [System.Globalization.CultureInfo]::InvariantCulture,
+                [System.Globalization.DateTimeStyles]::RoundtripKind,
+                [ref]$createdAt
+            ) -or -not $ids.Add($parsedId.ToString('D'))) {
+            throw 'Railway returned an ambiguous deployment timeline.'
+        }
+        $timeline.Add([pscustomobject]@{
+            Id = $parsedId.ToString('D')
+            CreatedAt = $createdAt.ToUniversalTime()
+            Deployment = $item
+        })
     }
-    $deployment = $matching[0]
-    $latest = @($deployments | Sort-Object { [DateTimeOffset]$_.createdAt } -Descending | Select-Object -First 1)
-    if ($latest.Count -ne 1 -or
-        ([string]$latest[0].id).ToLowerInvariant() -ne $ExpectedDeploymentId -or
-        [string]$deployment.status -ne 'SUCCESS' -or
+    $ordered = @($timeline | Sort-Object CreatedAt -Descending)
+    if ($ordered.Count -lt 2 -or $ordered[0].Id -cne $ExpectedDeploymentId -or
+        $ordered[1].Id -cne ([Guid][string]$DeploymentResult.lockedDeploymentId).ToString('D') -or
+        $ordered[0].CreatedAt -le $ordered[1].CreatedAt) {
+        throw 'The expected activation and locked deployment are not an exact adjacent timeline pair.'
+    }
+    $deployment = $ordered[0].Deployment
+    $locked = $ordered[1].Deployment
+    $deploymentCreatedAt = [DateTimeOffset]::MinValue
+    $lockedCreatedAt = [DateTimeOffset]::MinValue
+    $recoveryVerifiedAt = [DateTimeOffset]::MinValue
+    $recovered = [bool]$DeploymentResult.lockedDeploymentRecoveredAfterActivation
+    $receiptLockedStatus = [string]$DeploymentResult.lockedDeploymentStatus
+    $currentLockedStatus = [string]$locked.status
+    $statusContractValid =
+        ($receiptLockedStatus -ceq 'SUCCESS' -and
+            $currentLockedStatus -ceq 'SUCCESS' -and -not $recovered) -or
+        ($receiptLockedStatus -ceq 'REMOVED' -and
+            $currentLockedStatus -ceq 'REMOVED' -and $recovered) -or
+        ($receiptLockedStatus -ceq 'SUCCESS' -and
+            $currentLockedStatus -ceq 'REMOVED' -and -not $recovered -and
+            [bool]$DeploymentResult.lockedDeploymentRemovalEligibleAfterActivation)
+    if ($null -eq $Operations.database -or $null -eq $Operations.controls -or
+        $null -eq $Operations.deploymentProvenance -or
+        [int]$Operations.database.schemaVersion -ne 15 -or
+        [string]$Operations.controls.expenseRolloutMode -cne 'enabled' -or
+        $Operations.controls.expenseCryptoReady -ne $true -or
+        $Operations.controls.expenseKeyInitialized -ne $true -or
+        $Operations.controls.expenseExpectedKeyFingerprintMatch -ne $true -or
+        $Operations.controls.expenseActivationFingerprintMatch -ne $true -or
+        ([string]$Operations.deploymentProvenance.buildCommitSha).ToLowerInvariant() -cne
+            $ExpectedHeadSha -or
+        ([string]$Operations.deploymentProvenance.railwayDeploymentId).ToLowerInvariant() -cne
+            $ExpectedDeploymentId -or
+        [string]$deployment.status -cne 'SUCCESS' -or
         [string]$deployment.meta.cliMessage -cne [string]$DeploymentResult.deploymentMessage -or
         ([string]$deployment.meta.imageDigest).ToLowerInvariant() -cne
-            ([string]$DeploymentResult.productionImageDigest).ToLowerInvariant()) {
-        throw 'The expected deployment is not the latest successful immutable Railway deployment.'
+            ([string]$DeploymentResult.productionImageDigest).ToLowerInvariant() -or
+        -not $statusContractValid -or
+        [string]$locked.meta.cliMessage -cne [string]$DeploymentResult.lockedDeploymentMessage -or
+        ([string]$locked.meta.imageDigest).ToLowerInvariant() -cne
+            ([string]$DeploymentResult.lockedProductionImageDigest).ToLowerInvariant() -or
+        ([string]$locked.meta.imageDigest).ToLowerInvariant() -cne
+            ([string]$deployment.meta.imageDigest).ToLowerInvariant() -or
+        -not [DateTimeOffset]::TryParse([string]$DeploymentResult.deploymentCreatedAt, [ref]$deploymentCreatedAt) -or
+        -not [DateTimeOffset]::TryParse([string]$DeploymentResult.lockedDeploymentCreatedAt, [ref]$lockedCreatedAt) -or
+        $deploymentCreatedAt.ToUniversalTime() -ne $ordered[0].CreatedAt -or
+        $lockedCreatedAt.ToUniversalTime() -ne $ordered[1].CreatedAt -or
+        ($recovered -and (-not [DateTimeOffset]::TryParse(
+            [string]$DeploymentResult.lockedDeploymentRecoveryVerifiedAtUtc,
+            [ref]$recoveryVerifiedAt
+        ) -or $recoveryVerifiedAt.ToUniversalTime() -lt $ordered[0].CreatedAt))) {
+        throw 'The deployment pair does not satisfy the exact live enabled recovery proof.'
     }
     return $deployment
 }
@@ -250,6 +311,13 @@ Assert-StrictBoolean $deploymentResult.success $true 'deploymentResult.success'
 Assert-StrictBoolean $deploymentResult.deploymentWaitRequired $false 'deploymentResult.deploymentWaitRequired'
 Assert-StrictBoolean $deploymentResult.configurationReceiptStateConsumed $true 'deploymentResult.configurationReceiptStateConsumed'
 Assert-StrictBoolean $deploymentResult.expenseRolloutActivated $true 'deploymentResult.expenseRolloutActivated'
+if ($deploymentResult.lockedDeploymentRecoveredAfterActivation -isnot [bool]) {
+    throw 'deploymentResult.lockedDeploymentRecoveredAfterActivation must be a Boolean.'
+}
+Assert-StrictBoolean `
+    $deploymentResult.lockedDeploymentRemovalEligibleAfterActivation `
+    $true `
+    'deploymentResult.lockedDeploymentRemovalEligibleAfterActivation'
 if ($deploymentResult.expectedExpenseAiEnabled -isnot [bool]) {
     throw 'deploymentResult.expectedExpenseAiEnabled must be a Boolean.'
 }
@@ -269,7 +337,7 @@ if ($configurationResult.productionFingerprintComparisonDeferred -isnot [bool] -
     throw 'The configuration receipt has an invalid expense recovery fingerprint contract.'
 }
 $configurationSha256 = (Get-FileHash -LiteralPath $ConfigurationResultPath -Algorithm SHA256).Hash.ToLowerInvariant()
-if ([int]$deploymentResult.receiptVersion -ne 2 -or
+if ([int]$deploymentResult.receiptVersion -ne 3 -or
     [string]$deploymentResult.kind -cne 'tm-expense-production-deployment' -or
     [string]$deploymentResult.integrityProofKind -cne 'dpapi-current-user-v1' -or
     [string]$configurationResult.receiptId -cne [string]$deploymentResult.configurationReceiptId -or
@@ -323,7 +391,7 @@ if ([string]$deploymentResult.repository -ne $repository -or
     [string]$deploymentResult.configurationReceiptId -notmatch '^[0-9a-fA-F-]{36}$' -or
     [string]$deploymentResult.configurationReceiptSha256 -notmatch '^[0-9a-fA-F]{64}$' -or
     [string]$deploymentResult.lockedDeploymentId -notmatch '^[0-9a-fA-F-]{36}$' -or
-    [string]$deploymentResult.lockedDeploymentStatus -cne 'SUCCESS' -or
+    [string]$deploymentResult.lockedDeploymentStatus -notin @('SUCCESS', 'REMOVED') -or
     [string]$deploymentResult.lockedDeploymentMessage -cne
         "schema15-expense-lock-$($ExpectedHeadSha.Substring(0, 12))" -or
     [string]$deploymentResult.lockedProductionImageDigest -notmatch '^sha256:[0-9a-fA-F]{64}$' -or
@@ -388,8 +456,6 @@ Assert-TmSignedToolMatches -Expected $deploymentResult.operatorTools.githubCli `
 $railwayEvidence = Resolve-TmVerifiedRailwayCli
 Assert-TmRailwayCliMatches -Expected $deploymentResult.railwayCli -Actual $railwayEvidence
 $railway = [string]$railwayEvidence.path
-$deploymentEvidence = Assert-ExpectedRailwayDeployment -RailwayPath $railway -DeploymentResult $deploymentResult
-
 $vault = $null
 $credential = $null
 $expenseCredential = $null
@@ -568,7 +634,8 @@ try {
     }
 
     $stage = 'deployment-final-proof'
-    $deploymentEvidence = Assert-ExpectedRailwayDeployment -RailwayPath $railway -DeploymentResult $deploymentResult
+    $deploymentEvidence = Assert-ExpectedRailwayDeployment -RailwayPath $railway `
+        -DeploymentResult $deploymentResult -Operations $opsData
 
     $stage = 'complete'
     [ordered]@{

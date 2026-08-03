@@ -584,29 +584,58 @@ function Resolve-ExpenseDeploymentState {
     param(
         [Parameter(Mandatory = $true)]$Operations,
         [Parameter(Mandatory = $true)]$Receipt,
-        [Parameter(Mandatory = $true)][string]$RailwayPath
+        [Parameter(Mandatory = $true)][string]$RailwayPath,
+        [AllowNull()][object[]]$DeploymentSnapshot
     )
-    try {
+
+    if ($null -eq $Operations.database -or $null -eq $Operations.controls -or
+        $null -eq $Operations.deploymentProvenance -or
+        $Operations.database.PSObject.Properties.Name -notcontains 'schemaVersion' -or
+        $Operations.deploymentProvenance.PSObject.Properties.Name -notcontains
+            'buildCommitSha') {
+        throw 'Production does not positively prove a complete pre-rollout deployment.'
+    }
+    $observedHeadSha = ([string]$Operations.deploymentProvenance.buildCommitSha).ToLowerInvariant()
+    $hasDeploymentId = $Operations.deploymentProvenance.PSObject.Properties.Name -contains
+        'railwayDeploymentId'
+    $parsedDeploymentId = [Guid]::Empty
+    $deploymentIdValid = $hasDeploymentId -and [Guid]::TryParse(
+        [string]$Operations.deploymentProvenance.railwayDeploymentId,
+        [ref]$parsedDeploymentId
+    )
+    $hasRolloutMode = $Operations.controls.PSObject.Properties.Name -contains
+        'expenseRolloutMode'
+    $rolloutMode = if ($hasRolloutMode) {
+        [string]$Operations.controls.expenseRolloutMode
+    } else {
+        ''
+    }
+    $expectedShaObserved = $observedHeadSha -ceq $ExpectedHeadSha
+    if ($expectedShaObserved -and
+        ([int]$Operations.database.schemaVersion -ne 15 -or
+            -not $deploymentIdValid -or
+            $rolloutMode -notin @('locked', 'enabled'))) {
+        throw 'Production exposes a partial exact rollout and cannot be treated as fresh.'
+    }
+    $exactRolloutCandidate = $expectedShaObserved
+    if (-not $exactRolloutCandidate) {
+        $positivePreRollout = $observedHeadSha -match '^[0-9a-f]{40}$' -and
+            $deploymentIdValid -and
+            ([int]$Operations.database.schemaVersion -eq 14 -or
+                ([int]$Operations.database.schemaVersion -eq 15 -and
+                    $rolloutMode -ceq 'enabled'))
+        if (-not $positivePreRollout) {
+            throw 'Production does not positively prove a complete pre-rollout deployment.'
+        }
         Assert-LiveDeploymentPreflight -Operations $Operations -Receipt $Receipt
         return [pscustomobject]@{ Mode = 'fresh'; Deployment = $null }
     }
-    catch {
-        # A consumed source deployment can be resumed only from an exact live
-        # locked/enabled state bound to this receipt. All other failures remain fatal.
-    }
-    if ($null -eq $Operations.database -or $null -eq $Operations.controls -or
-        $null -eq $Operations.deploymentProvenance -or
-        [int]$Operations.database.schemaVersion -ne 15 -or
-        ([string]$Operations.deploymentProvenance.buildCommitSha).ToLowerInvariant() -cne
-            $ExpectedHeadSha -or
-        [string]$Operations.controls.expenseRolloutMode -notin @('locked', 'enabled')) {
-        throw 'Production does not match either the approved preflight or a resumable rollout state.'
-    }
-    $deploymentId = ([string]$Operations.deploymentProvenance.railwayDeploymentId).ToLowerInvariant()
-    if ($deploymentId -notmatch '^[0-9a-f-]{36}$') {
-        throw 'The resumable rollout has no valid deployment provenance.'
-    }
-    $mode = [string]$Operations.controls.expenseRolloutMode
+
+    # An exact live locked/enabled rollout must be resolved before the broader
+    # pre-deployment proof. Otherwise an enabled deployment can satisfy the broad
+    # schema/key proof and be mistaken for a fresh rollout after an activation timeout.
+    $deploymentId = $parsedDeploymentId.ToString('D')
+    $mode = $rolloutMode
     Assert-ExpenseRolloutProof -Operations $Operations -Receipt $Receipt `
         -Mode $mode -DeploymentId $deploymentId -AllowEnabledLedgerChange
     $expectedMessage = if ($mode -eq 'locked') {
@@ -614,13 +643,25 @@ function Resolve-ExpenseDeploymentState {
     } else {
         "schema15-expense-activate-$($ExpectedHeadSha.Substring(0, 12))"
     }
-    $matching = @(Get-RailwayDeployments -RailwayPath $RailwayPath | Where-Object {
+    $deployments = if ($PSBoundParameters.ContainsKey('DeploymentSnapshot')) {
+        @($DeploymentSnapshot)
+    } else {
+        @(Get-RailwayDeployments -RailwayPath $RailwayPath)
+    }
+    $matching = @($deployments | Where-Object {
         ([string]$_.id).ToLowerInvariant() -eq $deploymentId
     })
+    $deploymentCreatedAt = [DateTimeOffset]::MinValue
     if ($matching.Count -ne 1 -or
         [string]$matching[0].status -cne 'SUCCESS' -or
         [string]$matching[0].meta.cliMessage -cne $expectedMessage -or
-        [string]$matching[0].meta.imageDigest -notmatch '^sha256:[0-9a-fA-F]{64}$') {
+        [string]$matching[0].meta.imageDigest -notmatch '^sha256:[0-9a-fA-F]{64}$' -or
+        -not [DateTimeOffset]::TryParse(
+            [string]$matching[0].createdAt,
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::RoundtripKind,
+            [ref]$deploymentCreatedAt
+        )) {
         throw 'The resumable rollout is not bound to an exact successful Railway deployment.'
     }
     return [pscustomobject]@{ Mode = $mode; Deployment = $matching[0] }
@@ -629,20 +670,90 @@ function Resolve-ExpenseDeploymentState {
 function Find-LockedRolloutDeployment {
     param(
         [Parameter(Mandatory = $true)][string]$RailwayPath,
-        [Parameter(Mandatory = $true)]$EnabledDeployment
+        [Parameter(Mandatory = $true)]$Operations,
+        [Parameter(Mandatory = $true)]$Receipt,
+        [AllowNull()][object[]]$DeploymentSnapshot
     )
-    $enabledCreatedAt = [DateTimeOffset]$EnabledDeployment.createdAt
-    $message = "schema15-expense-lock-$($ExpectedHeadSha.Substring(0, 12))"
-    $matching = @(Get-RailwayDeployments -RailwayPath $RailwayPath | Where-Object {
-        [string]$_.status -ceq 'SUCCESS' -and
-        [string]$_.meta.cliMessage -ceq $message -and
-        [string]$_.meta.imageDigest -match '^sha256:[0-9a-fA-F]{64}$' -and
-        [DateTimeOffset]$_.createdAt -le $enabledCreatedAt
-    } | Sort-Object { [DateTimeOffset]$_.createdAt } -Descending)
-    if ($matching.Count -lt 1) {
-        throw 'The enabled rollout has no preceding exact locked deployment proof.'
+
+    $parsedEnabledId = [Guid]::Empty
+    if ($null -eq $Operations.database -or $null -eq $Operations.controls -or
+        $null -eq $Operations.deploymentProvenance -or
+        [int]$Operations.database.schemaVersion -ne 15 -or
+        [string]$Operations.controls.expenseRolloutMode -cne 'enabled' -or
+        ([string]$Operations.deploymentProvenance.buildCommitSha).ToLowerInvariant() -cne
+            $ExpectedHeadSha -or
+        -not [Guid]::TryParse(
+            [string]$Operations.deploymentProvenance.railwayDeploymentId,
+            [ref]$parsedEnabledId
+        )) {
+        throw 'The locked rollout recovery has no exact live enabled deployment proof.'
     }
-    return $matching[0]
+    $enabledId = $parsedEnabledId.ToString('D')
+    Assert-ExpenseRolloutProof -Operations $Operations -Receipt $Receipt `
+        -Mode enabled -DeploymentId $enabledId -AllowEnabledLedgerChange
+
+    $deployments = if ($PSBoundParameters.ContainsKey('DeploymentSnapshot')) {
+        @($DeploymentSnapshot)
+    } else {
+        @(Get-RailwayDeployments -RailwayPath $RailwayPath)
+    }
+    $timeline = [System.Collections.Generic.List[object]]::new()
+    $deploymentIds = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase
+    )
+    foreach ($item in $deployments) {
+        $parsedId = [Guid]::Empty
+        $createdAt = [DateTimeOffset]::MinValue
+        if (-not [Guid]::TryParse([string]$item.id, [ref]$parsedId) -or
+            -not [DateTimeOffset]::TryParse(
+                [string]$item.createdAt,
+                [System.Globalization.CultureInfo]::InvariantCulture,
+                [System.Globalization.DateTimeStyles]::RoundtripKind,
+                [ref]$createdAt
+            ) -or -not $deploymentIds.Add($parsedId.ToString('D'))) {
+            throw 'Railway returned an ambiguous deployment ID or creation timestamp.'
+        }
+        $timeline.Add([pscustomobject]@{
+            Id = $parsedId.ToString('D')
+            CreatedAt = $createdAt.ToUniversalTime()
+            Deployment = $item
+        })
+    }
+    $ordered = @($timeline | Sort-Object CreatedAt -Descending)
+    if ($ordered.Count -lt 2 -or $ordered[0].Id -cne $enabledId -or
+        $ordered[0].CreatedAt -le $ordered[1].CreatedAt) {
+        throw 'The live enabled deployment is not uniquely followed by an exact predecessor.'
+    }
+
+    $enabled = $ordered[0].Deployment
+    $locked = $ordered[1].Deployment
+    $enabledMessage = "schema15-expense-activate-$($ExpectedHeadSha.Substring(0, 12))"
+    $lockedMessage = "schema15-expense-lock-$($ExpectedHeadSha.Substring(0, 12))"
+    $enabledDigest = ([string]$enabled.meta.imageDigest).ToLowerInvariant()
+    $lockedDigest = ([string]$locked.meta.imageDigest).ToLowerInvariant()
+    $configuredAt = [DateTimeOffset]::MinValue
+    if ([string]$enabled.status -cne 'SUCCESS' -or
+        [string]$enabled.meta.cliMessage -cne $enabledMessage -or
+        $enabledDigest -notmatch '^sha256:[0-9a-f]{64}$' -or
+        [string]$locked.status -notin @('SUCCESS', 'REMOVED') -or
+        [string]$locked.meta.cliMessage -cne $lockedMessage -or
+        $lockedDigest -notmatch '^sha256:[0-9a-f]{64}$' -or
+        $lockedDigest -cne $enabledDigest -or
+        -not [DateTimeOffset]::TryParse(
+            [string]$Receipt.configuredAtUtc,
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::RoundtripKind,
+            [ref]$configuredAt
+        ) -or $ordered[1].CreatedAt -lt $configuredAt.ToUniversalTime().AddMinutes(-5)) {
+        throw 'The enabled rollout has no exact digest-bound locked predecessor proof.'
+    }
+    return [pscustomobject]@{
+        EnabledDeployment = $enabled
+        LockedDeployment = $locked
+        LockedDeploymentRecoveredAfterActivation =
+            ([string]$locked.status -ceq 'REMOVED')
+        RecoveryVerifiedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
+    }
 }
 
 function Add-DeploymentIdsFromJsonValue {
@@ -725,6 +836,112 @@ function Invoke-DeploymentGuardSelfTest {
     }
     if (-not $threw) {
         throw 'Deployment guard self-test accepted ambiguous deployment IDs.'
+    }
+
+    # Regression: after an activation timeout, the broad schema/key preflight is
+    # still true. The exact enabled deployment must win, and Railway's REMOVED
+    # status for its immediately preceding locked deployment is accepted only as
+    # an exact, digest-identical timeline pair.
+    $recoveryNow = [DateTimeOffset]::UtcNow
+    $lockedId = '33333333-3333-4333-8333-333333333333'
+    $enabledId = '44444444-4444-4444-8444-444444444444'
+    $digest = 'sha256:' + ('b' * 64)
+    $recoveryReceipt = [pscustomobject]@{
+        configuredAtUtc = $recoveryNow.AddMinutes(-10).ToString('o')
+        proofLedgerEmpty = $false
+        keyWriteRequired = $false
+        expenseKeyFingerprint = 'tm_exp_kfp_v1_' + ('c' * 64)
+        expenseAiEnabled = $false
+    }
+    $recoveryOperations = [pscustomobject]@{
+        database = [pscustomobject]@{ schemaVersion = 15; ok = $true }
+        controls = [pscustomobject]@{
+            incidentMode = 'normal'; expenseRolloutMode = 'enabled'
+            expenseCryptoReady = $true; expenseLedgerEmpty = $false
+            expenseKeyInitialized = $true; expenseKeyInitializationAllowed = $false
+            expenseExpectedKeyFingerprintMatch = $true
+            expenseActivationFingerprintMatch = $true
+            expenseKeyFingerprint = $recoveryReceipt.expenseKeyFingerprint
+            expenseAiEnabled = $false
+        }
+        deploymentProvenance = [pscustomobject]@{
+            buildCommitSha = $ExpectedHeadSha; railwayDeploymentId = $enabledId
+        }
+        overallStatus = 'healthy'
+        alerts = @()
+    }
+    $lockedDeployment = [pscustomobject]@{
+        id = $lockedId; status = 'REMOVED'; createdAt = $recoveryNow.AddMinutes(-5).ToString('o')
+        meta = [pscustomobject]@{
+            cliMessage = "schema15-expense-lock-$($ExpectedHeadSha.Substring(0, 12))"
+            imageDigest = $digest
+        }
+    }
+    $enabledDeployment = [pscustomobject]@{
+        id = $enabledId; status = 'SUCCESS'; createdAt = $recoveryNow.AddMinutes(-4).ToString('o')
+        meta = [pscustomobject]@{
+            cliMessage = "schema15-expense-activate-$($ExpectedHeadSha.Substring(0, 12))"
+            imageDigest = $digest
+        }
+    }
+    $snapshot = @($enabledDeployment, $lockedDeployment)
+    $resolvedAfterTimeout = Resolve-ExpenseDeploymentState `
+        -Operations $recoveryOperations -Receipt $recoveryReceipt `
+        -RailwayPath 'self-test' -DeploymentSnapshot $snapshot
+    if ([string]$resolvedAfterTimeout.Mode -cne 'enabled') {
+        throw 'Deployment guard self-test treated an exact enabled timeout recovery as fresh.'
+    }
+    $invalidModeOperations = ($recoveryOperations | ConvertTo-Json -Depth 8) |
+        ConvertFrom-TmJson
+    $invalidModeOperations.controls.expenseRolloutMode = 'invalid'
+    $threw = $false
+    try {
+        Resolve-ExpenseDeploymentState -Operations $invalidModeOperations `
+            -Receipt $recoveryReceipt -RailwayPath 'self-test' `
+            -DeploymentSnapshot $snapshot | Out-Null
+    }
+    catch {
+        $threw = $_.Exception.Message -like '*partial exact rollout*'
+    }
+    if (-not $threw) {
+        throw 'Deployment guard self-test treated an expected-SHA invalid mode as fresh.'
+    }
+    $missingIdOperations = ($recoveryOperations | ConvertTo-Json -Depth 8) |
+        ConvertFrom-TmJson
+    $missingIdOperations.deploymentProvenance = [pscustomobject]@{
+        buildCommitSha = $ExpectedHeadSha
+    }
+    $threw = $false
+    try {
+        Resolve-ExpenseDeploymentState -Operations $missingIdOperations `
+            -Receipt $recoveryReceipt -RailwayPath 'self-test' `
+            -DeploymentSnapshot $snapshot | Out-Null
+    }
+    catch {
+        $threw = $_.Exception.Message -like '*partial exact rollout*'
+    }
+    if (-not $threw) {
+        throw 'Deployment guard self-test treated missing exact deployment provenance as fresh.'
+    }
+    $recoveredPair = Find-LockedRolloutDeployment -RailwayPath 'self-test' `
+        -Operations $recoveryOperations -Receipt $recoveryReceipt `
+        -DeploymentSnapshot $snapshot
+    if (-not [bool]$recoveredPair.LockedDeploymentRecoveredAfterActivation -or
+        [string]$recoveredPair.LockedDeployment.id -cne $lockedId) {
+        throw 'Deployment guard self-test rejected the exact removed locked predecessor.'
+    }
+    $lockedDeployment.meta.imageDigest = 'sha256:' + ('d' * 64)
+    $threw = $false
+    try {
+        Find-LockedRolloutDeployment -RailwayPath 'self-test' `
+            -Operations $recoveryOperations -Receipt $recoveryReceipt `
+            -DeploymentSnapshot $snapshot | Out-Null
+    }
+    catch {
+        $threw = $_.Exception.Message -like '*digest-bound locked predecessor*'
+    }
+    if (-not $threw) {
+        throw 'Deployment guard self-test accepted a removed locked deployment with a different digest.'
     }
 
     $receiptPath = Join-Path ([System.IO.Path]::GetTempPath()) "tm-expense-receipt-$([Guid]::NewGuid().ToString('N')).json"
@@ -942,6 +1159,9 @@ $deploymentStartAmbiguous = $false
 $deploymentId = $null
 $lockedDeploymentId = $null
 $lockedDeployment = $null
+$lockedDeploymentRecoveredAfterActivation = $false
+$lockedDeploymentRecoveryVerifiedAt = $null
+$enabledOperations = $null
 $activationVariableAttempted = $false
 $activationVariableAmbiguous = $false
 $activationDeploymentAttempted = $false
@@ -1079,17 +1299,17 @@ try {
         $deploymentStartAmbiguous = $true
         $stage = 'source-upload'
         $uploadResult = Invoke-TmBoundedProcess -FilePath $railway -WorkingDirectory $stagedAppRoot `
-        -Arguments ([string[]]@(
-            'up', '--detach', '--json', '--yes', '--message', $lockedMessage,
-            '--project', $projectId, '--environment', $environment, '--service', $service
-        )) -TimeoutSeconds 300 -MaximumCapturedCharacters 1048576
-    if ($uploadResult.ExitCode -ne 0) {
-        throw 'Railway rejected the exact verified source upload.'
-    }
-    $uploadOutput = @(
-        @($uploadResult.StandardOutput -split "`r?`n") +
-        @($uploadResult.StandardError -split "`r?`n")
-    )
+            -Arguments ([string[]]@(
+                'up', '--detach', '--json', '--yes', '--message', $lockedMessage,
+                '--project', $projectId, '--environment', $environment, '--service', $service
+            )) -TimeoutSeconds 300 -MaximumCapturedCharacters 1048576
+        if ($uploadResult.ExitCode -ne 0) {
+            throw 'Railway rejected the exact verified source upload.'
+        }
+        $uploadOutput = @(
+            @($uploadResult.StandardOutput -split "`r?`n") +
+            @($uploadResult.StandardError -split "`r?`n")
+        )
         $lockedDeploymentId = Get-DeploymentIdFromUpload -OutputLines $uploadOutput
         $deploymentStartAmbiguous = $false
 
@@ -1115,11 +1335,9 @@ try {
         $lockedDeploymentId = [string]$lockedDeployment.id
     }
     else {
-        $deployment = $deploymentState.Deployment
+        $deployment = $finalDeploymentState.Deployment
         $deploymentId = [string]$deployment.id
-        $lockedDeployment = Find-LockedRolloutDeployment -RailwayPath $railway `
-            -EnabledDeployment $deployment
-        $lockedDeploymentId = [string]$lockedDeployment.id
+        $enabledOperations = $finalOperations
         $expenseActivationVerifiedAt = [DateTimeOffset]::UtcNow
     }
 
@@ -1131,47 +1349,62 @@ try {
             -Fingerprint ([string]$configurationReceipt.expenseKeyFingerprint)
         $activationVariableAmbiguous = $false
 
-    $preActivationArchiveSha256 = (Get-FileHash -LiteralPath $sourceArchivePath -Algorithm SHA256).Hash.ToLowerInvariant()
-    $preActivationManifestSha256 = Get-TmDirectoryManifestSha256 -Root $stageRoot
-    if ($preActivationArchiveSha256 -cne $sourceArchiveSha256 -or
-        $preActivationManifestSha256 -cne $stagedSourceManifestSha256) {
-        throw 'The exact source archive or staging tree changed before the activation upload.'
-    }
+        $preActivationArchiveSha256 = (Get-FileHash -LiteralPath $sourceArchivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $preActivationManifestSha256 = Get-TmDirectoryManifestSha256 -Root $stageRoot
+        if ($preActivationArchiveSha256 -cne $sourceArchiveSha256 -or
+            $preActivationManifestSha256 -cne $stagedSourceManifestSha256) {
+            throw 'The exact source archive or staging tree changed before the activation upload.'
+        }
 
-    $stage = 'activation-source-upload'
-    $activationDeploymentAttempted = $true
-    $activationDeploymentAmbiguous = $true
-    $activationUploadResult = Invoke-TmBoundedProcess -FilePath $railway `
-        -WorkingDirectory $stagedAppRoot -Arguments ([string[]]@(
-            'up', '--detach', '--json', '--yes', '--message', $message,
-            '--project', $projectId, '--environment', $environment, '--service', $service
-        )) -TimeoutSeconds 300 -MaximumCapturedCharacters 1048576
-    if ($activationUploadResult.ExitCode -ne 0) {
-        throw 'Railway rejected the receipt-bound activation source upload.'
-    }
-    $activationUploadOutput = @(
-        @($activationUploadResult.StandardOutput -split "`r?`n") +
-        @($activationUploadResult.StandardError -split "`r?`n")
-    )
-    $deploymentId = Get-DeploymentIdFromUpload -OutputLines $activationUploadOutput
-    $activationDeploymentAmbiguous = $false
+        $stage = 'activation-source-upload'
+        $activationDeploymentAttempted = $true
+        $activationDeploymentAmbiguous = $true
+        $activationUploadResult = Invoke-TmBoundedProcess -FilePath $railway `
+            -WorkingDirectory $stagedAppRoot -Arguments ([string[]]@(
+                'up', '--detach', '--json', '--yes', '--message', $message,
+                '--project', $projectId, '--environment', $environment, '--service', $service
+            )) -TimeoutSeconds 300 -MaximumCapturedCharacters 1048576
+        if ($activationUploadResult.ExitCode -ne 0) {
+            throw 'Railway rejected the receipt-bound activation source upload.'
+        }
+        $activationUploadOutput = @(
+            @($activationUploadResult.StandardOutput -split "`r?`n") +
+            @($activationUploadResult.StandardError -split "`r?`n")
+        )
+        $deploymentId = Get-DeploymentIdFromUpload -OutputLines $activationUploadOutput
+        $activationDeploymentAmbiguous = $false
 
-    $stage = 'activation-deployment-terminal-status'
-    $deployment = Wait-VerifiedRailwayDeployment -RailwayPath $railway `
-        -DeploymentId $deploymentId -Message $message
+        $stage = 'activation-deployment-terminal-status'
+        $deployment = Wait-VerifiedRailwayDeployment -RailwayPath $railway `
+            -DeploymentId $deploymentId -Message $message
 
-    $postActivationArchiveSha256 = (Get-FileHash -LiteralPath $sourceArchivePath -Algorithm SHA256).Hash.ToLowerInvariant()
-    $postActivationManifestSha256 = Get-TmDirectoryManifestSha256 -Root $stageRoot
-    if ($postActivationArchiveSha256 -cne $sourceArchiveSha256 -or
-        $postActivationManifestSha256 -cne $stagedSourceManifestSha256) {
-        throw 'The exact source archive or staging tree changed during the activation upload.'
-    }
+        $postActivationArchiveSha256 = (Get-FileHash -LiteralPath $sourceArchivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $postActivationManifestSha256 = Get-TmDirectoryManifestSha256 -Root $stageRoot
+        if ($postActivationArchiveSha256 -cne $sourceArchiveSha256 -or
+            $postActivationManifestSha256 -cne $stagedSourceManifestSha256) {
+            throw 'The exact source archive or staging tree changed during the activation upload.'
+        }
 
-    $stage = 'enabled-rollout-proof'
-    $null = Wait-ExpenseRolloutProof -Origin $base -Token $token `
-        -Receipt $configurationReceipt -Mode enabled -DeploymentId $deploymentId
+        $stage = 'enabled-rollout-proof'
+        $enabledOperations = Wait-ExpenseRolloutProof -Origin $base -Token $token `
+            -Receipt $configurationReceipt -Mode enabled -DeploymentId $deploymentId
         $expenseActivationVerifiedAt = [DateTimeOffset]::UtcNow
     }
+
+    $stage = 'activated-rollout-pair-proof'
+    if ($null -eq $enabledOperations) {
+        throw 'The activation completed without an exact live enabled proof.'
+    }
+    $rolloutPair = Find-LockedRolloutDeployment -RailwayPath $railway `
+        -Operations $enabledOperations -Receipt $configurationReceipt
+    $deployment = $rolloutPair.EnabledDeployment
+    $deploymentId = [string]$deployment.id
+    $lockedDeployment = $rolloutPair.LockedDeployment
+    $lockedDeploymentId = [string]$lockedDeployment.id
+    $lockedDeploymentRecoveredAfterActivation =
+        [bool]$rolloutPair.LockedDeploymentRecoveredAfterActivation
+    $lockedDeploymentRecoveryVerifiedAt =
+        [string]$rolloutPair.RecoveryVerifiedAtUtc
 
     $stage = 'configuration-receipt-final-consumption'
     if (-not $configurationReceiptAlreadyConsumed) {
@@ -1184,7 +1417,7 @@ try {
     $stage = 'complete'
     $deploymentReceipt = [ordered]@{
         success = $true
-        receiptVersion = 2
+        receiptVersion = 3
         kind = 'tm-expense-production-deployment'
         receiptId = [Guid]::NewGuid().ToString('D')
         startedAtUtc = $startedAt.ToString('o')
@@ -1246,6 +1479,11 @@ try {
         lockedDeploymentCreatedAt = [string]$lockedDeployment.createdAt
         lockedDeploymentMessage = $lockedMessage
         lockedProductionImageDigest = ([string]$lockedDeployment.meta.imageDigest).ToLowerInvariant()
+        lockedDeploymentRecoveredAfterActivation =
+            $lockedDeploymentRecoveredAfterActivation
+        lockedDeploymentRemovalEligibleAfterActivation = $true
+        lockedDeploymentRecoveryVerifiedAtUtc =
+            $lockedDeploymentRecoveryVerifiedAt
         sourceArchivePath = $sourceArchivePath
         sourceArchiveSha256 = $sourceArchiveSha256
         stagedSourceManifestSha256 = $stagedSourceManifestSha256
@@ -1277,6 +1515,8 @@ catch {
         deploymentStartAttempted = $deploymentStartAttempted
         deploymentStartAmbiguous = $deploymentStartAmbiguous
         lockedDeploymentId = $lockedDeploymentId
+        lockedDeploymentRecoveredAfterActivation =
+            $lockedDeploymentRecoveredAfterActivation
         activationVariableAttempted = $activationVariableAttempted
         activationVariableAmbiguous = $activationVariableAmbiguous
         activationDeploymentAttempted = $activationDeploymentAttempted
