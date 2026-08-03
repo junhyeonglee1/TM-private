@@ -1459,7 +1459,8 @@ impl TmCore {
     /// the local-only authenticated-encryption context after a serde receipt round trip.
     pub fn get_expense_transaction(&self, event_id: &str) -> Result<ExpenseTransaction> {
         validate_label("expense event ID", event_id, 128)?;
-        query_expense_transaction(&self.database.connect()?, event_id)
+        let connection = self.database.connect()?;
+        query_expense_transaction(&connection, event_id)
     }
 
     /// Restores the local-only encryption context omitted from a serialized mutation
@@ -1469,7 +1470,8 @@ impl TmCore {
         mut item: ExpenseTransaction,
     ) -> Result<ExpenseTransaction> {
         validate_label("expense event ID", &item.id, 128)?;
-        let trusted = query_expense_transaction(&self.database.connect()?, &item.id)?;
+        let connection = self.database.connect()?;
+        let trusted = query_expense_transaction(&connection, &item.id)?;
         if item.merchant != trusted.merchant
             || item.counterparty != trusted.counterparty
             || item.memo != trusted.memo
@@ -1592,7 +1594,8 @@ impl TmCore {
     /// local-only authenticated-encryption context omitted from serialized receipts.
     pub fn get_expense_review(&self, review_id: &str) -> Result<ExpenseReview> {
         validate_label("expense review ID", review_id, 128)?;
-        query_expense_review(&self.database.connect()?, review_id)
+        let connection = self.database.connect()?;
+        query_expense_review(&connection, review_id)
     }
 
     /// Restores a serialized review transaction's local-only encryption context after
@@ -1602,7 +1605,8 @@ impl TmCore {
         mut item: ExpenseReview,
     ) -> Result<ExpenseReview> {
         validate_label("expense review ID", &item.id, 128)?;
-        let trusted = query_expense_review(&self.database.connect()?, &item.id)?;
+        let connection = self.database.connect()?;
+        let trusted = query_expense_review(&connection, &item.id)?;
         if item.transaction.id != trusted.transaction.id
             || item.transaction.merchant != trusted.transaction.merchant
             || item.transaction.counterparty != trusted.transaction.counterparty
