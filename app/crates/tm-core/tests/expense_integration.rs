@@ -2715,7 +2715,7 @@ fn classification_rule_retroactive_resolution_preserves_critical_reviews() -> Re
                     id, event_id, review_reason, review_status, created_at, version
                  ) VALUES (?1, ?2, ?3, 'pending', ?4, 1)",
                 params![
-                    Uuid::new_v4().to_string(),
+                    Uuid::now_v7().to_string(),
                     guarded_event_id,
                     reason,
                     created_at,
@@ -4447,7 +4447,7 @@ fn legacy_null_payment_classification_rule_is_not_applied() -> Result<()> {
              event_kind, category, recurring_expense_id, created_at
          ) VALUES (?1, 'classification', ?2, NULL, 'purchase', 'food', NULL, ?3)",
         params![
-            Uuid::new_v4().to_string(),
+            Uuid::now_v7().to_string(),
             digest('c'),
             "2027-11-30T00:00:00Z"
         ],
