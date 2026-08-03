@@ -148,6 +148,17 @@ jobs:
             --tag tm-server:step16 \
             "${TM_STEP16_CONTEXT}"
 
+      - name: Verify schema 16 backup receipt JSON semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected='{"itemGroupCount":0,"reviewCount":0,"resultCount":0,"confirmedCount":0,"provisionalCount":0,"reviewRequiredCount":0,"privacySkippedCount":0,"versionConflictCount":0,"actualCostMicrousd":0}'
+          actual="$(
+            docker run --rm --entrypoint sqlite3 tm-server:step16 :memory: \
+              "SELECT json_object('itemGroupCount',0,'reviewCount',0,'resultCount',0,'confirmedCount',0,'provisionalCount',0,'reviewRequiredCount',0,'privacySkippedCount',0,'versionConflictCount',0,'actualCostMicrousd',0);"
+          )"
+          test "$actual" = "$expected"
+
       - name: Record CI image provenance
         shell: pwsh
         env:

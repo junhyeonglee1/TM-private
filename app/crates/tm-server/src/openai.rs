@@ -1,7 +1,7 @@
 use std::{env, fmt, net::IpAddr, sync::Arc, time::Duration};
 
 use reqwest::StatusCode;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use tm_core::{AiBudgetPolicy, AiBudgetStatus};
 use url::Url;
@@ -12,6 +12,7 @@ pub const DEFAULT_OPENAI_TIMEOUT_SECS: u64 = 60;
 pub const DEFAULT_OPENAI_MONTHLY_WARNING_MICROUSD: u64 = 10_000_000;
 pub const DEFAULT_OPENAI_MONTHLY_HARD_LIMIT_MICROUSD: u64 = 20_000_000;
 pub const PROBE_MAXIMUM_COST_MICROUSD: u64 = 10_000;
+pub(crate) const MAX_OPENAI_RESPONSE_BODY_BYTES: usize = 256 * 1024;
 
 const PROBE_EXPECTED_TEXT: &str = "TM_OPENAI_OK";
 const PROBE_INSTRUCTIONS: &str =
@@ -257,12 +258,8 @@ impl OpenAiClient {
         }
 
         let response =
-            response
-                .json::<ProbeResponse>()
-                .await
-                .map_err(|_| OpenAiError::InvalidResponse {
-                    upstream_request_id: upstream_request_id.clone(),
-                })?;
+            read_bounded_json_response::<ProbeResponse>(response, upstream_request_id.clone())
+                .await?;
         let output_text = response
             .output
             .iter()
@@ -297,6 +294,7 @@ impl OpenAiClient {
         &self,
         request: &Value,
     ) -> Result<OpenAiResponseCall, OpenAiError> {
+        validate_non_stored_request(request)?;
         let api_key = self
             .config
             .api_key
@@ -322,17 +320,63 @@ impl OpenAiClient {
         }
 
         let response =
-            response
-                .json::<OpenAiResponse>()
-                .await
-                .map_err(|_| OpenAiError::InvalidResponse {
-                    upstream_request_id: upstream_request_id.clone(),
-                })?;
+            read_bounded_json_response::<OpenAiResponse>(response, upstream_request_id.clone())
+                .await?;
         Ok(OpenAiResponseCall {
             response,
             upstream_request_id,
         })
     }
+}
+
+fn validate_non_stored_request(request: &Value) -> Result<(), OpenAiError> {
+    if request.get("store").and_then(Value::as_bool) == Some(false) {
+        return Ok(());
+    }
+    Err(OpenAiError::InvalidConfiguration)
+}
+
+async fn read_bounded_json_response<T: DeserializeOwned>(
+    mut response: reqwest::Response,
+    upstream_request_id: Option<String>,
+) -> Result<T, OpenAiError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_OPENAI_RESPONSE_BODY_BYTES as u64)
+    {
+        return Err(OpenAiError::InvalidResponse {
+            upstream_request_id,
+        });
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| OpenAiError::InvalidResponse {
+            upstream_request_id: upstream_request_id.clone(),
+        })?
+    {
+        append_bounded_response_chunk(&mut body, &chunk).map_err(|()| {
+            OpenAiError::InvalidResponse {
+                upstream_request_id: upstream_request_id.clone(),
+            }
+        })?;
+    }
+    serde_json::from_slice(&body).map_err(|_| OpenAiError::InvalidResponse {
+        upstream_request_id,
+    })
+}
+
+fn append_bounded_response_chunk(body: &mut Vec<u8>, chunk: &[u8]) -> Result<(), ()> {
+    if body
+        .len()
+        .checked_add(chunk.len())
+        .is_none_or(|length| length > MAX_OPENAI_RESPONSE_BODY_BYTES)
+    {
+        return Err(());
+    }
+    body.extend_from_slice(chunk);
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -632,7 +676,29 @@ fn response_matches_probe(output: &[ProbeOutputItem]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProbeUsage, estimate_model_cost_microusd};
+    use serde_json::json;
+
+    use super::{
+        MAX_OPENAI_RESPONSE_BODY_BYTES, ProbeUsage, append_bounded_response_chunk,
+        estimate_model_cost_microusd, validate_non_stored_request,
+    };
+
+    #[test]
+    fn response_client_requires_explicit_non_storage() {
+        assert!(validate_non_stored_request(&json!({"store": false})).is_ok());
+        for payload in [json!({}), json!({"store": true}), json!({"store": "false"})] {
+            assert!(validate_non_stored_request(&payload).is_err());
+        }
+    }
+
+    #[test]
+    fn response_client_rejects_a_body_above_the_fixed_limit() {
+        let mut body = vec![0_u8; MAX_OPENAI_RESPONSE_BODY_BYTES - 1];
+        assert!(append_bounded_response_chunk(&mut body, &[1]).is_ok());
+        assert_eq!(body.len(), MAX_OPENAI_RESPONSE_BODY_BYTES);
+        assert!(append_bounded_response_chunk(&mut body, &[2]).is_err());
+        assert_eq!(body.len(), MAX_OPENAI_RESPONSE_BODY_BYTES);
+    }
 
     #[test]
     fn nano_stock_digest_estimate_uses_pinned_standard_rates() {

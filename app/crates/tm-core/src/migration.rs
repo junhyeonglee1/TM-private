@@ -80,11 +80,17 @@ pub(crate) const MANIFEST_TABLES: &[&str] = &[
     "expense_ai_request_bindings",
     "expense_ai_attempts",
     "expense_mutation_receipts",
+    "expense_ai_classification_batches",
+    "expense_ai_classification_items",
+    "expense_ai_classification_receipts",
 ];
 
 /// The schema 14 durability boundary ends at `app_state`. Schema 15 appends
 /// the expense tables beginning with `expense_crypto_metadata`.
 pub(crate) const SCHEMA_14_MANIFEST_TABLE_COUNT: usize = 45;
+/// Schema 16 appends the AI classification batch ledger after the complete
+/// schema 15 expense durability boundary.
+pub(crate) const SCHEMA_15_MANIFEST_TABLE_COUNT: usize = 65;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

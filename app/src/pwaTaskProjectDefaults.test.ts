@@ -33,6 +33,6 @@ describe("모바일 PWA Task 프로젝트 기본값", () => {
   });
 
   it("변경된 모바일 shell을 즉시 갱신하도록 캐시 버전을 올린다", () => {
-    expect(serviceWorker).toContain('const CACHE_NAME = "tm-mobile-shell-v15-expense-review-v2"');
+    expect(serviceWorker).toContain('const CACHE_NAME = "tm-mobile-shell-v16-expense-classification-v1"');
   });
 });

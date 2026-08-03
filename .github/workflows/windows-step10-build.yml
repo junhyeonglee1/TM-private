@@ -125,6 +125,11 @@ jobs:
             -Step10RunId 1 `
             -Step16RunId 1 `
             -RunGuardSelfTest
+          .\scripts\deploy-verified-expense-classification-railway.ps1 `
+            -ExpectedHeadSha '0000000000000000000000000000000000000000' `
+            -Step10RunId 1 `
+            -Step16RunId 1 `
+            -RunGuardSelfTest
 
       - name: Verify production expense deployment guards on Windows PowerShell 5.1
         shell: powershell
@@ -133,6 +138,11 @@ jobs:
             throw 'The production deployment regression guard requires Windows PowerShell 5.1.'
           }
           .\scripts\deploy-verified-expense-railway.ps1 `
+            -ExpectedHeadSha '0000000000000000000000000000000000000000' `
+            -Step10RunId 1 `
+            -Step16RunId 1 `
+            -RunGuardSelfTest
+          .\scripts\deploy-verified-expense-classification-railway.ps1 `
             -ExpectedHeadSha '0000000000000000000000000000000000000000' `
             -Step10RunId 1 `
             -Step16RunId 1 `
@@ -146,7 +156,9 @@ jobs:
             '.\scripts\expense-release-evidence.ps1',
             '.\scripts\configure-expense-railway.ps1',
             '.\scripts\deploy-verified-expense-railway.ps1',
-            '.\scripts\verify-expense-production.ps1'
+            '.\scripts\deploy-verified-expense-classification-railway.ps1',
+            '.\scripts\verify-expense-production.ps1',
+            '.\scripts\verify-expense-classification-production.ps1'
           )
           foreach ($path in $paths) {
             $tokens = $null

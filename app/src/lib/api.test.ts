@@ -13,6 +13,55 @@ const archiveMockProject = (
 };
 
 describe("Tauri invoke payload 계약", () => {
+  it("AI 자동 분류는 월과 안정적인 멱등성 키를 전용 command로 전달한다", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    let fail = true;
+    const transport: CommandTransport = {
+      async invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
+        expect(command).toBe("classify_expense_transactions");
+        calls.push(args);
+        if (fail) throw new Error("합성 응답 유실");
+        return {
+          runId: "classification-run-1",
+          targetMonth: "2026-08",
+          status: "applied",
+        } as T;
+      },
+    };
+    const api = createApi(transport);
+
+    await expect(api.classifyExpenseTransactions("2026-08")).rejects.toThrow("합성 응답 유실");
+    fail = false;
+    await api.classifyExpenseTransactions("2026-08");
+
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toMatchObject({ month: "2026-08" });
+    expect(calls[0].idempotencyKey).toMatch(/^desktop-expense:/);
+    expect(calls[1].idempotencyKey).toBe(calls[0].idempotencyKey);
+  });
+
+  it("AI classification terminal responses discard the pending idempotency key", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    let terminal = true;
+    const transport: CommandTransport = {
+      async invoke<T>(_command: string, args: Record<string, unknown> = {}): Promise<T> {
+        calls.push(args);
+        if (terminal) {
+          throw "TM run ended [TM_ERROR_CODE:EXPENSE_CLASSIFICATION_LEASE_EXPIRED]";
+        }
+        return {} as T;
+      },
+    };
+    const api = createApi(transport);
+    await expect(api.classifyExpenseTransactions("2026-08")).rejects.toBe(
+      "TM run ended [TM_ERROR_CODE:EXPENSE_CLASSIFICATION_LEASE_EXPIRED]",
+    );
+    const terminalKey = calls[0].idempotencyKey;
+    terminal = false;
+    await api.classifyExpenseTransactions("2026-08");
+    expect(calls[1].idempotencyKey).not.toBe(terminalKey);
+  });
+
   it("지출 mutation은 응답 유실 재시도에 같은 멱등성 키를 쓰고 성공·명시 취소 뒤 교체한다", async () => {
     const calls: Array<Record<string, unknown>> = [];
     let fail = true;

@@ -1,13 +1,15 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 
-import type { TmApi } from "../lib/api";
+import { isExpenseClassificationTerminalError, type TmApi } from "../lib/api";
 import { safeErrorText } from "../lib/error-text";
 import type {
   CreateRecurringExpenseInput,
   EditableExpenseEventKind,
   ExpenseCategory,
+  ExpenseClassificationRunResult,
+  ExpenseClassificationSource,
   ExpenseEventKind,
   ExpenseImportPreview,
   ExpenseMonthSummary,
@@ -105,6 +107,13 @@ const reviewReasonLabels: Record<ExpenseReview["reason"], string> = {
   import_rejected: "가져오기 거부 행 확인",
 };
 
+const classificationSourceLabels: Record<ExpenseClassificationSource, string> = {
+  deterministic: "자동 규칙",
+  user_rule: "내 규칙",
+  manual: "수동 확정",
+  ai: "AI 분류",
+};
+
 const formatMoney = (amountMinor: number, currency: string): string => {
   const zeroDecimal = new Set(["KRW", "JPY"]);
   const amount = zeroDecimal.has(currency) ? amountMinor : amountMinor / 100;
@@ -118,6 +127,36 @@ const formatMoney = (amountMinor: number, currency: string): string => {
     return `${amount.toLocaleString("ko-KR")} ${currency}`;
   }
 };
+
+const formatMicroUsd = (amountMicrousd: number): string => {
+  const dollars = amountMicrousd / 1_000_000;
+  return `$${dollars.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 4 })}`;
+};
+
+function ExpenseClassificationBadge({
+  source,
+  confidence,
+  suggestion = false,
+}: {
+  source: ExpenseClassificationSource | null;
+  confidence: number | null;
+  suggestion?: boolean;
+}) {
+  if (!source) return null;
+  const confidenceLabel = confidence === null
+    ? ""
+    : ` · 신뢰도 ${Math.round(Math.max(0, Math.min(100, confidence)))}%`;
+  const label = `${classificationSourceLabels[source]}${suggestion ? " 제안" : ""}`;
+  return (
+    <span
+      aria-label={`${label}${confidenceLabel}`}
+      className={`expense-classification-badge expense-classification-badge--${source}`}
+      title={`분류 출처: ${label}${confidenceLabel}`}
+    >
+      {label}
+    </span>
+  );
+}
 
 const factMetricLabels: Record<string, string> = {
   net_personal_spend: "순 개인지출",
@@ -576,7 +615,7 @@ function ExpenseTransactions({ api, month, onNotify }: Pick<ExpensesPageProps, "
       <div className="expense-transaction-list" aria-busy={loading}>
         {visibleItems.map((item) => (
           <article className={item.status !== "confirmed" ? "expense-transaction--unconfirmed" : ""} key={item.id}>
-            <div className="expense-transaction__summary"><div><span>{item.occurredAt.slice(0, 10)} · {eventKindLabels[item.kind]}</span><strong>{item.merchant ?? item.counterparty ?? "표시 이름 없음"}</strong><small>{categoryLabels[item.category]} · {item.sourceKind ?? "수동"} · {item.status}</small></div><strong>{formatMoney(item.amountMinor, item.currency)}</strong></div>
+            <div className="expense-transaction__summary"><div><span>{item.occurredAt.slice(0, 10)} · {eventKindLabels[item.kind]}</span><strong>{item.merchant ?? item.counterparty ?? "표시 이름 없음"}</strong><small>{categoryLabels[item.category]} · {item.sourceKind ?? "수동"} · {item.status}</small><ExpenseClassificationBadge confidence={item.classificationConfidence} source={item.classificationSource} /></div><strong>{formatMoney(item.amountMinor, item.currency)}</strong></div>
             {item.kind === "manual_recurring"
               ? <small>수동 납부 기록은 정기지출 발생 건에서 관리합니다.</small>
               : <button className="secondary-button secondary-button--small" onClick={() => {
@@ -686,6 +725,38 @@ function ExpenseTransactionOverrideForm({
   );
 }
 
+function ExpenseClassificationResultView({ result }: { result: ExpenseClassificationRunResult }) {
+  const title = result.status === "applied"
+    ? "자동 분류를 적용했습니다"
+    : result.status === "no_candidates"
+      ? "분류할 후보가 없습니다"
+      : "거래가 변경되어 이번 자동 분류를 적용하지 않았습니다";
+  return (
+    <div
+      aria-live="polite"
+      className={`expense-classification-result expense-classification-result--${result.status}`}
+    >
+      <div>
+        <strong>{title}</strong>
+        <span>{result.cached ? "캐시된 동일 결과" : result.attemptNumber === null ? "청구 시도 없음" : `${result.attemptNumber}번째 시도`} · {new Date(result.completedAt).toLocaleString("ko-KR")}</span>
+      </div>
+      <div className="expense-classification-metrics">
+        <span>후보 그룹 <strong>{result.candidateGroupCount}</strong></span>
+        <span>영향 거래 <strong>{result.affectedTransactionCount}</strong></span>
+        <span>자동 확정 <strong>{result.autoConfirmedCount}</strong></span>
+        <span>잠정 분류 <strong>{result.provisionalCount}</strong></span>
+        <span>남은 수동 확인 <strong>{result.manualReviewCount}</strong></span>
+        <span>개인정보 보호 제외 <strong>{result.privacySkippedCount}</strong></span>
+        {result.versionConflictCount > 0 && <span>동시 변경 충돌 <strong>{result.versionConflictCount}</strong></span>}
+      </div>
+      <small>
+        이번 호출 {formatMicroUsd(result.costMicrousd)} · 월 한도 {formatMicroUsd(result.monthlyLimitMicrousd)} · 남은 한도 {formatMicroUsd(result.remainingMicrousd)}
+      </small>
+      <small>추가 후보가 생기면 AI 자동 분류 버튼을 다시 눌러 이어서 처리할 수 있습니다.</small>
+    </div>
+  );
+}
+
 function ExpenseReviews({ api, month, onNotify, onRegisterRecurring }: Pick<ExpensesPageProps, "api" | "onNotify"> & {
   month: string;
   onRegisterRecurring: (review: ExpenseReview) => void;
@@ -697,6 +768,9 @@ function ExpenseReviews({ api, month, onNotify, onRegisterRecurring }: Pick<Expe
   const [occurrences, setOccurrences] = useState<RecurringExpenseOccurrence[]>([]);
   const [loading, setLoading] = useState(true);
   const [showPurchaseCategories, setShowPurchaseCategories] = useState(false);
+  const [classifying, setClassifying] = useState(false);
+  const [classificationResult, setClassificationResult] = useState<ExpenseClassificationRunResult | null>(null);
+  const monthRef = useRef(month);
   const purchaseCategoryCount = reviews.filter((review) => review.reason === "category_confirmation").length;
   const visibleReviews = showPurchaseCategories
     ? reviews
@@ -738,6 +812,38 @@ function ExpenseReviews({ api, month, onNotify, onRegisterRecurring }: Pick<Expe
     }
   }, [api, month, onNotify]);
   useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    monthRef.current = month;
+    setClassificationResult(null);
+    setClassifying(false);
+  }, [month]);
+
+  const classify = async () => {
+    const targetMonth = month;
+    setClassifying(true);
+    try {
+      const result = await api.classifyExpenseTransactions(targetMonth);
+      if (monthRef.current !== targetMonth) return;
+      setClassificationResult(result);
+      onNotify(result.status === "applied"
+        ? `AI 자동 분류를 적용했습니다. 수동 확인 ${result.manualReviewCount}건이 남았습니다.`
+        : result.status === "no_candidates"
+          ? "AI로 분류할 새 거래 후보가 없습니다."
+          : `거래가 변경되어 이번 자동 분류를 적용하지 않았습니다. 수동 확인 ${result.manualReviewCount}건을 확인해 주세요.`);
+      await load();
+    } catch (error) {
+      if (monthRef.current === targetMonth) {
+        onNotify(
+          `${errorText(error)} ${isExpenseClassificationTerminalError(error)
+            ? "AI 자동 분류 버튼을 다시 눌러 새 실행을 시작해 주세요. 새 월간 시도 1회와 최대 $0.01 비용이 발생할 수 있습니다."
+            : "같은 요청으로 다시 확인할 수 있습니다."}`,
+          "error",
+        );
+      }
+    } finally {
+      if (monthRef.current === targetMonth) setClassifying(false);
+    }
+  };
 
   const loadMoreCategories = async () => {
     if (!categoryNextCursor) return;
@@ -813,6 +919,17 @@ function ExpenseReviews({ api, month, onNotify, onRegisterRecurring }: Pick<Expe
   return (
     <section className="panel expense-list-panel">
       <div className="panel__header"><div><span className="eyebrow">필수 확인 우선</span><h2>확인 필요</h2><p>구매 카테고리는 검토하지 않아도 현재 분류로 합계에 반영됩니다. 불명확한 개인 간 송금만 결정 전까지 확정 지출에서 제외됩니다.</p></div><span className="count-pill count-pill--attention">{visibleReviews.length}</span></div>
+      <div className="expense-classification-panel">
+        <div>
+          <strong>AI 자동 분류</strong>
+          <p>버튼을 누를 때만 개인정보 필터를 거친 업체 표시명만 OpenAI에 보냅니다. 불명확한 개인 간 송금은 보내지 않고 수동 확인으로 남깁니다.</p>
+          <small>비용 한도: 1회 최대 $0.01 · 서울 기준 월 12회 · 이 기능 월 $0.25에서 중단</small>
+        </div>
+        <button className="primary-button" disabled={classifying} onClick={() => void classify()} type="button">
+          {classifying ? "자동 분류 중…" : "AI 자동 분류"}
+        </button>
+        {classificationResult?.targetMonth === month && <ExpenseClassificationResultView result={classificationResult} />}
+      </div>
       {purchaseCategoryCount > 0 && <button className="secondary-button expense-more" onClick={() => setShowPurchaseCategories((current) => !current)} type="button">{showPurchaseCategories ? "선택 분류 숨기기" : `선택 분류 ${purchaseCategoryCount}${categoryNextCursor ? "+" : ""}건 보기`}</button>}
       <div className="expense-review-list" aria-busy={loading}>
         {visibleReviews.map((review) => (
@@ -904,7 +1021,7 @@ function ExpenseReviewCard({ review, onResolve, transactions, occurrences, onMat
       );
     } finally { setSaving(false); }
   };
-  const candidateHeader = <div><span>{review.transaction.occurredAt.slice(0, 10)}</span><h3>{review.transaction.merchant ?? review.transaction.counterparty ?? "표시 이름 없음"}</h3><p>{reviewReasonLabels[review.reason]}</p><strong>{formatMoney(review.transaction.amountMinor, review.transaction.currency)}</strong></div>;
+  const candidateHeader = <div><span>{review.transaction.occurredAt.slice(0, 10)}</span><h3>{review.transaction.merchant ?? review.transaction.counterparty ?? "표시 이름 없음"}</h3><p>{reviewReasonLabels[review.reason]}</p><ExpenseClassificationBadge confidence={review.suggestionConfidence} source={review.suggestionSource} suggestion /><strong>{formatMoney(review.transaction.amountMinor, review.transaction.currency)}</strong></div>;
 
   if (review.reason === "recurring_match_candidate") {
     const candidateResolved = ["paid", "matched"].includes(recurringOccurrence?.status ?? "");

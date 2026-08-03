@@ -11,13 +11,17 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    Error, Result, TmCore,
+    AiTokenUsage, Error, Result, TmCore,
     database::{new_id, now_utc, today_seoul},
     error::{invalid, not_found},
 };
 
 const MAX_IMPORT_ROWS: usize = 5_000;
 const MAX_PAGE_SIZE: u32 = 200;
+pub const EXPENSE_AI_CLASSIFICATION_MAX_GROUPS: usize = 25;
+pub const EXPENSE_AI_CLASSIFICATION_MAX_REVIEWS: usize = 250;
+pub const EXPENSE_AI_CLASSIFICATION_MAX_ATTEMPTS: u8 = 12;
+pub const EXPENSE_AI_CLASSIFICATION_MAX_RECOVERY_BATCHES: u32 = 64;
 const MAX_SAFE_AMOUNT_MINOR: i64 = 9_007_199_254_740_991;
 const EXPENSE_AAD_PREFIX: &str = "tm-expense:v1:";
 const EXPENSE_CRYPTO_PROBE_AAD: &str = "tm-expense:v1:crypto-probe:value";
@@ -29,6 +33,20 @@ const EXPENSE_REPORT_FAILURE_CODES: &[&str] = &[
     "upstream_unavailable",
     "invalid_response",
     "timeout",
+    "persistence_failed",
+];
+const EXPENSE_AI_CLASSIFICATION_FAILURE_CODES: &[&str] = &[
+    "transport",
+    "authentication",
+    "rate_limited",
+    "request_rejected",
+    "upstream_unavailable",
+    "invalid_response",
+    "model_mismatch",
+    "timeout",
+    "budget_exhausted",
+    "disabled",
+    "lease_expired",
     "persistence_failed",
 ];
 
@@ -209,6 +227,86 @@ string_enum!(ExpenseEventStatus {
     Confirmed => "confirmed",
     Unconfirmed => "unconfirmed",
     Excluded => "excluded",
+});
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExpenseClassificationSource {
+    Deterministic,
+    UserRule,
+    Manual,
+    Ai,
+}
+
+string_enum!(ExpenseClassificationSource {
+    Deterministic => "deterministic",
+    UserRule => "user_rule",
+    Manual => "manual",
+    Ai => "ai",
+});
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExpenseAiClassificationBatchStatus {
+    Claimed,
+    Staged,
+    Applied,
+    Failed,
+    Stale,
+}
+
+string_enum!(ExpenseAiClassificationBatchStatus {
+    Claimed => "claimed",
+    Staged => "staged",
+    Applied => "applied",
+    Failed => "failed",
+    Stale => "stale",
+});
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExpenseAiClassificationDisposition {
+    Confirmed,
+    Provisional,
+    ReviewRequired,
+    PrivacySkipped,
+}
+
+string_enum!(ExpenseAiClassificationDisposition {
+    Confirmed => "confirmed",
+    Provisional => "provisional",
+    ReviewRequired => "review_required",
+    PrivacySkipped => "privacy_skipped",
+});
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExpenseAiClassificationReceiptStatus {
+    NoCandidates,
+}
+
+string_enum!(ExpenseAiClassificationReceiptStatus {
+    NoCandidates => "no_candidates",
+});
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExpenseAiClassificationSafeStatus {
+    Claimed,
+    Staged,
+    Applied,
+    Failed,
+    Stale,
+    NoCandidates,
+}
+
+string_enum!(ExpenseAiClassificationSafeStatus {
+    Claimed => "claimed",
+    Staged => "staged",
+    Applied => "applied",
+    Failed => "failed",
+    Stale => "stale",
+    NoCandidates => "no_candidates",
 });
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -466,6 +564,8 @@ pub struct ExpenseTransaction {
     pub exclusion_reason: Option<String>,
     pub duplicate_of_event_id: Option<String>,
     pub is_provisional: bool,
+    pub classification_source: ExpenseClassificationSource,
+    pub classification_confidence: Option<u8>,
     pub pending_review_id: Option<String>,
     pub personal_amount_minor: Option<i64>,
     pub related_event_id: Option<String>,
@@ -506,6 +606,8 @@ pub struct ExpenseReview {
     pub suggested_kind: Option<ExpenseEventKind>,
     pub suggested_category: Option<ExpenseCategory>,
     pub suggested_duplicate_of_event_id: Option<String>,
+    pub suggestion_source: Option<ExpenseClassificationSource>,
+    pub suggestion_confidence: Option<u8>,
     pub created_at: String,
     pub resolved_at: Option<String>,
     pub version: u64,
@@ -526,6 +628,162 @@ pub struct ExpenseReviewFilter {
 pub struct ExpenseReviewPage {
     pub items: Vec<ExpenseReview>,
     pub next_cursor: Option<String>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct ExpenseAiEncryptedMerchant {
+    pub key_version: u32,
+    pub nonce: String,
+    pub ciphertext: String,
+    pub aad: String,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct ExpenseAiClassificationCandidate {
+    pub event_id: String,
+    pub event_version: u64,
+    pub review_id: String,
+    pub review_version: u64,
+    pub current_category: ExpenseCategory,
+    pub merchant: ExpenseAiEncryptedMerchant,
+    pub merchant_blind_index: String,
+    pub payment_method_fingerprint: String,
+    /// Opaque local-only AAD context. It is deliberately omitted from durable
+    /// batches and serialized API responses.
+    pub crypto_context: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExpenseAiClassificationBindingInput {
+    pub event_id: String,
+    pub event_version: u64,
+    pub review_id: String,
+    pub review_version: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExpenseAiClassificationGroupInput {
+    pub item_id: String,
+    #[serde(default)]
+    pub privacy_skipped: bool,
+    pub bindings: Vec<ExpenseAiClassificationBindingInput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ClaimExpenseAiClassificationBatchInput {
+    pub request_id: String,
+    pub quota_month_start: NaiveDate,
+    pub target_month_start: NaiveDate,
+    pub input_sha256: String,
+    pub prompt_version: String,
+    pub model: String,
+    pub max_attempts: u8,
+    pub groups: Vec<ExpenseAiClassificationGroupInput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExpenseAiClassificationSuggestion {
+    pub item_id: String,
+    pub category: ExpenseCategory,
+    pub confidence: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StageExpenseAiClassificationBatchInput {
+    pub request_id: String,
+    pub suggestions: Vec<ExpenseAiClassificationSuggestion>,
+    pub usage: AiTokenUsage,
+    pub cost_microusd: u64,
+    pub latency_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpenseAiClassificationBatch {
+    pub request_id: String,
+    pub quota_month_start: NaiveDate,
+    pub target_month_start: NaiveDate,
+    pub attempt_number: u8,
+    pub input_sha256: String,
+    pub prompt_version: String,
+    pub model: String,
+    pub status: ExpenseAiClassificationBatchStatus,
+    pub item_group_count: u32,
+    pub review_count: u32,
+    pub result_count: u32,
+    pub confirmed_count: u32,
+    pub provisional_count: u32,
+    pub review_required_count: u32,
+    pub privacy_skipped_count: u32,
+    pub version_conflict_count: u32,
+    pub usage: AiTokenUsage,
+    pub cost_microusd: u64,
+    pub latency_ms: u64,
+    pub failure_code: Option<String>,
+    pub created_at: String,
+    pub completed_at: Option<String>,
+    pub replayed: bool,
+}
+
+pub type ExpenseAiClassificationApplyResult = ExpenseAiClassificationBatch;
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExpenseAiClassificationReceiptResult {
+    pub item_group_count: u32,
+    pub review_count: u32,
+    pub result_count: u32,
+    pub confirmed_count: u32,
+    pub provisional_count: u32,
+    pub review_required_count: u32,
+    pub privacy_skipped_count: u32,
+    pub version_conflict_count: u32,
+    pub actual_cost_microusd: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpenseAiClassificationReceipt {
+    pub request_id: String,
+    pub target_month_start: NaiveDate,
+    pub status: ExpenseAiClassificationReceiptStatus,
+    pub result: ExpenseAiClassificationReceiptResult,
+    pub created_at: String,
+    pub completed_at: String,
+    pub replayed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpenseAiClassificationLatestSafeStatus {
+    pub status: ExpenseAiClassificationSafeStatus,
+    pub target_month: String,
+    pub item_group_count: u32,
+    pub review_count: u32,
+    pub result_count: u32,
+    pub confirmed_count: u32,
+    pub provisional_count: u32,
+    pub review_required_count: u32,
+    pub privacy_skipped_count: u32,
+    pub version_conflict_count: u32,
+    pub actual_cost_microusd: u64,
+    pub failure_code: Option<String>,
+    pub created_at: String,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpenseAiClassificationOpsStatus {
+    pub claimed_count: u32,
+    pub staged_count: u32,
+    pub oldest_open_created_at: Option<String>,
+    pub latest: Option<ExpenseAiClassificationLatestSafeStatus>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1009,6 +1267,9 @@ impl TmCore {
                     UNION ALL SELECT 1 FROM expense_ai_request_bindings
                     UNION ALL SELECT 1 FROM expense_ai_attempts
                     UNION ALL SELECT 1 FROM expense_mutation_receipts
+                    UNION ALL SELECT 1 FROM expense_ai_classification_batches
+                    UNION ALL SELECT 1 FROM expense_ai_classification_items
+                    UNION ALL SELECT 1 FROM expense_ai_classification_receipts
                 )",
             [],
             |row| Ok((row.get::<_, bool>(0)?, row.get::<_, bool>(1)?)),
@@ -1403,6 +1664,7 @@ impl TmCore {
                     p.memo_aad, p.memo_blind_index,
                     p.payment_method_fingerprint, e.exclusion_reason,
                     e.duplicate_of_event_id, e.is_provisional,
+                    e.classification_source, e.classification_confidence,
                     (SELECT r.id FROM expense_reviews AS r
                      WHERE r.event_id = e.id AND r.review_status = 'pending'
                      ORDER BY CASE r.review_reason
@@ -1512,7 +1774,21 @@ impl TmCore {
              WHERE (?1 IS NULL OR (e.posted_date >= ?1 AND e.posted_date < ?2))
                AND (?3 IS NULL OR r.review_status = ?3)
                AND (?4 = 'all'
-                    OR (?4 = 'required' AND r.review_reason != 'category_confirmation')
+                    OR (?4 = 'required' AND (
+                        r.review_reason != 'category_confirmation'
+                        OR EXISTS(
+                            SELECT 1
+                            FROM expense_ai_classification_items AS classified
+                            JOIN expense_ai_classification_batches AS batch
+                              ON batch.request_id = classified.batch_request_id
+                            WHERE classified.review_id = r.id
+                              AND (
+                                  classified.disposition = 'privacy_skipped'
+                                  OR (batch.batch_status = 'applied'
+                                      AND classified.disposition = 'review_required')
+                              )
+                        )
+                    ))
                     OR (?4 = 'category_confirmation' AND r.review_reason = 'category_confirmation'))
                AND (?5 IS NULL OR r.created_at < ?5
                     OR (r.created_at = ?5 AND r.id < ?6))
@@ -1562,11 +1838,15 @@ impl TmCore {
             version,
         ) in raw.into_iter().take(limit as usize)
         {
+            let status = ExpenseReviewStatus::from_str(&review_status)?;
+            let transaction = query_expense_transaction(&connection, &event_id)?;
+            let (suggestion_source, suggestion_confidence) =
+                review_classification_metadata(&connection, &id, status)?;
             items.push(ExpenseReview {
                 id,
                 reason: ExpenseReviewReason::from_str(&reason)?,
-                status: ExpenseReviewStatus::from_str(&review_status)?,
-                transaction: query_expense_transaction(&connection, &event_id)?,
+                status,
+                transaction,
                 recurring_expense_id,
                 suggested_kind: suggested_kind
                     .map(|value| ExpenseEventKind::from_str(&value))
@@ -1575,6 +1855,8 @@ impl TmCore {
                     .map(|value| ExpenseCategory::from_str(&value))
                     .transpose()?,
                 suggested_duplicate_of_event_id,
+                suggestion_source,
+                suggestion_confidence,
                 created_at,
                 resolved_at,
                 version,
@@ -1664,6 +1946,1475 @@ impl TmCore {
                 Ok(result)
             })
     }
+
+    pub fn list_expense_ai_classification_candidates(
+        &self,
+        target_month_start: NaiveDate,
+        limit: u32,
+    ) -> Result<Vec<ExpenseAiClassificationCandidate>> {
+        validate_month_start(target_month_start)?;
+        if limit == 0 || limit as usize > EXPENSE_AI_CLASSIFICATION_MAX_REVIEWS {
+            return Err(invalid(format!(
+                "expense AI classification candidate limit must be between 1 and {}",
+                EXPENSE_AI_CLASSIFICATION_MAX_REVIEWS
+            )));
+        }
+        let month_after = next_month(target_month_start)?;
+        let connection = self.database.connect()?;
+        let mut statement = connection.prepare(
+            "SELECT e.id, e.version, r.id, r.version, e.category,
+                    p.merchant_key_version, p.merchant_nonce,
+                    p.merchant_ciphertext, p.merchant_aad,
+                    p.merchant_blind_index, p.payment_method_fingerprint,
+                    s.source_fingerprint, raw.stable_key
+             FROM expense_reviews AS r
+             JOIN expense_events AS e ON e.id = r.event_id
+             JOIN expense_postings AS p ON p.id = e.primary_posting_id
+             JOIN expense_raw_rows AS raw ON raw.id = p.raw_row_id
+             JOIN expense_sources AS s ON s.id = p.source_id
+             WHERE r.review_status = 'pending'
+               AND r.review_reason = 'category_confirmation'
+               AND e.event_kind = 'purchase'
+               AND e.event_status = 'confirmed'
+               AND e.duplicate_of_event_id IS NULL
+               AND e.exclusion_reason IS NULL
+               AND raw.normalized_kind = 'purchase'
+               AND p.direction = 'debit'
+               AND p.merchant_key_version IS NOT NULL
+               AND p.merchant_nonce IS NOT NULL
+               AND p.merchant_ciphertext IS NOT NULL
+               AND p.merchant_aad IS NOT NULL
+               AND p.merchant_blind_index IS NOT NULL
+               AND p.payment_method_fingerprint IS NOT NULL
+               AND p.counterparty_key_version IS NULL
+               AND e.posted_date >= ?1 AND e.posted_date < ?2
+               AND NOT EXISTS(
+                   SELECT 1 FROM expense_reviews AS critical
+                   WHERE critical.event_id = e.id
+                     AND critical.review_status = 'pending'
+                     AND critical.review_reason IN (
+                         'unknown_p2p', 'ambiguous_mirror',
+                         'import_rejected', 'manual_override'
+                   )
+               )
+               AND NOT EXISTS(
+                   SELECT 1 FROM expense_allocations AS allocation
+                   WHERE allocation.event_id = e.id
+                      OR allocation.related_event_id = e.id
+               )
+               AND NOT EXISTS(
+                   SELECT 1 FROM expense_rules AS rule
+                   WHERE rule.rule_kind = 'classification'
+                     AND rule.merchant_blind_index = p.merchant_blind_index
+                     AND rule.payment_method_fingerprint = p.payment_method_fingerprint
+               )
+               AND NOT EXISTS(
+                   SELECT 1
+                   FROM expense_ai_classification_items AS classified
+                   JOIN expense_ai_classification_batches AS batch
+                     ON batch.request_id = classified.batch_request_id
+                   WHERE classified.review_id = r.id
+                     AND (
+                         batch.batch_status IN ('claimed', 'staged')
+                         OR classified.disposition = 'privacy_skipped'
+                         OR (batch.batch_status = 'applied'
+                             AND classified.disposition = 'review_required')
+                     )
+               )
+             ORDER BY p.merchant_blind_index, p.payment_method_fingerprint,
+                      e.posted_date, e.id, r.id
+             LIMIT ?3",
+        )?;
+        statement
+            .query_map(
+                params![target_month_start, month_after, i64::from(limit)],
+                |row| {
+                    let source_fingerprint = row.get::<_, String>(11)?;
+                    let stable_key = row.get::<_, String>(12)?;
+                    Ok(ExpenseAiClassificationCandidate {
+                        event_id: row.get(0)?,
+                        event_version: row.get(1)?,
+                        review_id: row.get(2)?,
+                        review_version: row.get(3)?,
+                        current_category: parse_db_enum(row.get::<_, String>(4)?, 4)?,
+                        merchant: ExpenseAiEncryptedMerchant {
+                            key_version: row.get(5)?,
+                            nonce: required_db_value(row, 6)?,
+                            ciphertext: required_db_value(row, 7)?,
+                            aad: required_db_value(row, 8)?,
+                        },
+                        merchant_blind_index: required_db_value(row, 9)?,
+                        payment_method_fingerprint: required_db_value(row, 10)?,
+                        crypto_context: format!("{source_fingerprint}:{stable_key}"),
+                    })
+                },
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub fn get_expense_ai_classification_batch(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<ExpenseAiClassificationBatch>> {
+        validate_label("expense AI classification request ID", request_id, 200)?;
+        let connection = self.database.connect()?;
+        query_expense_ai_classification_batch(&connection, request_id)
+    }
+
+    pub fn get_expense_ai_classification_receipt(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<ExpenseAiClassificationReceipt>> {
+        validate_label("expense AI classification request ID", request_id, 200)?;
+        let connection = self.database.connect()?;
+        query_expense_ai_classification_receipt(&connection, request_id)
+    }
+
+    pub fn expense_ai_classification_ops_status(&self) -> Result<ExpenseAiClassificationOpsStatus> {
+        let connection = self.database.connect()?;
+        let (claimed_count, staged_count, oldest_open_created_at) = connection.query_row(
+            "SELECT
+                coalesce(sum(CASE WHEN batch_status = 'claimed' THEN 1 ELSE 0 END), 0),
+                coalesce(sum(CASE WHEN batch_status = 'staged' THEN 1 ELSE 0 END), 0),
+                min(CASE WHEN batch_status IN ('claimed', 'staged') THEN created_at END)
+             FROM expense_ai_classification_batches",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, u32>(0)?,
+                    row.get::<_, u32>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )?;
+        let latest = connection
+            .query_row(
+                "SELECT safe_status, target_month_start, item_group_count,
+                        review_count, result_count, confirmed_count,
+                        provisional_count, review_required_count,
+                        privacy_skipped_count, version_conflict_count,
+                        cost_microusd, failure_code, created_at, completed_at
+                 FROM (
+                    SELECT batch_status AS safe_status, target_month_start,
+                           item_group_count, review_count, result_count,
+                           confirmed_count, provisional_count,
+                           review_required_count, privacy_skipped_count,
+                           version_conflict_count, cost_microusd, failure_code,
+                           created_at, completed_at, request_id AS sort_id
+                    FROM expense_ai_classification_batches
+                    UNION ALL
+                    SELECT terminal_status, target_month_start,
+                           0, 0, 0, 0, 0, 0, 0, 0, 0, NULL,
+                           created_at, completed_at, request_id
+                    FROM expense_ai_classification_receipts
+                 )
+                 ORDER BY created_at DESC, sort_id DESC
+                 LIMIT 1",
+                [],
+                |row| {
+                    let target_month_start = row.get::<_, NaiveDate>(1)?;
+                    Ok(ExpenseAiClassificationLatestSafeStatus {
+                        status: parse_db_enum(row.get::<_, String>(0)?, 0)?,
+                        target_month: target_month_start.format("%Y-%m").to_string(),
+                        item_group_count: row.get(2)?,
+                        review_count: row.get(3)?,
+                        result_count: row.get(4)?,
+                        confirmed_count: row.get(5)?,
+                        provisional_count: row.get(6)?,
+                        review_required_count: row.get(7)?,
+                        privacy_skipped_count: row.get(8)?,
+                        version_conflict_count: row.get(9)?,
+                        actual_cost_microusd: read_nonnegative_u64(row, 10)?,
+                        failure_code: row.get(11)?,
+                        created_at: row.get(12)?,
+                        completed_at: row.get(13)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(ExpenseAiClassificationOpsStatus {
+            claimed_count,
+            staged_count,
+            oldest_open_created_at,
+            latest,
+        })
+    }
+
+    pub fn store_no_candidate_expense_ai_classification_receipt(
+        &self,
+        request_id: &str,
+        target_month_start: NaiveDate,
+    ) -> Result<ExpenseAiClassificationReceipt> {
+        validate_label("expense AI classification request ID", request_id, 200)?;
+        validate_month_start(target_month_start)?;
+        self.database
+            .transaction(TransactionBehavior::Immediate, |transaction| {
+                if let Some(mut existing) =
+                    query_expense_ai_classification_receipt(transaction, request_id)?
+                {
+                    if existing.target_month_start != target_month_start
+                        || existing.status
+                            != ExpenseAiClassificationReceiptStatus::NoCandidates
+                    {
+                        return Err(Error::Conflict(
+                            "expense AI classification request ID was reused for another terminal result"
+                                .to_owned(),
+                        ));
+                    }
+                    existing.replayed = true;
+                    return Ok(existing);
+                }
+                let batch_exists: bool = transaction.query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM expense_ai_classification_batches
+                        WHERE request_id = ?1
+                     )",
+                    [request_id],
+                    |row| row.get(0),
+                )?;
+                if batch_exists {
+                    return Err(Error::Conflict(
+                        "expense AI classification request ID is already bound to a batch"
+                            .to_owned(),
+                    ));
+                }
+                let result = ExpenseAiClassificationReceiptResult::default();
+                let result_json = serde_json::to_string(&result)?;
+                let now = now_utc();
+                transaction.execute(
+                    "INSERT INTO expense_ai_classification_receipts(
+                        request_id, target_month_start, terminal_status,
+                        result_json, created_at, completed_at
+                     ) VALUES (?1, ?2, 'no_candidates', ?3, ?4, ?4)",
+                    params![request_id, target_month_start, result_json, now],
+                )?;
+                query_expense_ai_classification_receipt(transaction, request_id)?.ok_or_else(|| {
+                    Error::Invariant(
+                        "expense AI classification receipt disappeared after insert".to_owned(),
+                    )
+                })
+            })
+    }
+
+    pub fn list_open_expense_ai_classification_batches(
+        &self,
+        target_month_start: NaiveDate,
+    ) -> Result<Vec<ExpenseAiClassificationBatch>> {
+        validate_month_start(target_month_start)?;
+        let connection = self.database.connect()?;
+        let mut statement = connection.prepare(
+            "SELECT request_id, quota_month_start, target_month_start,
+                    attempt_number, input_sha256, prompt_version, model,
+                    batch_status, item_group_count, review_count, result_count,
+                    confirmed_count, provisional_count, review_required_count,
+                    privacy_skipped_count, version_conflict_count,
+                    input_tokens, cached_input_tokens, output_tokens, total_tokens,
+                    cost_microusd, latency_ms, failure_code, created_at, completed_at
+             FROM expense_ai_classification_batches
+             WHERE target_month_start = ?1
+               AND batch_status IN ('claimed', 'staged')
+             ORDER BY created_at, request_id
+             LIMIT ?2",
+        )?;
+        statement
+            .query_map(
+                params![
+                    target_month_start,
+                    i64::from(EXPENSE_AI_CLASSIFICATION_MAX_RECOVERY_BATCHES)
+                ],
+                map_expense_ai_classification_batch,
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    /// Returns terminal classification batches whose AI budget reservation has not
+    /// yet been offset by a settlement. This is read-only recovery state; callers
+    /// decide the conservative settlement and never repeat the provider call.
+    pub fn list_unsettled_terminal_expense_ai_classification_batches(
+        &self,
+        target_month_start: NaiveDate,
+    ) -> Result<Vec<ExpenseAiClassificationBatch>> {
+        validate_month_start(target_month_start)?;
+        let connection = self.database.connect()?;
+        let mut statement = connection.prepare(
+            "SELECT batch.request_id, batch.quota_month_start,
+                    batch.target_month_start, batch.attempt_number,
+                    batch.input_sha256, batch.prompt_version, batch.model,
+                    batch.batch_status, batch.item_group_count, batch.review_count,
+                    batch.result_count, batch.confirmed_count,
+                    batch.provisional_count, batch.review_required_count,
+                    batch.privacy_skipped_count, batch.version_conflict_count,
+                    batch.input_tokens, batch.cached_input_tokens,
+                    batch.output_tokens, batch.total_tokens,
+                    batch.cost_microusd, batch.latency_ms, batch.failure_code,
+                    batch.created_at, batch.completed_at
+             FROM expense_ai_classification_batches AS batch
+             JOIN ai_budget_ledger AS reservation
+               ON reservation.request_id = batch.request_id
+              AND reservation.entry_kind = 'reservation'
+              AND reservation.operation = 'expense_classification'
+             LEFT JOIN ai_budget_ledger AS settlement
+               ON settlement.request_id = batch.request_id
+              AND settlement.entry_kind = 'settlement'
+             WHERE batch.target_month_start = ?1
+               AND batch.batch_status IN ('applied', 'failed', 'stale')
+               AND settlement.id IS NULL
+             ORDER BY batch.completed_at, batch.request_id
+             LIMIT ?2",
+        )?;
+        statement
+            .query_map(
+                params![
+                    target_month_start,
+                    i64::from(EXPENSE_AI_CLASSIFICATION_MAX_RECOVERY_BATCHES)
+                ],
+                map_expense_ai_classification_batch,
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    /// Releases only abandoned pre-provider claims. Staged results are durable and
+    /// deliberately left open so the server can apply them without another model call.
+    pub fn expire_claimed_expense_ai_classification_batches(
+        &self,
+        target_month_start: NaiveDate,
+        created_before: &str,
+    ) -> Result<u32> {
+        validate_month_start(target_month_start)?;
+        let created_before = DateTime::parse_from_rfc3339(created_before)
+            .map_err(|_| invalid("expense AI classification lease cutoff must be RFC 3339"))?
+            .with_timezone(&Utc)
+            .to_rfc3339_opts(SecondsFormat::Millis, true);
+        self.database
+            .transaction(TransactionBehavior::Immediate, |transaction| {
+                let changed = transaction.execute(
+                    "UPDATE expense_ai_classification_batches
+                     SET batch_status = 'failed', failure_code = 'lease_expired',
+                         completed_at = ?3
+                     WHERE target_month_start = ?1
+                       AND batch_status = 'claimed'
+                       AND created_at < ?2",
+                    params![target_month_start, created_before, now_utc()],
+                )?;
+                u32::try_from(changed).map_err(|_| {
+                    Error::Invariant(
+                        "expired expense AI classification batch count overflowed".to_owned(),
+                    )
+                })
+            })
+    }
+
+    pub fn get_staged_expense_ai_classification_suggestions(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<Vec<ExpenseAiClassificationSuggestion>>> {
+        validate_label("expense AI classification request ID", request_id, 200)?;
+        let connection = self.database.connect()?;
+        let result_json = connection
+            .query_row(
+                "SELECT result_json FROM expense_ai_classification_batches
+                 WHERE request_id = ?1",
+                [request_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+        result_json
+            .map(|value| decode_expense_ai_classification_suggestions(&value))
+            .transpose()
+    }
+
+    pub fn claim_expense_ai_classification_batch(
+        &self,
+        input: ClaimExpenseAiClassificationBatchInput,
+    ) -> Result<ExpenseAiClassificationBatch> {
+        let normalized = validate_and_normalize_expense_ai_classification_claim(input)?;
+        self.database
+            .transaction(TransactionBehavior::Immediate, |transaction| {
+                if let Some(mut existing) =
+                    query_expense_ai_classification_batch(transaction, &normalized.request_id)?
+                {
+                    validate_expense_ai_classification_claim_replay(
+                        transaction,
+                        &existing,
+                        &normalized,
+                        true,
+                    )?;
+                    existing.replayed = true;
+                    return Ok(existing);
+                }
+                if query_expense_ai_classification_receipt(
+                    transaction,
+                    &normalized.request_id,
+                )?
+                .is_some()
+                {
+                    return Err(Error::Conflict(
+                        "expense AI classification request ID already completed with no candidates"
+                            .to_owned(),
+                    ));
+                }
+
+                let active_request = transaction
+                    .query_row(
+                        "SELECT request_id, batch_status
+                         FROM expense_ai_classification_batches
+                         WHERE input_sha256 = ?1 AND prompt_version = ?2
+                           AND batch_status IN ('claimed', 'staged', 'applied')
+                         LIMIT 1",
+                        params![normalized.input_sha256, normalized.prompt_version],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                    )
+                    .optional()?;
+                if let Some((active_request, active_status)) = active_request {
+                    if active_status == ExpenseAiClassificationBatchStatus::Applied.as_str() {
+                        let mut cached = query_expense_ai_classification_batch(
+                            transaction,
+                            &active_request,
+                        )?
+                        .ok_or_else(|| {
+                            Error::Invariant(
+                                "cached expense AI classification batch disappeared".to_owned(),
+                            )
+                        })?;
+                        if cached.target_month_start != normalized.target_month_start
+                            || cached.model != normalized.model
+                        {
+                            return Err(Error::Conflict(
+                                "expense AI classification cache key conflicts with another input"
+                                    .to_owned(),
+                            ));
+                        }
+                        validate_expense_ai_classification_claim_replay(
+                            transaction,
+                            &cached,
+                            &normalized,
+                            false,
+                        )?;
+                        cached.replayed = true;
+                        return Ok(cached);
+                    }
+                    return Err(Error::Conflict(format!(
+                        "expense AI classification input is already bound to request {active_request}"
+                    )));
+                }
+
+                let previous_attempts: u32 = transaction.query_row(
+                    "SELECT count(*) FROM expense_ai_classification_batches
+                     WHERE quota_month_start = ?1",
+                    [normalized.quota_month_start],
+                    |row| row.get(0),
+                )?;
+                if previous_attempts >= u32::from(normalized.max_attempts) {
+                    return Err(Error::Conflict(format!(
+                        "expense AI classification monthly attempt limit {} was reached",
+                        normalized.max_attempts
+                    )));
+                }
+                let attempt_number = u8::try_from(previous_attempts + 1)
+                    .map_err(|_| invalid("expense AI classification attempt number overflowed"))?;
+
+                for group in &normalized.groups {
+                    let mut group_key: Option<(String, String)> = None;
+                    for binding in &group.bindings {
+                        let state = expense_ai_classification_binding_state(
+                            transaction,
+                            &binding.event_id,
+                            &binding.review_id,
+                            None,
+                        )?
+                        .ok_or_else(|| {
+                            Error::Conflict(
+                                "expense AI classification candidate is no longer eligible"
+                                    .to_owned(),
+                            )
+                        })?;
+                        if state.event_version != binding.event_version
+                            || state.review_version != binding.review_version
+                            || month_start(state.posted_date)? != normalized.target_month_start
+                        {
+                            return Err(Error::Conflict(
+                                "expense AI classification candidate version changed".to_owned(),
+                            ));
+                        }
+                        let key = (state.merchant_blind_index, state.payment_method_fingerprint);
+                        if group_key.as_ref().is_some_and(|existing| existing != &key) {
+                            return Err(invalid(
+                                "expense AI classification group mixes different merchant or payment fingerprints",
+                            ));
+                        }
+                        group_key = Some(key);
+                    }
+                }
+
+                let created_at = now_utc();
+                let item_group_count = u32::try_from(normalized.groups.len())
+                    .map_err(|_| invalid("expense AI classification has too many groups"))?;
+                let review_count = u32::try_from(
+                    normalized
+                        .groups
+                        .iter()
+                        .map(|group| group.bindings.len())
+                        .sum::<usize>(),
+                )
+                .map_err(|_| invalid("expense AI classification has too many reviews"))?;
+                let privacy_skipped_count = u32::try_from(
+                    normalized
+                        .groups
+                        .iter()
+                        .filter(|group| group.privacy_skipped)
+                        .map(|group| group.bindings.len())
+                        .sum::<usize>(),
+                )
+                .map_err(|_| invalid("expense AI classification privacy count overflowed"))?;
+                transaction.execute(
+                    "INSERT INTO expense_ai_classification_batches(
+                        request_id, quota_month_start, target_month_start,
+                        attempt_number, input_sha256, prompt_version, model,
+                        batch_status, item_group_count, review_count,
+                        privacy_skipped_count, created_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'claimed', ?8, ?9, ?10, ?11)",
+                    params![
+                        normalized.request_id,
+                        normalized.quota_month_start,
+                        normalized.target_month_start,
+                        attempt_number,
+                        normalized.input_sha256,
+                        normalized.prompt_version,
+                        normalized.model,
+                        item_group_count,
+                        review_count,
+                        privacy_skipped_count,
+                        created_at,
+                    ],
+                )?;
+                for group in &normalized.groups {
+                    for binding in &group.bindings {
+                        transaction.execute(
+                            "INSERT INTO expense_ai_classification_items(
+                                batch_request_id, item_id, event_id, review_id,
+                                expected_event_version, expected_review_version,
+                                disposition, created_at, applied_at
+                             ) VALUES (
+                                ?1, ?2, ?3, ?4, ?5, ?6,
+                                CASE WHEN ?7 THEN 'privacy_skipped' ELSE NULL END,
+                                ?8, CASE WHEN ?7 THEN ?8 ELSE NULL END
+                             )",
+                            params![
+                                normalized.request_id,
+                                group.item_id,
+                                binding.event_id,
+                                binding.review_id,
+                                binding.event_version,
+                                binding.review_version,
+                                group.privacy_skipped,
+                                created_at,
+                            ],
+                        )?;
+                    }
+                }
+                if normalized.groups.iter().all(|group| group.privacy_skipped) {
+                    transaction.execute(
+                        "UPDATE expense_ai_classification_batches
+                         SET batch_status = 'applied', result_json = '[]',
+                             completed_at = ?2
+                         WHERE request_id = ?1 AND batch_status = 'claimed'",
+                        params![normalized.request_id, created_at],
+                    )?;
+                }
+                query_expense_ai_classification_batch(transaction, &normalized.request_id)?
+                    .ok_or_else(|| {
+                        Error::Invariant(
+                            "expense AI classification claim disappeared".to_owned(),
+                        )
+                    })
+            })
+    }
+
+    pub fn stage_expense_ai_classification_batch(
+        &self,
+        mut input: StageExpenseAiClassificationBatchInput,
+    ) -> Result<ExpenseAiClassificationBatch> {
+        validate_label(
+            "expense AI classification request ID",
+            &input.request_id,
+            200,
+        )?;
+        validate_expense_ai_classification_usage(&input)?;
+        input
+            .suggestions
+            .sort_by(|left, right| left.item_id.cmp(&right.item_id));
+        validate_expense_ai_classification_suggestions(&input.suggestions)?;
+        let result_json = serde_json::to_string(&input.suggestions)?;
+        self.database
+            .transaction(TransactionBehavior::Immediate, |transaction| {
+                let current = query_expense_ai_classification_batch(
+                    transaction,
+                    &input.request_id,
+                )?
+                .ok_or_else(|| {
+                    not_found("expense AI classification batch", &input.request_id)
+                })?;
+                if current.status != ExpenseAiClassificationBatchStatus::Claimed {
+                    let stored = transaction
+                        .query_row(
+                            "SELECT result_json FROM expense_ai_classification_batches
+                             WHERE request_id = ?1",
+                            [&input.request_id],
+                            |row| row.get::<_, Option<String>>(0),
+                        )?
+                        .unwrap_or_default();
+                    if matches!(
+                        current.status,
+                        ExpenseAiClassificationBatchStatus::Staged
+                            | ExpenseAiClassificationBatchStatus::Applied
+                            | ExpenseAiClassificationBatchStatus::Stale
+                    ) && stored == result_json
+                        && current.usage == input.usage
+                        && current.cost_microusd == input.cost_microusd
+                        && current.latency_ms == input.latency_ms
+                    {
+                        let mut replay = current;
+                        replay.replayed = true;
+                        return Ok(replay);
+                    }
+                    return Err(Error::Conflict(
+                        "expense AI classification batch cannot accept a different staged result"
+                            .to_owned(),
+                    ));
+                }
+
+                let expected_items = active_expense_ai_classification_item_ids(
+                    transaction,
+                    &input.request_id,
+                )?;
+                let supplied_items = input
+                    .suggestions
+                    .iter()
+                    .map(|item| item.item_id.clone())
+                    .collect::<BTreeSet<_>>();
+                if expected_items != supplied_items {
+                    return Err(invalid(
+                        "expense AI classification response must contain every eligible item exactly once",
+                    ));
+                }
+
+                let changed = transaction.execute(
+                    "UPDATE expense_ai_classification_batches
+                     SET batch_status = 'staged', result_json = ?2,
+                         result_count = ?3, input_tokens = ?4,
+                         cached_input_tokens = ?5, output_tokens = ?6,
+                         total_tokens = ?7, cost_microusd = ?8, latency_ms = ?9
+                     WHERE request_id = ?1 AND batch_status = 'claimed'",
+                    params![
+                        input.request_id,
+                        result_json,
+                        u32::try_from(input.suggestions.len()).map_err(|_| invalid(
+                            "expense AI classification result count overflowed"
+                        ))?,
+                        as_i64(input.usage.input_tokens, "classification input tokens")?,
+                        as_i64(
+                            input.usage.cached_input_tokens,
+                            "classification cached input tokens"
+                        )?,
+                        as_i64(input.usage.output_tokens, "classification output tokens")?,
+                        as_i64(input.usage.total_tokens, "classification total tokens")?,
+                        as_i64(input.cost_microusd, "classification cost")?,
+                        as_i64(input.latency_ms, "classification latency")?,
+                    ],
+                )?;
+                if changed != 1 {
+                    return Err(Error::Conflict(
+                        "expense AI classification batch changed before staging".to_owned(),
+                    ));
+                }
+                query_expense_ai_classification_batch(transaction, &input.request_id)?
+                    .ok_or_else(|| {
+                        Error::Invariant(
+                            "staged expense AI classification batch disappeared".to_owned(),
+                        )
+                    })
+            })
+    }
+
+    pub fn apply_expense_ai_classification_batch(
+        &self,
+        request_id: &str,
+    ) -> Result<ExpenseAiClassificationApplyResult> {
+        validate_label("expense AI classification request ID", request_id, 200)?;
+        self.database
+            .transaction(TransactionBehavior::Immediate, |transaction| {
+                let mut current =
+                    query_expense_ai_classification_batch(transaction, request_id)?
+                        .ok_or_else(|| not_found("expense AI classification batch", request_id))?;
+                if matches!(
+                    current.status,
+                    ExpenseAiClassificationBatchStatus::Applied
+                        | ExpenseAiClassificationBatchStatus::Stale
+                ) {
+                    current.replayed = true;
+                    return Ok(current);
+                }
+                if current.status != ExpenseAiClassificationBatchStatus::Staged {
+                    return Err(Error::Conflict(
+                        "expense AI classification batch must be staged before apply".to_owned(),
+                    ));
+                }
+                let suggestions = transaction.query_row(
+                    "SELECT result_json FROM expense_ai_classification_batches
+                     WHERE request_id = ?1",
+                    [request_id],
+                    |row| row.get::<_, String>(0),
+                )?;
+                let suggestions = decode_expense_ai_classification_suggestions(&suggestions)?
+                    .into_iter()
+                    .map(|item| (item.item_id.clone(), item))
+                    .collect::<BTreeMap<_, _>>();
+                let bindings = expense_ai_classification_batch_bindings(transaction, request_id)?;
+
+                let mut version_conflicts = 0_u32;
+                let mut group_keys = BTreeMap::<String, (String, String)>::new();
+                for binding in &bindings {
+                    if binding.disposition
+                        == Some(ExpenseAiClassificationDisposition::PrivacySkipped)
+                    {
+                        continue;
+                    }
+                    let state = expense_ai_classification_binding_state(
+                        transaction,
+                        &binding.event_id,
+                        &binding.review_id,
+                        Some(request_id),
+                    )?;
+                    let Some(state) = state else {
+                        version_conflicts = version_conflicts.saturating_add(1);
+                        continue;
+                    };
+                    if state.event_version != binding.expected_event_version
+                        || state.review_version != binding.expected_review_version
+                        || month_start(state.posted_date)? != current.target_month_start
+                    {
+                        version_conflicts = version_conflicts.saturating_add(1);
+                        continue;
+                    }
+                    let key = (state.merchant_blind_index, state.payment_method_fingerprint);
+                    if group_keys
+                        .get(&binding.item_id)
+                        .is_some_and(|existing| existing != &key)
+                    {
+                        version_conflicts = version_conflicts.saturating_add(1);
+                        continue;
+                    }
+                    group_keys.insert(binding.item_id.clone(), key.clone());
+                    let user_rule_exists: bool = transaction.query_row(
+                        "SELECT EXISTS(
+                            SELECT 1 FROM expense_rules
+                            WHERE rule_kind = 'classification'
+                              AND merchant_blind_index = ?1
+                              AND payment_method_fingerprint = ?2
+                         )",
+                        params![key.0, key.1],
+                        |row| row.get(0),
+                    )?;
+                    if user_rule_exists {
+                        version_conflicts = version_conflicts.saturating_add(1);
+                    }
+                }
+                if version_conflicts > 0 {
+                    transaction.execute(
+                        "UPDATE expense_ai_classification_batches
+                         SET batch_status = 'stale', failure_code = 'version_conflict',
+                             version_conflict_count = ?2, completed_at = ?3
+                         WHERE request_id = ?1 AND batch_status = 'staged'",
+                        params![request_id, version_conflicts, now_utc()],
+                    )?;
+                    return query_expense_ai_classification_batch(transaction, request_id)?
+                        .ok_or_else(|| {
+                            Error::Invariant(
+                                "stale expense AI classification batch disappeared".to_owned(),
+                            )
+                        });
+                }
+
+                let now = now_utc();
+                let mut confirmed_count = 0_u32;
+                let mut provisional_count = 0_u32;
+                let mut review_required_count = 0_u32;
+                for binding in &bindings {
+                    if binding.disposition
+                        == Some(ExpenseAiClassificationDisposition::PrivacySkipped)
+                    {
+                        continue;
+                    }
+                    let suggestion = suggestions.get(&binding.item_id).ok_or_else(|| {
+                        Error::Invariant(
+                            "staged expense AI classification item is missing".to_owned(),
+                        )
+                    })?;
+                    let disposition = if suggestion.confidence >= 90 {
+                        confirmed_count = confirmed_count.saturating_add(1);
+                        ExpenseAiClassificationDisposition::Confirmed
+                    } else if suggestion.confidence >= 70 {
+                        provisional_count = provisional_count.saturating_add(1);
+                        ExpenseAiClassificationDisposition::Provisional
+                    } else {
+                        review_required_count = review_required_count.saturating_add(1);
+                        ExpenseAiClassificationDisposition::ReviewRequired
+                    };
+                    apply_expense_ai_classification_binding(
+                        transaction,
+                        binding,
+                        suggestion,
+                        disposition,
+                        &now,
+                    )?;
+                }
+                let changed = transaction.execute(
+                    "UPDATE expense_ai_classification_batches
+                     SET batch_status = 'applied', confirmed_count = ?2,
+                         provisional_count = ?3, review_required_count = ?4,
+                         completed_at = ?5
+                     WHERE request_id = ?1 AND batch_status = 'staged'",
+                    params![
+                        request_id,
+                        confirmed_count,
+                        provisional_count,
+                        review_required_count,
+                        now,
+                    ],
+                )?;
+                if changed != 1 {
+                    return Err(Error::Conflict(
+                        "expense AI classification batch changed before apply".to_owned(),
+                    ));
+                }
+                refresh_expense_months_in_transaction(
+                    transaction,
+                    BTreeSet::from([current.target_month_start]),
+                )?;
+                query_expense_ai_classification_batch(transaction, request_id)?.ok_or_else(|| {
+                    Error::Invariant(
+                        "applied expense AI classification batch disappeared".to_owned(),
+                    )
+                })
+            })
+    }
+
+    pub fn fail_expense_ai_classification_batch(
+        &self,
+        request_id: &str,
+        failure_code: &str,
+    ) -> Result<ExpenseAiClassificationBatch> {
+        validate_label("expense AI classification request ID", request_id, 200)?;
+        if !EXPENSE_AI_CLASSIFICATION_FAILURE_CODES.contains(&failure_code) {
+            return Err(invalid(
+                "expense AI classification failure code is not supported",
+            ));
+        }
+        self.database
+            .transaction(TransactionBehavior::Immediate, |transaction| {
+                let mut current =
+                    query_expense_ai_classification_batch(transaction, request_id)?
+                        .ok_or_else(|| not_found("expense AI classification batch", request_id))?;
+                if current.status == ExpenseAiClassificationBatchStatus::Failed
+                    && current.failure_code.as_deref() == Some(failure_code)
+                {
+                    current.replayed = true;
+                    return Ok(current);
+                }
+                if !matches!(
+                    current.status,
+                    ExpenseAiClassificationBatchStatus::Claimed
+                        | ExpenseAiClassificationBatchStatus::Staged
+                ) {
+                    return Err(Error::Conflict(
+                        "expense AI classification batch can no longer fail".to_owned(),
+                    ));
+                }
+                transaction.execute(
+                    "UPDATE expense_ai_classification_batches
+                     SET batch_status = 'failed', result_json = NULL,
+                         result_count = 0, failure_code = ?2, completed_at = ?3
+                     WHERE request_id = ?1
+                       AND batch_status IN ('claimed', 'staged')",
+                    params![request_id, failure_code, now_utc()],
+                )?;
+                query_expense_ai_classification_batch(transaction, request_id)?.ok_or_else(|| {
+                    Error::Invariant(
+                        "failed expense AI classification batch disappeared".to_owned(),
+                    )
+                })
+            })
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct ExpenseAiClassificationStoredBinding {
+    batch_request_id: String,
+    item_id: String,
+    event_id: String,
+    expected_event_version: u64,
+    review_id: String,
+    expected_review_version: u64,
+    disposition: Option<ExpenseAiClassificationDisposition>,
+}
+
+struct ExpenseAiClassificationBindingState {
+    event_version: u64,
+    review_version: u64,
+    posted_date: NaiveDate,
+    merchant_blind_index: String,
+    payment_method_fingerprint: String,
+}
+
+fn validate_and_normalize_expense_ai_classification_claim(
+    mut input: ClaimExpenseAiClassificationBatchInput,
+) -> Result<ClaimExpenseAiClassificationBatchInput> {
+    validate_label(
+        "expense AI classification request ID",
+        &input.request_id,
+        200,
+    )?;
+    validate_month_start(input.quota_month_start)?;
+    validate_month_start(input.target_month_start)?;
+    validate_sha256(
+        "expense AI classification input SHA-256",
+        &input.input_sha256,
+    )?;
+    validate_bounded_text(
+        "expense AI classification prompt version",
+        &input.prompt_version,
+        1,
+        128,
+    )?;
+    validate_bounded_text("expense AI classification model", &input.model, 1, 128)?;
+    if input.max_attempts == 0 || input.max_attempts > EXPENSE_AI_CLASSIFICATION_MAX_ATTEMPTS {
+        return Err(invalid(format!(
+            "expense AI classification maxAttempts must be between 1 and {}",
+            EXPENSE_AI_CLASSIFICATION_MAX_ATTEMPTS
+        )));
+    }
+    if input.groups.is_empty() || input.groups.len() > EXPENSE_AI_CLASSIFICATION_MAX_GROUPS {
+        return Err(invalid(format!(
+            "expense AI classification must contain between 1 and {} groups",
+            EXPENSE_AI_CLASSIFICATION_MAX_GROUPS
+        )));
+    }
+    input
+        .groups
+        .sort_by(|left, right| left.item_id.cmp(&right.item_id));
+    let mut item_ids = HashSet::new();
+    let mut event_ids = HashSet::new();
+    let mut review_ids = HashSet::new();
+    let mut review_count = 0_usize;
+    for group in &mut input.groups {
+        validate_label("expense AI classification item ID", &group.item_id, 128)?;
+        if !item_ids.insert(group.item_id.clone()) {
+            return Err(invalid("expense AI classification item IDs must be unique"));
+        }
+        if group.bindings.is_empty() {
+            return Err(invalid("expense AI classification groups cannot be empty"));
+        }
+        group.bindings.sort();
+        for binding in &group.bindings {
+            validate_label("expense AI classification event ID", &binding.event_id, 128)?;
+            validate_label(
+                "expense AI classification review ID",
+                &binding.review_id,
+                128,
+            )?;
+            if binding.event_version == 0 || binding.review_version == 0 {
+                return Err(invalid(
+                    "expense AI classification candidate versions must be positive",
+                ));
+            }
+            if !event_ids.insert(binding.event_id.clone())
+                || !review_ids.insert(binding.review_id.clone())
+            {
+                return Err(invalid(
+                    "expense AI classification events and reviews must be unique",
+                ));
+            }
+            review_count = review_count.saturating_add(1);
+        }
+    }
+    if review_count > EXPENSE_AI_CLASSIFICATION_MAX_REVIEWS {
+        return Err(invalid(format!(
+            "expense AI classification cannot contain more than {} reviews",
+            EXPENSE_AI_CLASSIFICATION_MAX_REVIEWS
+        )));
+    }
+    Ok(input)
+}
+
+fn validate_expense_ai_classification_claim_replay(
+    connection: &Connection,
+    batch: &ExpenseAiClassificationBatch,
+    input: &ClaimExpenseAiClassificationBatchInput,
+    require_quota_match: bool,
+) -> Result<()> {
+    if (require_quota_match && batch.quota_month_start != input.quota_month_start)
+        || batch.target_month_start != input.target_month_start
+        || batch.input_sha256 != input.input_sha256
+        || batch.prompt_version != input.prompt_version
+        || batch.model != input.model
+    {
+        return Err(Error::Conflict(
+            "expense AI classification request ID was reused for another input".to_owned(),
+        ));
+    }
+    let mut expected = input
+        .groups
+        .iter()
+        .flat_map(|group| {
+            group.bindings.iter().map(|binding| {
+                (
+                    group.item_id.clone(),
+                    group.privacy_skipped,
+                    binding.event_id.clone(),
+                    binding.event_version,
+                    binding.review_id.clone(),
+                    binding.review_version,
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    expected.sort();
+    let mut statement = connection.prepare(
+        "SELECT item_id, disposition = 'privacy_skipped', event_id,
+                expected_event_version, review_id, expected_review_version
+         FROM expense_ai_classification_items
+         WHERE batch_request_id = ?1
+         ORDER BY item_id, event_id, review_id",
+    )?;
+    let stored = statement
+        .query_map([&batch.request_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, bool>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, u64>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, u64>(5)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    if stored != expected {
+        return Err(Error::Conflict(
+            "expense AI classification request ID was reused for different candidates".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn expense_ai_classification_binding_state(
+    connection: &Connection,
+    event_id: &str,
+    review_id: &str,
+    excluded_batch_request_id: Option<&str>,
+) -> Result<Option<ExpenseAiClassificationBindingState>> {
+    connection
+        .query_row(
+            "SELECT e.version, r.version, e.posted_date,
+                    p.merchant_blind_index, p.payment_method_fingerprint
+             FROM expense_reviews AS r
+             JOIN expense_events AS e ON e.id = r.event_id
+             JOIN expense_postings AS p ON p.id = e.primary_posting_id
+             JOIN expense_raw_rows AS raw ON raw.id = p.raw_row_id
+             WHERE e.id = ?1 AND r.id = ?2
+               AND r.review_status = 'pending'
+               AND r.review_reason = 'category_confirmation'
+               AND e.event_kind = 'purchase'
+               AND e.event_status = 'confirmed'
+               AND e.duplicate_of_event_id IS NULL
+               AND e.exclusion_reason IS NULL
+               AND raw.normalized_kind = 'purchase'
+               AND p.direction = 'debit'
+               AND p.merchant_key_version IS NOT NULL
+               AND p.merchant_blind_index IS NOT NULL
+               AND p.payment_method_fingerprint IS NOT NULL
+               AND p.counterparty_key_version IS NULL
+               AND NOT EXISTS(
+                   SELECT 1 FROM expense_reviews AS critical
+                   WHERE critical.event_id = e.id
+                     AND critical.review_status = 'pending'
+                     AND critical.review_reason IN (
+                         'unknown_p2p', 'ambiguous_mirror',
+                         'import_rejected', 'manual_override'
+                   )
+               )
+               AND NOT EXISTS(
+                   SELECT 1 FROM expense_allocations AS allocation
+                   WHERE allocation.event_id = e.id
+                      OR allocation.related_event_id = e.id
+               )
+               AND NOT EXISTS(
+                   SELECT 1 FROM expense_rules AS rule
+                   WHERE rule.rule_kind = 'classification'
+                     AND rule.merchant_blind_index = p.merchant_blind_index
+                     AND rule.payment_method_fingerprint = p.payment_method_fingerprint
+               )
+               AND NOT EXISTS(
+                   SELECT 1
+                   FROM expense_ai_classification_items AS classified
+                   JOIN expense_ai_classification_batches AS batch
+                     ON batch.request_id = classified.batch_request_id
+                   WHERE classified.review_id = r.id
+                     AND (?3 IS NULL OR classified.batch_request_id != ?3)
+                     AND (
+                         batch.batch_status IN ('claimed', 'staged')
+                         OR classified.disposition = 'privacy_skipped'
+                         OR (batch.batch_status = 'applied'
+                             AND classified.disposition = 'review_required')
+                     )
+               )",
+            params![event_id, review_id, excluded_batch_request_id],
+            |row| {
+                Ok(ExpenseAiClassificationBindingState {
+                    event_version: row.get(0)?,
+                    review_version: row.get(1)?,
+                    posted_date: row.get(2)?,
+                    merchant_blind_index: required_db_value(row, 3)?,
+                    payment_method_fingerprint: required_db_value(row, 4)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
+fn query_expense_ai_classification_batch(
+    connection: &Connection,
+    request_id: &str,
+) -> Result<Option<ExpenseAiClassificationBatch>> {
+    connection
+        .query_row(
+            "SELECT request_id, quota_month_start, target_month_start,
+                    attempt_number, input_sha256, prompt_version, model,
+                    batch_status, item_group_count, review_count, result_count,
+                    confirmed_count, provisional_count, review_required_count,
+                    privacy_skipped_count, version_conflict_count,
+                    input_tokens, cached_input_tokens, output_tokens, total_tokens,
+                    cost_microusd, latency_ms, failure_code, created_at, completed_at
+             FROM expense_ai_classification_batches WHERE request_id = ?1",
+            [request_id],
+            map_expense_ai_classification_batch,
+        )
+        .optional()
+        .map_err(Into::into)
+}
+
+fn query_expense_ai_classification_receipt(
+    connection: &Connection,
+    request_id: &str,
+) -> Result<Option<ExpenseAiClassificationReceipt>> {
+    let raw = connection
+        .query_row(
+            "SELECT request_id, target_month_start, terminal_status,
+                    result_json, created_at, completed_at
+             FROM expense_ai_classification_receipts WHERE request_id = ?1",
+            [request_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, NaiveDate>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    raw.map(
+        |(request_id, target_month_start, status, result_json, created_at, completed_at)| {
+            let result: ExpenseAiClassificationReceiptResult = serde_json::from_str(&result_json)?;
+            if result != ExpenseAiClassificationReceiptResult::default() {
+                return Err(Error::Invariant(
+                    "no-candidate expense AI classification receipt contains a nonzero result"
+                        .to_owned(),
+                ));
+            }
+            Ok(ExpenseAiClassificationReceipt {
+                request_id,
+                target_month_start,
+                status: ExpenseAiClassificationReceiptStatus::from_str(&status)?,
+                result,
+                created_at,
+                completed_at,
+                replayed: false,
+            })
+        },
+    )
+    .transpose()
+}
+
+fn map_expense_ai_classification_batch(
+    row: &Row<'_>,
+) -> rusqlite::Result<ExpenseAiClassificationBatch> {
+    Ok(ExpenseAiClassificationBatch {
+        request_id: row.get(0)?,
+        quota_month_start: row.get(1)?,
+        target_month_start: row.get(2)?,
+        attempt_number: row.get(3)?,
+        input_sha256: row.get(4)?,
+        prompt_version: row.get(5)?,
+        model: row.get(6)?,
+        status: parse_db_enum(row.get::<_, String>(7)?, 7)?,
+        item_group_count: row.get(8)?,
+        review_count: row.get(9)?,
+        result_count: row.get(10)?,
+        confirmed_count: row.get(11)?,
+        provisional_count: row.get(12)?,
+        review_required_count: row.get(13)?,
+        privacy_skipped_count: row.get(14)?,
+        version_conflict_count: row.get(15)?,
+        usage: AiTokenUsage {
+            input_tokens: read_nonnegative_u64(row, 16)?,
+            cached_input_tokens: read_nonnegative_u64(row, 17)?,
+            output_tokens: read_nonnegative_u64(row, 18)?,
+            total_tokens: read_nonnegative_u64(row, 19)?,
+        },
+        cost_microusd: read_nonnegative_u64(row, 20)?,
+        latency_ms: read_nonnegative_u64(row, 21)?,
+        failure_code: row.get(22)?,
+        created_at: row.get(23)?,
+        completed_at: row.get(24)?,
+        replayed: false,
+    })
+}
+
+fn active_expense_ai_classification_item_ids(
+    connection: &Connection,
+    request_id: &str,
+) -> Result<BTreeSet<String>> {
+    let mut statement = connection.prepare(
+        "SELECT DISTINCT item_id
+         FROM expense_ai_classification_items
+         WHERE batch_request_id = ?1 AND disposition IS NULL
+         ORDER BY item_id",
+    )?;
+    statement
+        .query_map([request_id], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<BTreeSet<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn validate_expense_ai_classification_suggestions(
+    suggestions: &[ExpenseAiClassificationSuggestion],
+) -> Result<()> {
+    if suggestions.is_empty() || suggestions.len() > EXPENSE_AI_CLASSIFICATION_MAX_GROUPS {
+        return Err(invalid(format!(
+            "expense AI classification result must contain between 1 and {} items",
+            EXPENSE_AI_CLASSIFICATION_MAX_GROUPS
+        )));
+    }
+    let mut ids = HashSet::new();
+    for suggestion in suggestions {
+        validate_label(
+            "expense AI classification result item ID",
+            &suggestion.item_id,
+            128,
+        )?;
+        if !ids.insert(suggestion.item_id.as_str()) {
+            return Err(invalid(
+                "expense AI classification result item IDs must be unique",
+            ));
+        }
+        if suggestion.confidence > 100 {
+            return Err(invalid(
+                "expense AI classification confidence must be between 0 and 100",
+            ));
+        }
+        if !is_ai_purchase_category(suggestion.category) {
+            return Err(invalid(
+                "expense AI classification returned a non-purchase category",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn decode_expense_ai_classification_suggestions(
+    value: &str,
+) -> Result<Vec<ExpenseAiClassificationSuggestion>> {
+    let mut suggestions: Vec<ExpenseAiClassificationSuggestion> = serde_json::from_str(value)?;
+    suggestions.sort_by(|left, right| left.item_id.cmp(&right.item_id));
+    validate_expense_ai_classification_suggestions(&suggestions)?;
+    Ok(suggestions)
+}
+
+fn is_ai_purchase_category(category: ExpenseCategory) -> bool {
+    !matches!(
+        category,
+        ExpenseCategory::RefundIncome
+            | ExpenseCategory::TransferSettlement
+            | ExpenseCategory::Unconfirmed
+    )
+}
+
+fn validate_expense_ai_classification_usage(
+    input: &StageExpenseAiClassificationBatchInput,
+) -> Result<()> {
+    if input.usage.cached_input_tokens > input.usage.input_tokens {
+        return Err(invalid(
+            "expense AI classification cached input tokens cannot exceed input tokens",
+        ));
+    }
+    if input.usage.total_tokens
+        != input
+            .usage
+            .input_tokens
+            .checked_add(input.usage.output_tokens)
+            .ok_or_else(|| invalid("expense AI classification token totals overflowed"))?
+    {
+        return Err(invalid(
+            "expense AI classification total tokens must equal input plus output tokens",
+        ));
+    }
+    for (name, value) in [
+        ("classification input tokens", input.usage.input_tokens),
+        (
+            "classification cached input tokens",
+            input.usage.cached_input_tokens,
+        ),
+        ("classification output tokens", input.usage.output_tokens),
+        ("classification total tokens", input.usage.total_tokens),
+        ("classification cost", input.cost_microusd),
+        ("classification latency", input.latency_ms),
+    ] {
+        as_i64(value, name)?;
+    }
+    Ok(())
+}
+
+fn expense_ai_classification_batch_bindings(
+    connection: &Connection,
+    request_id: &str,
+) -> Result<Vec<ExpenseAiClassificationStoredBinding>> {
+    let mut statement = connection.prepare(
+        "SELECT batch_request_id, item_id, event_id, expected_event_version,
+                review_id, expected_review_version, disposition
+         FROM expense_ai_classification_items
+         WHERE batch_request_id = ?1
+         ORDER BY item_id, event_id, review_id",
+    )?;
+    statement
+        .query_map([request_id], |row| {
+            Ok(ExpenseAiClassificationStoredBinding {
+                batch_request_id: row.get(0)?,
+                item_id: row.get(1)?,
+                event_id: row.get(2)?,
+                expected_event_version: row.get(3)?,
+                review_id: row.get(4)?,
+                expected_review_version: row.get(5)?,
+                disposition: row
+                    .get::<_, Option<String>>(6)?
+                    .map(|value| parse_db_enum(value, 6))
+                    .transpose()?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn apply_expense_ai_classification_binding(
+    transaction: &Transaction<'_>,
+    binding: &ExpenseAiClassificationStoredBinding,
+    suggestion: &ExpenseAiClassificationSuggestion,
+    disposition: ExpenseAiClassificationDisposition,
+    applied_at: &str,
+) -> Result<()> {
+    match disposition {
+        ExpenseAiClassificationDisposition::Confirmed
+        | ExpenseAiClassificationDisposition::Provisional => {
+            let is_provisional = disposition == ExpenseAiClassificationDisposition::Provisional;
+            let changed_event = transaction.execute(
+                "UPDATE expense_events
+                 SET category = ?2, is_provisional = ?3,
+                     classification_source = 'ai', classification_confidence = ?4,
+                     updated_at = ?5, version = version + 1
+                 WHERE id = ?1 AND version = ?6
+                   AND event_kind = 'purchase' AND event_status = 'confirmed'",
+                params![
+                    binding.event_id,
+                    suggestion.category.as_str(),
+                    is_provisional,
+                    suggestion.confidence,
+                    applied_at,
+                    binding.expected_event_version,
+                ],
+            )?;
+            let changed_review = transaction.execute(
+                "UPDATE expense_reviews
+                 SET review_status = 'resolved', suggested_kind = 'purchase',
+                     suggested_category = ?2, resolved_kind = 'purchase',
+                     resolved_category = ?2, duplicate_of_event_id = NULL,
+                     create_rule = 0, resolved_at = ?3, version = version + 1
+                 WHERE id = ?1 AND version = ?4 AND review_status = 'pending'
+                   AND review_reason = 'category_confirmation'",
+                params![
+                    binding.review_id,
+                    suggestion.category.as_str(),
+                    applied_at,
+                    binding.expected_review_version,
+                ],
+            )?;
+            if changed_event != 1 || changed_review != 1 {
+                return Err(Error::Conflict(
+                    "expense AI classification candidate changed during apply".to_owned(),
+                ));
+            }
+        }
+        ExpenseAiClassificationDisposition::ReviewRequired => {
+            let changed_review = transaction.execute(
+                "UPDATE expense_reviews
+                 SET suggested_kind = 'purchase', suggested_category = ?2,
+                     version = version + 1
+                 WHERE id = ?1 AND version = ?3 AND review_status = 'pending'
+                   AND review_reason = 'category_confirmation'",
+                params![
+                    binding.review_id,
+                    suggestion.category.as_str(),
+                    binding.expected_review_version,
+                ],
+            )?;
+            if changed_review != 1 {
+                return Err(Error::Conflict(
+                    "expense AI classification review changed during apply".to_owned(),
+                ));
+            }
+        }
+        ExpenseAiClassificationDisposition::PrivacySkipped => {
+            return Err(Error::Invariant(
+                "privacy-skipped classification item cannot be applied by the model".to_owned(),
+            ));
+        }
+    }
+    let changed_item = transaction.execute(
+        "UPDATE expense_ai_classification_items
+         SET suggested_category = ?3, confidence = ?4,
+             disposition = ?5, applied_at = ?6
+         WHERE batch_request_id = ?1 AND review_id = ?2
+           AND disposition IS NULL",
+        params![
+            binding.batch_request_id,
+            binding.review_id,
+            suggestion.category.as_str(),
+            suggestion.confidence,
+            disposition.as_str(),
+            applied_at,
+        ],
+    )?;
+    if changed_item != 1 {
+        return Err(Error::Conflict(
+            "expense AI classification item changed during apply".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn map_expense_source_status(row: &Row<'_>) -> rusqlite::Result<ExpenseSourceStatus> {
@@ -1823,6 +3574,9 @@ fn has_any_expense_ledger_state_in_connection(connection: &Connection) -> Result
                 UNION ALL SELECT 1 FROM expense_ai_request_bindings
                 UNION ALL SELECT 1 FROM expense_ai_attempts
                 UNION ALL SELECT 1 FROM expense_mutation_receipts
+                UNION ALL SELECT 1 FROM expense_ai_classification_batches
+                UNION ALL SELECT 1 FROM expense_ai_classification_items
+                UNION ALL SELECT 1 FROM expense_ai_classification_receipts
              )",
             [],
             |row| row.get(0),
@@ -2244,12 +3998,7 @@ fn import_expenses_in_transaction(
     let mut excluded_count = 0_u32;
     let mut review_count = 0_u32;
     for row in new_rows {
-        let rule = if matches!(
-            row.kind,
-            ExpenseEventKind::Purchase
-                | ExpenseEventKind::UnknownP2p
-                | ExpenseEventKind::ExternalTransfer
-        ) {
+        let rule = if row.kind == ExpenseEventKind::Purchase {
             classification_rule(transaction, row)?
         } else {
             None
@@ -2289,8 +4038,8 @@ fn import_expenses_in_transaction(
             "INSERT INTO expense_events(
                 id, event_kind, category, event_status, amount_minor, currency,
                 occurred_at, posted_date, primary_posting_id, exclusion_reason,
-                created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)",
+                classification_source, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)",
             params![
                 event_id,
                 resolved_kind.as_str(),
@@ -2302,6 +4051,11 @@ fn import_expenses_in_transaction(
                 row.posted_date,
                 posting_id,
                 exclusion_reason,
+                if rule.is_some() {
+                    ExpenseClassificationSource::UserRule.as_str()
+                } else {
+                    ExpenseClassificationSource::Deterministic.as_str()
+                },
                 now,
             ],
         )?;
@@ -2511,6 +4265,12 @@ fn classification_rule(
     transaction: &Transaction<'_>,
     row: &NormalizedExpenseRow,
 ) -> Result<Option<(ExpenseEventKind, ExpenseCategory)>> {
+    if row.kind != ExpenseEventKind::Purchase
+        || row.direction != ExpenseDirection::Debit
+        || row.counterparty.is_some()
+    {
+        return Ok(None);
+    }
     let Some(merchant) = row.merchant.as_ref() else {
         return Ok(None);
     };
@@ -3565,6 +5325,8 @@ fn resolve_expense_review_in_transaction(
         "UPDATE expense_events
          SET event_kind = ?2, category = ?3, event_status = ?4,
              duplicate_of_event_id = ?5, exclusion_reason = ?6,
+             is_provisional = 0, classification_source = 'manual',
+             classification_confidence = NULL,
              updated_at = ?7, version = version + 1
          WHERE id = ?1",
         params![
@@ -3742,14 +5504,17 @@ fn resolve_matching_pending_category_confirmations(
              FROM expense_reviews AS r
              JOIN expense_events AS e ON e.id = r.event_id
              JOIN expense_postings AS p ON p.id = e.primary_posting_id
+             JOIN expense_raw_rows AS raw ON raw.id = p.raw_row_id
              WHERE r.id != ?1 AND e.id != ?2
                AND r.review_status = 'pending'
                AND r.review_reason = 'category_confirmation'
                AND e.event_kind = 'purchase'
                AND e.event_status = 'confirmed'
-               AND e.is_provisional = 0
                AND e.duplicate_of_event_id IS NULL
                AND e.exclusion_reason IS NULL
+               AND raw.normalized_kind = 'purchase'
+               AND p.direction = 'debit'
+               AND p.counterparty_key_version IS NULL
                AND p.merchant_blind_index = ?3
                AND p.payment_method_fingerprint = ?4
                AND NOT EXISTS(
@@ -3784,11 +5549,13 @@ fn resolve_matching_pending_category_confirmations(
     for (event_id, review_id) in candidates {
         let changed_event = transaction.execute(
             "UPDATE expense_events
-             SET category = ?2, updated_at = ?3, version = version + 1
+             SET category = ?2, is_provisional = 0,
+                 classification_source = 'user_rule',
+                 classification_confidence = NULL,
+                 updated_at = ?3, version = version + 1
              WHERE id = ?1
                AND event_kind = 'purchase'
                AND event_status = 'confirmed'
-               AND is_provisional = 0
                AND duplicate_of_event_id IS NULL
                AND exclusion_reason IS NULL",
             params![event_id, category.as_str(), resolved_at],
@@ -3842,11 +5609,15 @@ fn query_expense_review(connection: &Connection, review_id: &str) -> Result<Expe
         )
         .optional()?
         .ok_or_else(|| not_found("expense review", review_id))?;
+    let status = ExpenseReviewStatus::from_str(&raw.3)?;
+    let transaction = query_expense_transaction(connection, &raw.1)?;
+    let (suggestion_source, suggestion_confidence) =
+        review_classification_metadata(connection, &raw.0, status)?;
     Ok(ExpenseReview {
         id: raw.0,
         reason: ExpenseReviewReason::from_str(&raw.2)?,
-        status: ExpenseReviewStatus::from_str(&raw.3)?,
-        transaction: query_expense_transaction(connection, &raw.1)?,
+        status,
+        transaction,
         recurring_expense_id: raw.4,
         suggested_kind: raw
             .5
@@ -3857,10 +5628,40 @@ fn query_expense_review(connection: &Connection, review_id: &str) -> Result<Expe
             .map(|value| ExpenseCategory::from_str(&value))
             .transpose()?,
         suggested_duplicate_of_event_id: raw.7,
+        suggestion_source,
+        suggestion_confidence,
         created_at: raw.8,
         resolved_at: raw.9,
         version: raw.10,
     })
+}
+
+fn review_classification_metadata(
+    connection: &Connection,
+    review_id: &str,
+    status: ExpenseReviewStatus,
+) -> Result<(Option<ExpenseClassificationSource>, Option<u8>)> {
+    if status == ExpenseReviewStatus::Pending {
+        let confidence = connection
+            .query_row(
+                "SELECT item.confidence
+                 FROM expense_ai_classification_items AS item
+                 JOIN expense_ai_classification_batches AS batch
+                   ON batch.request_id = item.batch_request_id
+                 WHERE item.review_id = ?1
+                   AND batch.batch_status = 'applied'
+                   AND item.disposition = 'review_required'
+                 ORDER BY item.applied_at DESC, item.batch_request_id DESC
+                 LIMIT 1",
+                [review_id],
+                |row| row.get::<_, u8>(0),
+            )
+            .optional()?;
+        if let Some(confidence) = confidence {
+            return Ok((Some(ExpenseClassificationSource::Ai), Some(confidence)));
+        }
+    }
+    Ok((None, None))
 }
 
 fn query_expense_transaction(
@@ -3881,6 +5682,7 @@ fn query_expense_transaction(
                     p.memo_aad, p.memo_blind_index,
                     p.payment_method_fingerprint, e.exclusion_reason,
                     e.duplicate_of_event_id, e.is_provisional,
+                    e.classification_source, e.classification_confidence,
                     (SELECT r.id FROM expense_reviews AS r
                      WHERE r.event_id = e.id AND r.review_status = 'pending'
                      ORDER BY CASE r.review_reason
@@ -3952,10 +5754,12 @@ fn map_expense_transaction(row: &Row<'_>) -> rusqlite::Result<ExpenseTransaction
         exclusion_reason: row.get(27)?,
         duplicate_of_event_id: row.get(28)?,
         is_provisional: row.get(29)?,
-        pending_review_id: row.get(30)?,
-        personal_amount_minor: row.get(31)?,
-        related_event_id: row.get(32)?,
-        version: row.get(33)?,
+        classification_source: parse_db_enum(row.get::<_, String>(30)?, 30)?,
+        classification_confidence: row.get(31)?,
+        pending_review_id: row.get(32)?,
+        personal_amount_minor: row.get(33)?,
+        related_event_id: row.get(34)?,
+        version: row.get(35)?,
         crypto_context,
     })
 }
@@ -4688,9 +6492,10 @@ fn confirm_recurring_paid_in_transaction(
     transaction.execute(
         "INSERT INTO expense_events(
             id, event_kind, category, event_status, amount_minor, currency,
-            occurred_at, posted_date, is_provisional, created_at, updated_at
+            occurred_at, posted_date, is_provisional, classification_source,
+            created_at, updated_at
          ) VALUES (?1, 'manual_recurring', ?2, 'confirmed', ?3, ?4,
-                   ?5, ?6, 1, ?7, ?7)",
+                   ?5, ?6, 1, 'manual', ?7, ?7)",
         params![
             event_id,
             item.category.as_str(),
@@ -4854,6 +6659,8 @@ fn match_recurring_in_transaction(
         "UPDATE expense_events
          SET event_kind = 'purchase', category = ?2, event_status = 'confirmed',
              exclusion_reason = NULL, duplicate_of_event_id = NULL,
+             is_provisional = 0, classification_source = 'deterministic',
+             classification_confidence = NULL,
              updated_at = ?3, version = version + 1
          WHERE id = ?1",
         params![event.id, item.category.as_str(), now],
@@ -5842,8 +7649,22 @@ pub(crate) fn expense_month_summary_in_connection(
          FROM expense_reviews AS r
          JOIN expense_events AS e ON e.id = r.event_id
          WHERE r.review_status = 'pending'
-           AND r.review_reason IN (
-               'unknown_p2p', 'ambiguous_mirror', 'import_rejected'
+           AND (
+               r.review_reason IN (
+                   'unknown_p2p', 'ambiguous_mirror', 'import_rejected'
+               )
+               OR (r.review_reason = 'category_confirmation' AND EXISTS(
+                   SELECT 1
+                   FROM expense_ai_classification_items AS classified
+                   JOIN expense_ai_classification_batches AS batch
+                     ON batch.request_id = classified.batch_request_id
+                   WHERE classified.review_id = r.id
+                     AND (
+                         classified.disposition = 'privacy_skipped'
+                         OR (batch.batch_status = 'applied'
+                             AND classified.disposition = 'review_required')
+                     )
+               ))
            )
            AND e.posted_date >= ?1 AND e.posted_date < ?2",
         params![requested_month, month_after],
@@ -5868,6 +7689,13 @@ pub(crate) fn expense_month_summary_in_connection(
         params![requested_month, month_after],
         |row| row.get(0),
     )?;
+    let provisional_event_count: u32 = connection.query_row(
+        "SELECT count(*) FROM expense_events
+         WHERE event_status = 'confirmed' AND is_provisional = 1
+           AND posted_date >= ?1 AND posted_date < ?2",
+        params![requested_month, month_after],
+        |row| row.get(0),
+    )?;
     let report_status = if active_source_count == 0
         || present_source_count < active_source_count
         || rejected_row_count > 0
@@ -5876,6 +7704,7 @@ pub(crate) fn expense_month_summary_in_connection(
     } else if covered_source_count < active_source_count
         || pending_review_count > 0
         || unconfirmed_event_count > 0
+        || provisional_event_count > 0
     {
         ExpenseReportStatus::Provisional
     } else {

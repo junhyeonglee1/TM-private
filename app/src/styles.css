@@ -1264,6 +1264,24 @@ button.search-result:hover { background: var(--surface-subtle); }
 .expense-transaction-list strong { font-size: 10px; }
 .expense-transaction--unconfirmed { background: var(--warning-soft); border-color: color-mix(in srgb, var(--warning) 28%, var(--border)) !important; }
 .expense-more { display: block; margin: 12px auto 0; }
+.expense-classification-panel { align-items: center; background: var(--surface-subtle); border: 1px solid var(--border); border-radius: 10px; display: grid; gap: 10px; grid-template-columns: minmax(0, 1fr) auto; margin: 12px 0; padding: 11px; }
+.expense-classification-panel > div:first-child { display: grid; gap: 3px; }
+.expense-classification-panel > div:first-child strong { font-size: 10px; }
+.expense-classification-panel p { color: var(--text-faint); font-size: 8px; margin: 0; }
+.expense-classification-result { border-left: 3px solid var(--accent); display: grid; gap: 8px; grid-column: 1 / -1; padding: 6px 8px; }
+.expense-classification-result--no_candidates { border-left-color: var(--success); }
+.expense-classification-result--stale { border-left-color: var(--warning); }
+.expense-classification-result > div:first-child { display: flex; flex-wrap: wrap; gap: 7px; justify-content: space-between; }
+.expense-classification-result > div:first-child strong { font-size: 9px; }
+.expense-classification-result span, .expense-classification-result small { color: var(--text-faint); font-size: 8px; }
+.expense-classification-metrics { display: flex; flex-wrap: wrap; gap: 6px; }
+.expense-classification-metrics span { background: var(--surface); border-radius: 6px; padding: 5px 7px; }
+.expense-classification-metrics strong { color: var(--text); }
+.expense-transaction-list .expense-classification-badge, .expense-review-card .expense-classification-badge { border-radius: 999px; color: var(--text-soft); display: inline-flex; font-size: 7px; font-weight: 800; margin-top: 3px; padding: 3px 6px; width: max-content; }
+.expense-classification-badge--deterministic { background: var(--surface-subtle); }
+.expense-classification-badge--user_rule { background: var(--success-soft); color: var(--success) !important; }
+.expense-classification-badge--manual { background: var(--warning-soft); color: var(--warning) !important; }
+.expense-classification-badge--ai { background: var(--accent-soft); color: var(--accent-text) !important; }
 .expense-review-list { display: grid; gap: 8px; }
 .expense-review-card { align-items: end; border: 1px solid var(--border); border-radius: 10px; display: grid; gap: 9px; grid-template-columns: minmax(150px, 1.5fr) minmax(110px, 1fr) minmax(110px, 1fr) auto auto; padding: 11px; }
 .expense-review-card > div { display: grid; gap: 2px; }
@@ -1346,6 +1364,7 @@ button.search-result:hover { background: var(--surface-subtle); }
   .expense-review-card { grid-template-columns: 1fr; }
   .expense-source-list article, .expense-transaction-override { grid-template-columns: 1fr; }
   .expense-review-card > div, .recurring-form__note, .recurring-form__check, .recurring-form__actions { grid-column: auto; }
+  .expense-classification-panel { align-items: stretch; grid-template-columns: 1fr; }
   .recurring-occurrence-list article { align-items: flex-start; display: grid; gap: 8px; }
   .recurring-match-form { margin-top: 0; width: 100%; }
   .expense-import-counts { grid-template-columns: repeat(2, 1fr); }

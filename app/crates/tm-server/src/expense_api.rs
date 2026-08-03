@@ -13,15 +13,15 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use tm_core::{
     ConfirmRecurringPaidInput, CreateRecurringExpenseInput, EncryptedExpenseText,
-    Error as CoreError, ExpenseCategory, ExpenseEventKind, ExpenseImportPreview,
-    ExpenseImportPreviewInput, ExpenseMonthSummary, ExpenseMutationCommand, ExpenseMutationRequest,
-    ExpenseReview, ExpenseReviewFilter, ExpenseReviewPage, ExpenseReviewScope, ExpenseReviewStatus,
-    ExpenseSourceKind, ExpenseSourceStatus, ExpenseTransaction, ExpenseTransactionFilter,
-    ExpenseTransactionPage, MatchRecurringExpenseInput, NormalizedExpenseImport,
-    NormalizedExpenseRow, OverrideExpenseTransactionInput, RecurringAmountKind, RecurringDueRule,
-    RecurringExpenseItem, RecurringExpenseOccurrence, RecurringExpenseStatus,
-    ResolveExpenseReviewInput, TmCore, UpdateExpenseSourceStatusInput, UpdateRecurringExpenseInput,
-    expense_text_aad,
+    Error as CoreError, ExpenseCategory, ExpenseClassificationSource, ExpenseEventKind,
+    ExpenseImportPreview, ExpenseImportPreviewInput, ExpenseMonthSummary, ExpenseMutationCommand,
+    ExpenseMutationRequest, ExpenseReview, ExpenseReviewFilter, ExpenseReviewPage,
+    ExpenseReviewScope, ExpenseReviewStatus, ExpenseSourceKind, ExpenseSourceStatus,
+    ExpenseTransaction, ExpenseTransactionFilter, ExpenseTransactionPage,
+    MatchRecurringExpenseInput, NormalizedExpenseImport, NormalizedExpenseRow,
+    OverrideExpenseTransactionInput, RecurringAmountKind, RecurringDueRule, RecurringExpenseItem,
+    RecurringExpenseOccurrence, RecurringExpenseStatus, ResolveExpenseReviewInput, TmCore,
+    UpdateExpenseSourceStatusInput, UpdateRecurringExpenseInput, expense_text_aad,
 };
 use zeroize::Zeroizing;
 
@@ -123,6 +123,11 @@ pub(super) fn routes() -> Router<AppState> {
             post(super::expense_report::feedback)
                 .layer(DefaultBodyLimit::max(MAX_EXPENSE_MUTATION_BODY_BYTES)),
         )
+        .route(
+            "/api/v1/expenses/classifications:run",
+            post(super::expense_classification::run)
+                .layer(DefaultBodyLimit::max(MAX_EXPENSE_MUTATION_BODY_BYTES)),
+        )
 }
 
 #[derive(Debug, Deserialize)]
@@ -170,6 +175,8 @@ pub(super) struct ExpenseTransactionDto {
     personal_amount_minor: Option<i64>,
     related_event_id: Option<String>,
     is_provisional: bool,
+    classification_source: ExpenseClassificationSource,
+    classification_confidence: Option<u8>,
     pending_review_id: Option<String>,
     version: u64,
 }
@@ -192,6 +199,8 @@ struct ExpenseReviewDto {
     suggested_kind: Option<ExpenseEventKind>,
     suggested_category: Option<ExpenseCategory>,
     suggested_duplicate_of_event_id: Option<String>,
+    suggestion_source: Option<ExpenseClassificationSource>,
+    suggestion_confidence: Option<u8>,
     created_at: String,
     resolved_at: Option<String>,
     version: u64,
@@ -1518,6 +1527,8 @@ fn decrypt_transaction(
         personal_amount_minor: item.personal_amount_minor,
         related_event_id: item.related_event_id,
         is_provisional: item.is_provisional,
+        classification_source: item.classification_source,
+        classification_confidence: item.classification_confidence,
         pending_review_id: item.pending_review_id,
         version: item.version,
     })
@@ -1537,6 +1548,8 @@ fn decrypt_review(
         suggested_kind: item.suggested_kind,
         suggested_category: item.suggested_category,
         suggested_duplicate_of_event_id: item.suggested_duplicate_of_event_id,
+        suggestion_source: item.suggestion_source,
+        suggestion_confidence: item.suggestion_confidence,
         created_at: item.created_at,
         resolved_at: item.resolved_at,
         version: item.version,
@@ -1647,7 +1660,7 @@ pub(super) fn expense_crypto<'a>(
         .map_err(|error| map_crypto_error(*error, request_id))
 }
 
-fn map_crypto_error(error: ExpenseCryptoError, request_id: &RequestId) -> ApiError {
+pub(super) fn map_crypto_error(error: ExpenseCryptoError, request_id: &RequestId) -> ApiError {
     tracing::error!(
         error_kind = ?error,
         request_id = %request_id.0,
@@ -2068,6 +2081,7 @@ pub(super) fn route_allowed_for_device(method: &Method, path: &str) -> bool {
         }
         "/api/v1/expenses/reports/latest" => *method == Method::GET,
         "/api/v1/expenses/reports" => *method == Method::POST,
+        "/api/v1/expenses/classifications:run" => *method == Method::POST,
         "/api/v1/expenses/imports" => false,
         "/api/v1/expenses/imports/preview" => false,
         value if single_path_parameter(value, "/api/v1/expenses/reviews/", "/resolve") => {
@@ -2193,6 +2207,14 @@ mod tests {
         assert!(route_allowed_for_device(
             &axum::http::Method::POST,
             "/api/v1/expenses/reports/report-id/feedback"
+        ));
+        assert!(route_allowed_for_device(
+            &axum::http::Method::POST,
+            "/api/v1/expenses/classifications:run"
+        ));
+        assert!(!route_allowed_for_device(
+            &axum::http::Method::GET,
+            "/api/v1/expenses/classifications:run"
         ));
         assert!(!route_allowed_for_device(
             &axum::http::Method::POST,

@@ -11,10 +11,13 @@ use std::{
 
 mod assistant_actions;
 pub mod auth;
+#[cfg(test)]
+mod classification_orchestration_tests;
 pub mod costs;
 mod desktop_api;
 mod device_api;
 mod expense_api;
+mod expense_classification;
 mod expense_crypto;
 mod expense_report;
 mod import_api;
@@ -43,10 +46,11 @@ use axum::{
 use chrono::{DateTime, FixedOffset, Utc};
 use serde::{Deserialize, Serialize};
 use tm_core::{
-    ASSISTANT_ACTION_APPROVAL_TTL_SECONDS, AiBudgetStatus, AiTokenUsage, DesktopCommand,
-    Error as CoreError, ExpenseCryptoProbe, HealthReport, STOCK_AI_MONTHLY_HARD_LIMIT_MICROUSD,
-    STOCK_AI_OPERATION, SchedulerStatus, StockScreenAttemptSummary, StockScreenCoverage,
-    TaskReportCompletion, TaskReportStart, TmCore, expense_text_aad,
+    ASSISTANT_ACTION_APPROVAL_TTL_SECONDS, AiBudgetStatus, AiOperationBudgetStatus, AiTokenUsage,
+    DesktopCommand, Error as CoreError, ExpenseAiClassificationOpsStatus, ExpenseCryptoProbe,
+    HealthReport, STOCK_AI_MONTHLY_HARD_LIMIT_MICROUSD, STOCK_AI_OPERATION, SchedulerStatus,
+    StockScreenAttemptSummary, StockScreenCoverage, TaskReportCompletion, TaskReportStart, TmCore,
+    expense_text_aad,
 };
 use uuid::Uuid;
 
@@ -83,6 +87,7 @@ pub const IMPORT_MAINTENANCE_MODE: &str = "import";
 pub const INCIDENT_MODE_ENV: &str = "TM_INCIDENT_MODE";
 pub const AI_ENABLED_ENV: &str = "TM_AI_ENABLED";
 pub const EXPENSE_AI_ENABLED_ENV: &str = "TM_EXPENSE_AI_ENABLED";
+pub const EXPENSE_CLASSIFICATION_AI_ENABLED_ENV: &str = "TM_EXPENSE_CLASSIFICATION_AI_ENABLED";
 pub const EXPENSE_ROLLOUT_MODE_ENV: &str = "TM_EXPENSE_ROLLOUT_MODE";
 pub const EXPENSE_ACTIVATION_FINGERPRINT_ENV: &str = "TM_EXPENSE_ACTIVATION_FINGERPRINT";
 pub const TASK_REPORT_ENABLED_ENV: &str = "TM_TASK_REPORT_ENABLED";
@@ -259,6 +264,7 @@ pub struct ServerConfig {
     pub incident_mode: IncidentMode,
     pub ai_enabled: bool,
     pub expense_ai_enabled: bool,
+    pub expense_classification_ai_enabled: bool,
     pub expense_rollout: ExpenseRolloutConfig,
     pub task_report_enabled: bool,
     pub stock: StockConfig,
@@ -334,6 +340,25 @@ impl ServerConfig {
                 ));
             }
         };
+        let expense_classification_ai_enabled = match optional_env(
+            EXPENSE_CLASSIFICATION_AI_ENABLED_ENV,
+        )? {
+            None => false,
+            Some(value) if profile == ServerProfile::CloudAuthenticated => match value.as_str() {
+                "true" => true,
+                "false" => false,
+                _ => {
+                    return Err(format!(
+                        "{EXPENSE_CLASSIFICATION_AI_ENABLED_ENV} must be true or false"
+                    ));
+                }
+            },
+            Some(_) => {
+                return Err(format!(
+                    "{EXPENSE_CLASSIFICATION_AI_ENABLED_ENV} is only allowed in cloud-authenticated"
+                ));
+            }
+        };
         let expense_rollout = if profile == ServerProfile::CloudAuthenticated {
             ExpenseRolloutConfig::cloud_from_env(maintenance_mode)?
         } else {
@@ -342,6 +367,11 @@ impl ServerConfig {
         if expense_ai_enabled && !ai_enabled {
             return Err(format!(
                 "{EXPENSE_AI_ENABLED_ENV}=true requires {AI_ENABLED_ENV}=true"
+            ));
+        }
+        if expense_classification_ai_enabled && !ai_enabled {
+            return Err(format!(
+                "{EXPENSE_CLASSIFICATION_AI_ENABLED_ENV}=true requires {AI_ENABLED_ENV}=true"
             ));
         }
         let stock = StockConfig::from_env()?;
@@ -419,7 +449,12 @@ impl ServerConfig {
                 "OPENAI_API_KEY is required when {STOCK_AI_ENABLED_ENV}=true"
             ));
         }
-        validate_expense_ai_provider_configuration(profile, expense_ai_enabled, &openai)?;
+        validate_expense_ai_provider_configuration(
+            profile,
+            expense_ai_enabled,
+            expense_classification_ai_enabled,
+            &openai,
+        )?;
 
         Ok(Self {
             profile,
@@ -431,6 +466,7 @@ impl ServerConfig {
             incident_mode,
             ai_enabled,
             expense_ai_enabled,
+            expense_classification_ai_enabled,
             expense_rollout,
             task_report_enabled,
             stock,
@@ -442,11 +478,15 @@ impl ServerConfig {
 fn validate_expense_ai_provider_configuration(
     profile: ServerProfile,
     expense_ai_enabled: bool,
+    expense_classification_ai_enabled: bool,
     openai: &OpenAiConfig,
 ) -> Result<(), String> {
-    if profile == ServerProfile::CloudAuthenticated && expense_ai_enabled && !openai.configured() {
+    if profile == ServerProfile::CloudAuthenticated
+        && (expense_ai_enabled || expense_classification_ai_enabled)
+        && !openai.configured()
+    {
         return Err(format!(
-            "OPENAI_API_KEY is required when {EXPENSE_AI_ENABLED_ENV}=true"
+            "OPENAI_API_KEY is required when {EXPENSE_AI_ENABLED_ENV}=true or {EXPENSE_CLASSIFICATION_AI_ENABLED_ENV}=true"
         ));
     }
     Ok(())
@@ -465,6 +505,7 @@ struct AppState {
     incident_mode: IncidentMode,
     ai_enabled: bool,
     expense_ai_enabled: bool,
+    expense_classification_ai_enabled: bool,
     task_report_enabled: bool,
     stock: StockConfig,
     railway_usage: RailwayUsageClient,
@@ -520,6 +561,7 @@ impl AppState {
             incident_mode: IncidentMode::Normal,
             ai_enabled: false,
             expense_ai_enabled: false,
+            expense_classification_ai_enabled: false,
             task_report_enabled: false,
             stock: StockConfig::default(),
             railway_usage: RailwayUsageClient::disabled(),
@@ -578,6 +620,7 @@ impl AppState {
             incident_mode,
             ai_enabled,
             expense_ai_enabled: ai_enabled,
+            expense_classification_ai_enabled: false,
             task_report_enabled,
             stock,
             railway_usage,
@@ -801,6 +844,7 @@ struct RuntimeControlState {
     incident_mode: IncidentMode,
     ai_enabled: bool,
     expense_ai_enabled: bool,
+    expense_classification_ai_enabled: bool,
     expense_rollout_mode: ExpenseRolloutMode,
     task_report_enabled: bool,
     security: SecurityMonitor,
@@ -991,6 +1035,8 @@ struct OperationsStatus {
     controls: OperationsControls,
     security: SecurityStatus,
     ai_budget: AiBudgetStatus,
+    expense_classification_budget: AiOperationBudgetStatus,
+    expense_classification: ExpenseAiClassificationOpsStatus,
     database: OperationsDatabaseStatus,
     scheduler: SchedulerStatus,
     local_backup: LocalBackupStatus,
@@ -1028,6 +1074,7 @@ struct OperationsControls {
     incident_mode: &'static str,
     ai_enabled: bool,
     expense_ai_enabled: bool,
+    expense_classification_ai_enabled: bool,
     expense_rollout_mode: &'static str,
     expense_crypto_ready: bool,
     expense_key_fingerprint: Option<String>,
@@ -1064,6 +1111,7 @@ struct SecurityStatus {
 struct OperationsDatabaseStatus {
     ok: bool,
     schema_version: i64,
+    current_schema_migration_name: Option<String>,
     current_schema_applied_at: Option<String>,
     journal_mode: String,
     checked_at: String,
@@ -1255,6 +1303,7 @@ pub fn build_cloud_authenticated_router_with_feature_controls_costs_and_stock(
         railway_usage,
         stock,
         ai_enabled,
+        false,
         ExpenseRolloutConfig::local_enabled(),
     )
 }
@@ -1270,6 +1319,7 @@ pub fn build_cloud_authenticated_router_with_feature_controls_costs_stock_and_ex
     railway_usage: RailwayUsageClient,
     stock: StockConfig,
     expense_ai_enabled: bool,
+    expense_classification_ai_enabled: bool,
     expense_rollout: ExpenseRolloutConfig,
 ) -> Router {
     let security = SecurityMonitor::new();
@@ -1284,6 +1334,7 @@ pub fn build_cloud_authenticated_router_with_feature_controls_costs_stock_and_ex
         incident_mode,
         ai_enabled,
         expense_ai_enabled,
+        expense_classification_ai_enabled,
         expense_rollout_mode: expense_rollout.mode,
         task_report_enabled,
         security: security.clone(),
@@ -1385,6 +1436,7 @@ pub fn build_cloud_authenticated_router_with_feature_controls_costs_stock_and_ex
             );
             state.expense_crypto_required = true;
             state.expense_ai_enabled = expense_ai_enabled;
+            state.expense_classification_ai_enabled = expense_classification_ai_enabled;
             state
         })
         .layer(write_api::body_limit())
@@ -1590,7 +1642,7 @@ async fn deployment_readyz(
             }
         };
     if !health.ok
-        || (expense_crypto_required && health.schema_version != 15)
+        || (expense_crypto_required && health.schema_version != 16)
         || !key_binding_ready
         || !key_state_ready
     {
@@ -2411,6 +2463,11 @@ async fn operations_status(
         let ai_budget = state
             .core
             .ai_budget_status(state.openai.config().budget_policy())?;
+        let expense_classification_budget = state.core.ai_operation_budget_status(
+            expense_classification::EXPENSE_CLASSIFICATION_OPERATION,
+            expense_classification::EXPENSE_CLASSIFICATION_MONTHLY_HARD_LIMIT_MICROUSD,
+        )?;
+        let expense_classification = state.core.expense_ai_classification_ops_status()?;
         let stock_budget = state
             .core
             .ai_operation_budget_status(STOCK_AI_OPERATION, STOCK_AI_MONTHLY_HARD_LIMIT_MICROUSD)?;
@@ -2466,6 +2523,7 @@ async fn operations_status(
         let latest_pre_migration_verification = latest_pre_migration
             .and_then(|backup| state.core.verify_database_backup(&backup.path).ok());
         let current_schema_applied_at = state.core.migration_applied_at(health.schema_version)?;
+        let current_schema_migration_name = state.core.migration_name(health.schema_version)?;
         let remote_status_path = state
             .core
             .home()
@@ -2527,6 +2585,7 @@ async fn operations_status(
                 incident_mode: state.incident_mode.as_str(),
                 ai_enabled: state.ai_enabled,
                 expense_ai_enabled: state.expense_ai_enabled,
+                expense_classification_ai_enabled: state.expense_classification_ai_enabled,
                 expense_rollout_mode: state.expense_rollout_mode.as_str(),
                 expense_crypto_ready: state.expense_crypto.is_ok(),
                 expense_key_fingerprint: state.expense_key_fingerprint.clone(),
@@ -2549,9 +2608,12 @@ async fn operations_status(
             },
             security,
             ai_budget,
+            expense_classification_budget,
+            expense_classification,
             database: OperationsDatabaseStatus {
                 ok: health.ok,
                 schema_version: health.schema_version,
+                current_schema_migration_name,
                 current_schema_applied_at,
                 journal_mode: health.journal_mode,
                 checked_at: health.checked_at,
@@ -3205,6 +3267,14 @@ async fn runtime_controls_guard(
                 "expense report AI commentary is disabled",
             ))
     });
+    let blocked = blocked.or_else(|| {
+        (!runtime.expense_classification_ai_enabled
+            && expense_classification_ai_execution_path(request.method(), path))
+        .then_some((
+            "EXPENSE_CLASSIFICATION_AI_DISABLED",
+            "expense classification AI is disabled",
+        ))
+    });
     if let Some((code, message)) = blocked {
         runtime.security.incident_blocked();
         tracing::warn!(
@@ -3212,6 +3282,7 @@ async fn runtime_controls_guard(
             incident_mode = runtime.incident_mode.as_str(),
             ai_enabled = runtime.ai_enabled,
             expense_ai_enabled = runtime.expense_ai_enabled,
+            expense_classification_ai_enabled = runtime.expense_classification_ai_enabled,
             expense_rollout_mode = runtime.expense_rollout_mode.as_str(),
             task_report_enabled = runtime.task_report_enabled,
             method = %request.method(),
@@ -3249,11 +3320,16 @@ fn ai_execution_path(method: &Method, path: &str) -> bool {
                 | "/api/v1/assistant/query"
                 | "/api/v1/assistant/task-report"
                 | "/api/v1/expenses/reports"
+                | "/api/v1/expenses/classifications:run"
         ) || (path.starts_with("/api/v1/assistant/actions/") && path.ends_with("/approve")))
 }
 
 fn expense_ai_execution_path(method: &Method, path: &str) -> bool {
     *method == Method::POST && path == "/api/v1/expenses/reports"
+}
+
+fn expense_classification_ai_execution_path(method: &Method, path: &str) -> bool {
+    *method == Method::POST && path == "/api/v1/expenses/classifications:run"
 }
 
 fn auth_decision_error(decision: AuthDecision, request_id: String) -> Response {
@@ -3448,6 +3524,7 @@ fn safe_route_family(path: &str) -> &'static str {
         "/api/v1/expenses/recurring/occurrences" => "/api/v1/expenses/recurring/occurrences",
         "/api/v1/expenses/reports" => "/api/v1/expenses/reports",
         "/api/v1/expenses/reports/latest" => "/api/v1/expenses/reports/latest",
+        "/api/v1/expenses/classifications:run" => "/api/v1/expenses/classifications:run",
         "/api/v1/ai/probe" => "/api/v1/ai/probe",
         "/api/v1/assistant/query" => "/api/v1/assistant/query",
         "/api/v1/assistant/task-report" => "/api/v1/assistant/task-report",
@@ -3538,6 +3615,7 @@ fn valid_request_id(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::HashSet,
         fs,
         path::Path,
         sync::{
@@ -3611,6 +3689,7 @@ mod tests {
             true,
             RailwayUsageClient::disabled(),
             StockConfig::default(),
+            false,
             false,
             rollout,
         )
@@ -3829,6 +3908,12 @@ mod tests {
         payload: Arc<Mutex<Option<Value>>>,
     }
 
+    #[derive(Clone, Default)]
+    struct MockExpenseClassificationCapture {
+        calls: Arc<AtomicUsize>,
+        payload: Arc<Mutex<Option<Value>>>,
+    }
+
     fn test_core() -> (tempfile::TempDir, TmCore) {
         let test_runs = Path::new(DEFAULT_TM_HOME).join("dist").join("test-runs");
         fs::create_dir_all(&test_runs).expect("create test-runs directory");
@@ -3941,6 +4026,60 @@ mod tests {
                     "input_tokens_details": {"cached_tokens": 2},
                     "output_tokens": 4,
                     "total_tokens": 16
+                }
+            })),
+        )
+    }
+
+    async fn mock_expense_classification_response(
+        State(capture): State<MockExpenseClassificationCapture>,
+        headers: HeaderMap,
+        Json(payload): Json<Value>,
+    ) -> impl IntoResponse {
+        assert_eq!(
+            headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer test-api-key")
+        );
+        capture.calls.fetch_add(1, Ordering::SeqCst);
+        *capture.payload.lock().expect("lock classification payload") = Some(payload.clone());
+        let input: Value = serde_json::from_str(
+            payload["input"][0]["content"]
+                .as_str()
+                .expect("classification input string"),
+        )
+        .expect("parse classification input");
+        let result_items = input["items"]
+            .as_array()
+            .expect("classification input items")
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                json!({
+                    "itemId": item["itemId"],
+                    "category": if index == 0 { "cafe" } else { "food" },
+                    "confidence": if index == 0 { 95 } else { 80 },
+                })
+            })
+            .collect::<Vec<_>>();
+        let output_text = serde_json::to_string(&json!({"items": result_items}))
+            .expect("serialize classification result");
+        (
+            [("x-request-id", "openai-expense-classification-1")],
+            Json(json!({
+                "id": "resp_expense_classification_1",
+                "status": "completed",
+                "model": "gpt-5.4-nano-2026-03-17",
+                "output": [{
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": output_text}]
+                }],
+                "usage": {
+                    "input_tokens": 100,
+                    "input_tokens_details": {"cached_tokens": 0},
+                    "output_tokens": 20,
+                    "total_tokens": 120
                 }
             })),
         )
@@ -4214,7 +4353,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
         assert_eq!(body["data"]["status"], "ready");
-        assert_eq!(body["data"]["schemaVersion"], 15);
+        assert_eq!(body["data"]["schemaVersion"], 16);
         assert_eq!(body["data"]["journalMode"], "wal");
     }
 
@@ -5054,6 +5193,7 @@ mod tests {
         let error = validate_expense_ai_provider_configuration(
             ServerProfile::CloudAuthenticated,
             true,
+            false,
             &unavailable,
         )
         .expect_err("enabled cloud expense AI must require OpenAI configuration");
@@ -5061,6 +5201,7 @@ mod tests {
         assert!(
             validate_expense_ai_provider_configuration(
                 ServerProfile::CloudAuthenticated,
+                false,
                 false,
                 &unavailable,
             )
@@ -5077,10 +5218,19 @@ mod tests {
             validate_expense_ai_provider_configuration(
                 ServerProfile::CloudAuthenticated,
                 true,
+                false,
                 &configured,
             )
             .is_ok()
         );
+        let error = validate_expense_ai_provider_configuration(
+            ServerProfile::CloudAuthenticated,
+            false,
+            true,
+            &unavailable,
+        )
+        .expect_err("enabled cloud expense classification must require OpenAI configuration");
+        assert!(error.contains("TM_EXPENSE_CLASSIFICATION_AI_ENABLED=true"));
     }
 
     #[tokio::test]
@@ -5270,7 +5420,11 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
         assert_eq!(body["data"]["database"]["ok"], true);
-        assert_eq!(body["data"]["database"]["schemaVersion"], 15);
+        assert_eq!(body["data"]["database"]["schemaVersion"], 16);
+        assert_eq!(
+            body["data"]["database"]["currentSchemaMigrationName"],
+            "expense-ai-hybrid-classification"
+        );
         assert!(body["data"]["database"]["currentSchemaAppliedAt"].is_string());
         assert_eq!(body["data"]["localBackup"]["preMigrationCount"], 0);
         assert!(body["data"]["localBackup"]["latestPreMigrationCreatedAt"].is_null());
@@ -5291,6 +5445,26 @@ mod tests {
                 .is_some()
         );
         assert_eq!(body["data"]["controls"]["expenseLedgerEmpty"], true);
+        assert_eq!(
+            body["data"]["controls"]["expenseClassificationAiEnabled"],
+            false
+        );
+        assert_eq!(
+            body["data"]["expenseClassificationBudget"]["operation"],
+            "expense_classification"
+        );
+        assert_eq!(
+            body["data"]["expenseClassificationBudget"]["hardLimitMicrousd"],
+            250_000
+        );
+        assert_eq!(
+            body["data"]["expenseClassificationBudget"]["committedMicrousd"],
+            0
+        );
+        assert_eq!(body["data"]["expenseClassification"]["claimedCount"], 0);
+        assert_eq!(body["data"]["expenseClassification"]["stagedCount"], 0);
+        assert!(body["data"]["expenseClassification"]["oldestOpenCreatedAt"].is_null());
+        assert!(body["data"]["expenseClassification"]["latest"].is_null());
         assert_eq!(body["data"]["controls"]["expenseKeyInitialized"], true);
         assert!(
             body["data"]["controls"]["expenseKeyFingerprint"]
@@ -5308,6 +5482,17 @@ mod tests {
             !serialized
                 .contains("9dbdfe3b08213d08a84217a7f1b735f86e2ed20b4a87ffedee422661a7219d49")
         );
+        let classification = body["data"]["expenseClassification"].to_string();
+        for forbidden in [
+            "requestId",
+            "inputSha256",
+            "merchant",
+            "counterparty",
+            "eventId",
+            "reviewId",
+        ] {
+            assert!(!classification.contains(forbidden));
+        }
     }
 
     #[test]
@@ -6627,7 +6812,7 @@ mod tests {
                 .to_vec(),
         )
         .expect("service worker is UTF-8");
-        assert!(service_worker.contains(r#"tm-mobile-shell-v15-expense-review-v2"#));
+        assert!(service_worker.contains(r#"tm-mobile-shell-v16-expense-classification-v1"#));
         assert!(service_worker.contains(r#"request.method !== "GET""#));
 
         let stock_catalog = router
@@ -8384,6 +8569,10 @@ mod tests {
         for (path, body) in [
             ("/api/v1/expenses/recurring", recurring_expense_body()),
             ("/api/v1/expenses/reports", json!({"month": "2026-08"})),
+            (
+                "/api/v1/expenses/classifications:run",
+                json!({"month": "2026-08"}),
+            ),
             ("/api/v1/expenses/imports/preview", expense_preview_body()),
         ] {
             let blocked = read_only
@@ -8417,6 +8606,7 @@ mod tests {
                 RailwayUsageClient::disabled(),
                 StockConfig::default(),
                 false,
+                false,
                 ExpenseRolloutConfig::local_enabled(),
             );
         let blocked_ai = ai_disabled
@@ -8439,6 +8629,80 @@ mod tests {
         assert_eq!(
             response_json(blocked_ai).await["error"]["code"],
             "EXPENSE_AI_DISABLED"
+        );
+
+        let classification_disabled =
+            build_cloud_authenticated_router_with_feature_controls_costs_stock_and_expenses(
+                core.clone(),
+                test_auth_config(),
+                OpenAiClient::disabled(),
+                IncidentMode::Normal,
+                true,
+                true,
+                RailwayUsageClient::disabled(),
+                StockConfig::default(),
+                true,
+                false,
+                ExpenseRolloutConfig::local_enabled(),
+            );
+        let blocked_classification = classification_disabled
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/expenses/classifications:run")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "expense-classification-disabled")
+                    .header("if-none-match", "*")
+                    .header("x-tm-confirm-mutation", "expense-classification-run")
+                    .header("x-tm-confirm-ai-call", "expense-classification")
+                    .body(Body::from(r#"{"month":"2026-08"}"#))
+                    .expect("build disabled expense classification request"),
+            )
+            .await
+            .expect("call disabled expense classification route");
+        assert_eq!(
+            blocked_classification.status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            response_json(blocked_classification).await["error"]["code"],
+            "EXPENSE_CLASSIFICATION_AI_DISABLED"
+        );
+
+        let global_ai_disabled =
+            build_cloud_authenticated_router_with_feature_controls_costs_stock_and_expenses(
+                core.clone(),
+                test_auth_config(),
+                OpenAiClient::disabled(),
+                IncidentMode::Normal,
+                false,
+                true,
+                RailwayUsageClient::disabled(),
+                StockConfig::default(),
+                false,
+                true,
+                ExpenseRolloutConfig::local_enabled(),
+            );
+        let globally_blocked_classification = global_ai_disabled
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/expenses/classifications:run")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"month":"2026-08"}"#))
+                    .expect("build global AI disabled classification request"),
+            )
+            .await
+            .expect("call global AI disabled classification route");
+        assert_eq!(
+            globally_blocked_classification.status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            response_json(globally_blocked_classification).await["error"]["code"],
+            "AI_KILL_SWITCH_ACTIVE"
         );
 
         let mut unavailable_state = AppState::new(core, OpenAiClient::disabled());
@@ -8477,6 +8741,439 @@ mod tests {
             response_json(readiness).await["error"]["code"],
             "EXPENSE_CRYPTO_NOT_READY"
         );
+    }
+
+    #[tokio::test]
+    async fn expense_classification_requires_auth_confirmation_mutation_guards_and_device_csrf() {
+        let (_temporary, core) = test_core();
+        let (cookie, csrf) = install_test_device(&core);
+        let router =
+            build_cloud_authenticated_router_with_feature_controls_costs_stock_and_expenses(
+                core.clone(),
+                test_auth_config(),
+                OpenAiClient::disabled(),
+                IncidentMode::Normal,
+                true,
+                true,
+                RailwayUsageClient::disabled(),
+                StockConfig::default(),
+                false,
+                true,
+                ExpenseRolloutConfig::local_enabled(),
+            );
+
+        let unauthenticated = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/expenses/classifications:run")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"month":"2026-08"}"#))
+                    .expect("build unauthenticated expense classification request"),
+            )
+            .await
+            .expect("call unauthenticated expense classification route");
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+        for (
+            case,
+            include_ai_confirmation,
+            include_mutation_confirmation,
+            include_idempotency,
+            include_if_none_match,
+        ) in [
+            ("missing-ai", false, true, true, true),
+            ("missing-mutation", true, false, true, true),
+            ("missing-idempotency", true, true, false, true),
+            ("missing-if-none-match", true, true, true, false),
+        ] {
+            let mut request = Request::builder()
+                .method("POST")
+                .uri("/api/v1/expenses/classifications:run")
+                .header("authorization", format!("Bearer {}", test_auth_token()))
+                .header("content-type", "application/json");
+            if include_ai_confirmation {
+                request = request.header("x-tm-confirm-ai-call", "expense-classification");
+            }
+            if include_mutation_confirmation {
+                request = request.header("x-tm-confirm-mutation", "expense-classification-run");
+            }
+            if include_idempotency {
+                request = request.header("idempotency-key", format!("classification-{case}"));
+            }
+            if include_if_none_match {
+                request = request.header("if-none-match", "*");
+            }
+            let rejected = router
+                .clone()
+                .oneshot(
+                    request
+                        .body(Body::from(r#"{"month":"2026-08"}"#))
+                        .expect("build classification precondition request"),
+                )
+                .await
+                .expect("call classification precondition request");
+            assert_eq!(
+                rejected.status(),
+                StatusCode::PRECONDITION_REQUIRED,
+                "{case}"
+            );
+        }
+
+        let no_candidates = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/expenses/classifications:run")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header("x-tm-confirm-ai-call", "expense-classification")
+                    .header("x-tm-confirm-mutation", "expense-classification-run")
+                    .header("idempotency-key", "classification-no-candidates")
+                    .header("if-none-match", "*")
+                    .body(Body::from(r#"{"month":"2026-08"}"#))
+                    .expect("build empty classification request"),
+            )
+            .await
+            .expect("call empty classification request");
+        assert_eq!(no_candidates.status(), StatusCode::OK);
+        let no_candidates = response_json(no_candidates).await;
+        assert_eq!(no_candidates["data"]["status"], "no_candidates");
+        assert!(no_candidates["data"]["runId"].is_null());
+        assert!(no_candidates["data"]["attemptNumber"].is_null());
+        assert_eq!(no_candidates["data"]["costMicrousd"], 0);
+        let no_candidates_completed_at = no_candidates["data"]["completedAt"].clone();
+        assert_eq!(
+            core.ai_operation_budget_status("expense_classification", 250_000)
+                .expect("read empty classification budget")
+                .committed_microusd,
+            0
+        );
+        let no_candidates_replay = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/expenses/classifications:run")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header("x-tm-confirm-ai-call", "expense-classification")
+                    .header("x-tm-confirm-mutation", "expense-classification-run")
+                    .header("idempotency-key", "classification-no-candidates")
+                    .header("if-none-match", "*")
+                    .body(Body::from(r#"{"month":"2026-08"}"#))
+                    .expect("build empty classification replay"),
+            )
+            .await
+            .expect("replay empty classification request");
+        assert_eq!(no_candidates_replay.status(), StatusCode::OK);
+        assert_eq!(
+            no_candidates_replay
+                .headers()
+                .get("x-tm-idempotency-replayed")
+                .and_then(|value| value.to_str().ok()),
+            Some("true")
+        );
+        let no_candidates_replay = response_json(no_candidates_replay).await;
+        assert_eq!(no_candidates_replay["data"]["status"], "no_candidates");
+        assert_eq!(no_candidates_replay["data"]["cached"], true);
+        assert_eq!(
+            no_candidates_replay["data"]["completedAt"],
+            no_candidates_completed_at
+        );
+        let no_candidates_conflict = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/expenses/classifications:run")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header("x-tm-confirm-ai-call", "expense-classification")
+                    .header("x-tm-confirm-mutation", "expense-classification-run")
+                    .header("idempotency-key", "classification-no-candidates")
+                    .header("if-none-match", "*")
+                    .body(Body::from(r#"{"month":"2026-07"}"#))
+                    .expect("build empty classification receipt conflict"),
+            )
+            .await
+            .expect("call empty classification receipt conflict");
+        assert_eq!(no_candidates_conflict.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response_json(no_candidates_conflict).await["error"]["code"],
+            "EXPENSE_CLASSIFICATION_IDEMPOTENCY_CONFLICT"
+        );
+
+        let missing_csrf = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/expenses/classifications:run")
+                    .header("host", "tm.example.test")
+                    .header("origin", "https://tm.example.test")
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .header("x-tm-confirm-ai-call", "expense-classification")
+                    .header("x-tm-confirm-mutation", "expense-classification-run")
+                    .header("idempotency-key", "classification-device-no-csrf")
+                    .header("if-none-match", "*")
+                    .body(Body::from(r#"{"month":"2026-08"}"#))
+                    .expect("build device classification request without CSRF"),
+            )
+            .await
+            .expect("call device classification request without CSRF");
+        assert_eq!(missing_csrf.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            response_json(missing_csrf).await["error"]["code"],
+            "DEVICE_CSRF_REJECTED"
+        );
+
+        let device_success = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/expenses/classifications:run")
+                    .header("host", "tm.example.test")
+                    .header("origin", "https://tm.example.test")
+                    .header("cookie", cookie)
+                    .header("x-tm-csrf", csrf)
+                    .header("content-type", "application/json")
+                    .header("x-tm-confirm-ai-call", "expense-classification")
+                    .header("x-tm-confirm-mutation", "expense-classification-run")
+                    .header("idempotency-key", "classification-device-success")
+                    .header("if-none-match", "*")
+                    .body(Body::from(r#"{"month":"2026-08"}"#))
+                    .expect("build device classification request"),
+            )
+            .await
+            .expect("call device classification request");
+        assert_eq!(device_success.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(device_success).await["data"]["status"],
+            "no_candidates"
+        );
+    }
+
+    #[tokio::test]
+    async fn expense_classification_is_minimized_budgeted_applied_and_exactly_replayed() {
+        let capture = MockExpenseClassificationCapture::default();
+        let mock_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind expense classification mock server");
+        let mock_address = mock_listener.local_addr().expect("read mock address");
+        let mock_router = Router::new()
+            .route("/v1/responses", post(mock_expense_classification_response))
+            .with_state(capture.clone());
+        let mock_server = tokio::spawn(async move {
+            axum::serve(mock_listener, mock_router)
+                .await
+                .expect("serve expense classification response");
+        });
+        let config = OpenAiConfig::for_test(
+            Some("test-api-key"),
+            "gpt-5.4-nano-2026-03-17",
+            &format!("http://{mock_address}/v1"),
+            Duration::from_secs(5),
+        )
+        .expect("build classification OpenAI config");
+        let client = OpenAiClient::new(config).expect("build classification OpenAI client");
+        let (_temporary, core) = test_core();
+        let router =
+            build_cloud_authenticated_router_with_feature_controls_costs_stock_and_expenses(
+                core.clone(),
+                test_auth_config(),
+                client,
+                IncidentMode::Normal,
+                true,
+                true,
+                RailwayUsageClient::disabled(),
+                StockConfig::default(),
+                false,
+                true,
+                ExpenseRolloutConfig::local_enabled(),
+            );
+
+        let mut import = expense_import_body();
+        import["rows"][1]["paymentMethodFingerprint"] = json!("bb".repeat(32));
+        let import = expense_api::sign_test_expense_import_value(import);
+        let preview = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/expenses/imports/preview")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "classification-fixture-preview")
+                    .header("if-none-match", "*")
+                    .header("x-tm-confirm-mutation", "expense-import-preview")
+                    .body(Body::from(import.to_string()))
+                    .expect("build classification fixture preview"),
+            )
+            .await
+            .expect("preview classification fixture");
+        assert_eq!(preview.status(), StatusCode::OK);
+        let preview = response_json(preview).await;
+        let preview_session_id = preview["data"]["sessionId"]
+            .as_str()
+            .expect("classification fixture preview session");
+        let import = expense_import_body_with_preview_session(import, preview_session_id);
+        let imported = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/expenses/imports")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "classification-fixture-import")
+                    .header("if-none-match", "*")
+                    .header("x-tm-confirm-mutation", "expense-import")
+                    .body(Body::from(import.to_string()))
+                    .expect("build classification fixture import"),
+            )
+            .await
+            .expect("import classification fixture");
+        assert_eq!(imported.status(), StatusCode::CREATED);
+
+        let classified = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/expenses/classifications:run")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header("x-tm-confirm-ai-call", "expense-classification")
+                    .header("x-tm-confirm-mutation", "expense-classification-run")
+                    .header("idempotency-key", "classification-exact-replay")
+                    .header("if-none-match", "*")
+                    .body(Body::from(r#"{"month":"2026-08"}"#))
+                    .expect("build classification request"),
+            )
+            .await
+            .expect("run expense classification");
+        assert_eq!(classified.status(), StatusCode::OK);
+        let classified = response_json(classified).await;
+        assert_eq!(classified["data"]["status"], "applied");
+        assert_eq!(classified["data"]["candidateGroupCount"], 2);
+        assert_eq!(classified["data"]["affectedTransactionCount"], 2);
+        assert_eq!(classified["data"]["autoConfirmedCount"], 1);
+        assert_eq!(classified["data"]["provisionalCount"], 1);
+        assert_eq!(classified["data"]["manualReviewCount"], 0);
+        assert_eq!(classified["data"]["costMicrousd"], 45);
+        assert_eq!(capture.calls.load(Ordering::SeqCst), 1);
+
+        {
+            let payload = capture.payload.lock().expect("lock classification payload");
+            let payload = payload.as_ref().expect("captured classification payload");
+            assert_eq!(payload["model"], "gpt-5.4-nano-2026-03-17");
+            assert_eq!(payload["store"], false);
+            assert_eq!(payload["text"]["format"]["strict"], true);
+            let input: Value = serde_json::from_str(
+                payload["input"][0]["content"]
+                    .as_str()
+                    .expect("classification prompt content"),
+            )
+            .expect("parse classification prompt content");
+            assert_eq!(input["items"].as_array().map(Vec::len), Some(2));
+            let merchants = input["items"]
+                .as_array()
+                .expect("classification prompt items")
+                .iter()
+                .map(|item| item["merchant"].as_str().expect("merchant label"))
+                .collect::<HashSet<_>>();
+            assert_eq!(merchants, HashSet::from(["첫 번째 카페", "두 번째 식당"]));
+            let serialized = payload.to_string();
+            for forbidden in [
+                "amountMinor",
+                "postedDate",
+                "occurredAt",
+                "eventId",
+                "reviewId",
+                "paymentMethodFingerprint",
+                "row-one",
+                "row-two",
+            ] {
+                assert!(!serialized.contains(forbidden), "{forbidden}");
+            }
+        }
+
+        let replay = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/expenses/classifications:run")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .header("content-type", "application/json")
+                    .header("x-tm-confirm-ai-call", "expense-classification")
+                    .header("x-tm-confirm-mutation", "expense-classification-run")
+                    .header("idempotency-key", "classification-exact-replay")
+                    .header("if-none-match", "*")
+                    .body(Body::from(r#"{"month":"2026-08"}"#))
+                    .expect("build exact classification replay"),
+            )
+            .await
+            .expect("replay expense classification");
+        assert_eq!(replay.status(), StatusCode::OK);
+        assert_eq!(
+            replay
+                .headers()
+                .get("x-tm-idempotency-replayed")
+                .and_then(|value| value.to_str().ok()),
+            Some("true")
+        );
+        assert_eq!(response_json(replay).await["data"]["cached"], true);
+        assert_eq!(capture.calls.load(Ordering::SeqCst), 1);
+        let budget = core
+            .ai_operation_budget_status("expense_classification", 250_000)
+            .expect("read classification operation budget");
+        assert_eq!(budget.committed_microusd, 45);
+
+        let transactions = router
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/expenses/transactions?month=2026-08&limit=100")
+                    .header("authorization", format!("Bearer {}", test_auth_token()))
+                    .body(Body::empty())
+                    .expect("build classified transaction request"),
+            )
+            .await
+            .expect("read classified transactions");
+        assert_eq!(transactions.status(), StatusCode::OK);
+        let transactions = response_json(transactions).await;
+        let items = transactions["data"]["items"]
+            .as_array()
+            .expect("classified transactions");
+        assert_eq!(items.len(), 2);
+        assert!(
+            items
+                .iter()
+                .all(|item| item["classificationSource"] == "ai")
+        );
+        let mut confidences = items
+            .iter()
+            .map(|item| {
+                item["classificationConfidence"]
+                    .as_u64()
+                    .expect("AI confidence")
+            })
+            .collect::<Vec<_>>();
+        confidences.sort_unstable();
+        assert_eq!(confidences, vec![80, 95]);
+        assert_eq!(
+            items
+                .iter()
+                .filter(|item| item["isProvisional"] == true)
+                .count(),
+            1
+        );
+
+        mock_server.abort();
     }
 
     #[test]

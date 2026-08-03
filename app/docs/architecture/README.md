@@ -78,6 +78,9 @@ release 앱과 CLI는 기본 홈으로 고정된다. debug/test의 `TM_HOME`은 
 
 schema 15 지출 기능의 신뢰 경계, 불변 원장, 정기지출, 암호화와 AI 집계 계약은 [지출·정기지출 아키텍처](expense-reporting-schema15.md)에 정리한다. 빌드, Railway 키 설정, migration, backup, Windows·모바일 검증 순서는 [schema 15 배포·검증](../operations/schema15-expense-deployment.md)을 따른다.
 
+schema 16의 규칙 우선 지출 AI 자동 분류, 개인정보 최소화, 신뢰도별 적용, 비용·재시도·내구성 계약은 [지출 AI 자동 분류](expense-ai-classification-schema16.md)에 정리한다.
+검증된 source를 Railway에 두 단계로 반영하는 절차는 [schema 16 지출 AI 분류 배포·검증](../operations/schema16-expense-classification-deployment.md)을 따른다.
+
 Task+태그+체크리스트, Note+다중 링크, 세션 종료+WorkLog+후속 Task는 각각 하나의 `BEGIN IMMEDIATE` 트랜잭션으로 처리한다. UI command 계층에는 SQL이 없으며 aggregate 저장은 `tm-core` API 한 번만 호출한다.
 
 빌드 출력과 다운로드 캐시는 `TM/dist` 아래에 두며 실제 데이터는 `TM/data`, 백업은 `TM/backups`, 내보내기는 `TM/exports`에 둔다.

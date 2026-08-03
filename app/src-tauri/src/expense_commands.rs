@@ -590,6 +590,15 @@ pub(crate) fn generate_expense_report(_month: String) -> CommandResult<Value> {
 }
 
 #[tauri::command]
+pub(crate) fn classify_expense_transactions(
+    month: String,
+    idempotency_key: Option<String>,
+) -> CommandResult<Value> {
+    let _ = (month, idempotency_key);
+    Err("AI 지출 자동 분류는 TM 클라우드 모드에서만 사용할 수 있습니다.".to_owned())
+}
+
+#[tauri::command]
 pub(crate) fn latest_expense_report(_month: String) -> CommandResult<Value> {
     Ok(Value::Null)
 }

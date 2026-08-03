@@ -98,6 +98,42 @@ describe("지출·정기지출 UI", () => {
     expect((await api.latestExpenseReport(month))?.helpful).toBe(true);
   });
 
+  it("AI 자동 분류는 확인 필요 화면의 명시적 클릭으로만 실행하고 결과와 출처를 표시한다", async () => {
+    const user = userEvent.setup();
+    const base = createMemoryTransport();
+    let classificationCalls = 0;
+    const capturedArgs: Array<Record<string, unknown>> = [];
+    const transport: CommandTransport = {
+      async invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
+        if (command === "classify_expense_transactions") {
+          classificationCalls += 1;
+          capturedArgs.push(args);
+        }
+        return base.invoke<T>(command, args);
+      },
+    };
+    render(<App api={createApi(transport)} />);
+    await openExpenses(user);
+
+    expect(classificationCalls).toBe(0);
+    await user.click(screen.getByRole("button", { name: "확인 필요" }));
+    expect(classificationCalls).toBe(0);
+    expect(screen.getByText(/개인정보 필터를 거친 업체 표시명만 OpenAI에 보냅니다/)).toBeInTheDocument();
+    expect(screen.getByText(/1회 최대 \$0\.01 · 서울 기준 월 12회 · 이 기능 월 \$0\.25에서 중단/)).toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "AI 자동 분류" }));
+
+    const result = await screen.findByText("자동 분류를 적용했습니다");
+    expect(result.closest(".expense-classification-result")).toHaveTextContent("남은 수동 확인 1");
+    expect(result.closest(".expense-classification-result")).toHaveTextContent("이번 호출 $0.0012");
+    expect(classificationCalls).toBe(1);
+    expect(capturedArgs[0]).toMatchObject({ month: expect.stringMatching(/^\d{4}-\d{2}$/) });
+    expect(capturedArgs[0].idempotencyKey).toMatch(/^desktop-expense:/);
+
+    await user.click(screen.getByRole("button", { name: "거래" }));
+    expect((await screen.findAllByText("AI 분류")).length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByLabelText("AI 분류 · 신뢰도 93%").length).toBeGreaterThanOrEqual(2);
+  });
+
   it("미확인 P2P를 사용자 결정 후 확정 큐에서 제거한다", async () => {
     const user = userEvent.setup();
     const { api } = renderApp();
@@ -135,6 +171,8 @@ describe("지출·정기지출 UI", () => {
       suggestedKind: "purchase",
       suggestedCategory: "food",
       suggestedDuplicateOfEventId: original.id,
+      suggestionSource: null,
+      suggestionConfidence: null,
       createdAt: duplicate.occurredAt,
       resolvedAt: null,
       version: 3,
@@ -179,6 +217,8 @@ describe("지출·정기지출 UI", () => {
         suggestedKind: "purchase",
         suggestedCategory: "food",
         suggestedDuplicateOfEventId: null,
+        suggestionSource: null,
+        suggestionConfidence: null,
         createdAt: transaction.occurredAt,
         resolvedAt: null,
         version: 1,
@@ -253,6 +293,8 @@ describe("지출·정기지출 UI", () => {
         suggestedKind: "purchase",
         suggestedCategory,
         suggestedDuplicateOfEventId: null,
+        suggestionSource: id === "review-card-first" ? "ai" : "deterministic",
+        suggestionConfidence: id === "review-card-first" ? 87 : null,
         createdAt: transaction.occurredAt,
         resolvedAt: null,
         version: 1,
@@ -296,6 +338,7 @@ describe("지출·정기지출 UI", () => {
     await user.click(showOptional);
 
     expect(screen.getAllByRole("button", { name: "결정 저장" })).toHaveLength(3);
+    expect(screen.getByLabelText("AI 분류 제안 · 신뢰도 87%")).toBeInTheDocument();
     const firstHeading = await screen.findByRole("heading", { name: /STARBUCKS/ });
     const firstForm = firstHeading.closest("form");
     expect(firstForm).not.toBeNull();
@@ -336,6 +379,8 @@ describe("지출·정기지출 UI", () => {
         suggestedKind: null,
         suggestedCategory: null,
         suggestedDuplicateOfEventId: null,
+        suggestionSource: null,
+        suggestionConfidence: null,
         createdAt: transaction.occurredAt,
         resolvedAt: null,
         version: 1,
@@ -391,6 +436,8 @@ describe("지출·정기지출 UI", () => {
       suggestedKind: "purchase",
       suggestedCategory: "insurance_finance_tax",
       suggestedDuplicateOfEventId: null,
+      suggestionSource: null,
+      suggestionConfidence: null,
       createdAt: transaction.occurredAt,
       resolvedAt: null,
       version: 1,
@@ -433,6 +480,8 @@ describe("지출·정기지출 UI", () => {
       suggestedKind: "purchase",
       suggestedCategory: "ott_subscriptions",
       suggestedDuplicateOfEventId: null,
+      suggestionSource: null,
+      suggestionConfidence: null,
       createdAt: transaction.occurredAt,
       resolvedAt: null,
       version: 2,
@@ -662,6 +711,8 @@ describe("지출·정기지출 UI", () => {
       suggestedKind: "settlement_sent",
       suggestedCategory: "transfer_settlement",
       suggestedDuplicateOfEventId: null,
+      suggestionSource: null,
+      suggestionConfidence: null,
       createdAt: settlement.occurredAt,
       resolvedAt: null,
       version: 1,

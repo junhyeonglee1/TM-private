@@ -304,6 +304,22 @@ button { border: 0; border-radius: 13px; font-weight: 800; }
 .expense-report-status { padding: 4px 7px; border-radius: 999px; background: #4a3023; color: #ffc28d; font-size: 10px; }
 .expense-report-status.confirmed { background: #244535; color: #8ce1b0; }
 .expense-report-status.incomplete { background: #42242c; color: #ff9aaa; }
+.expense-classification { display: grid; gap: 10px; margin: 12px 0; padding: 12px; border: 1px solid var(--line); border-radius: 14px; background: #121720; }
+.expense-classification > div:first-child { display: grid; gap: 3px; }
+.expense-classification h3, .expense-classification p { margin: 0; }
+.expense-classification h3 { font-size: 15px; }
+.expense-classification p, .expense-classification small { color: var(--muted); font-size: 11px; line-height: 1.45; }
+.expense-classification-result { display: grid; gap: 8px; padding: 9px 10px; border-left: 3px solid var(--accent); background: #151c2e; }
+.expense-classification-result.no_candidates { border-left-color: #65c790; }
+.expense-classification-result.stale { border-left-color: #ffc28d; }
+.expense-classification-metrics { display: flex; flex-wrap: wrap; gap: 6px; }
+.expense-classification-metrics span { padding: 5px 7px; border-radius: 7px; background: var(--surface-2); color: #dce2f4; font-size: 10px; }
+.expense-transaction-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.expense-transaction-meta p { margin: 0; }
+.expense-classification-badge { width: max-content; padding: 3px 7px; border-radius: 999px; background: var(--surface-2); color: #dce2f4; font-size: 9px; font-weight: 800; }
+.expense-classification-badge.user_rule { background: #244535; color: #8ce1b0; }
+.expense-classification-badge.manual { background: #4a3023; color: #ffc28d; }
+.expense-classification-badge.ai { background: #273a70; color: #a9c4ff; }
 .expense-currency-list { display: grid; gap: 7px; }
 .expense-currency-card { display: grid; gap: 5px; padding: 11px; border: 1px solid var(--line); border-radius: 12px; background: #121720; }
 .expense-currency-card > span { color: var(--accent); font-size: 10px; font-weight: 900; }

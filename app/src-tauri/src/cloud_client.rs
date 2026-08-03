@@ -22,6 +22,26 @@ const CREDENTIAL_USER: &str = "single-user";
 const TOKEN_PREFIX: &str = "tm_pat_v1_";
 const TOKEN_SECRET_LENGTH: usize = 43;
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+const EXPENSE_CLASSIFICATION_PATH: [&str; 2] = ["expenses", "classifications:run"];
+const EXPENSE_CLASSIFICATION_CONFIRMATION: &str = "expense-classification-run";
+const EXPENSE_CLASSIFICATION_AI_CONFIRMATION: &str = "expense-classification";
+const EXPENSE_CLASSIFICATION_TERMINAL_CODES: [&str; 15] = [
+    "EXPENSE_CLASSIFICATION_BUDGET_EXHAUSTED",
+    "EXPENSE_CLASSIFICATION_BUDGET_PERSISTENCE_FAILED",
+    "EXPENSE_CLASSIFICATION_COST_INVALID",
+    "EXPENSE_CLASSIFICATION_IDEMPOTENCY_CONFLICT",
+    "EXPENSE_CLASSIFICATION_IDEMPOTENCY_TERMINAL",
+    "EXPENSE_CLASSIFICATION_LEASE_EXPIRED",
+    "EXPENSE_CLASSIFICATION_OPENAI_AUTHENTICATION_FAILED",
+    "EXPENSE_CLASSIFICATION_OPENAI_RATE_LIMITED",
+    "EXPENSE_CLASSIFICATION_OPENAI_REQUEST_REJECTED",
+    "EXPENSE_CLASSIFICATION_OPENAI_RESPONSE_INVALID",
+    "EXPENSE_CLASSIFICATION_OPENAI_UNAVAILABLE",
+    "EXPENSE_CLASSIFICATION_PREVIOUS_RUN_RECOVERED",
+    "EXPENSE_CLASSIFICATION_PREVIOUSLY_FAILED",
+    "EXPENSE_CLASSIFICATION_STAGE_FAILED",
+    "EXPENSE_CLASSIFICATION_TIMEOUT",
+];
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -536,6 +556,15 @@ impl CloudClient {
                 )?);
                 Method::POST
             }
+            "classify_expense_transactions" => {
+                path.extend(EXPENSE_CLASSIFICATION_PATH.map(str::to_owned));
+                confirmation = Some(EXPENSE_CLASSIFICATION_CONFIRMATION);
+                create_precondition = true;
+                body = Some(serde_json::json!({
+                    "month": required_month(&args, "month")?,
+                }));
+                Method::POST
+            }
             "generate_expense_report" => {
                 path.extend(["expenses".to_owned(), "reports".to_owned()]);
                 confirmation = Some("expense-report-generate");
@@ -579,7 +608,7 @@ impl CloudClient {
             &path,
             &query,
             confirmation,
-            (command == "generate_expense_report").then_some("expense-report"),
+            expense_ai_confirmation(command),
             idempotency_key,
             create_precondition,
             expected_version,
@@ -991,6 +1020,14 @@ fn valid_command_name(value: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
 }
 
+fn expense_ai_confirmation(command: &str) -> Option<&'static str> {
+    match command {
+        "generate_expense_report" => Some("expense-report"),
+        "classify_expense_transactions" => Some(EXPENSE_CLASSIFICATION_AI_CONFIRMATION),
+        _ => None,
+    }
+}
+
 fn valid_token(value: &str) -> bool {
     value.strip_prefix(TOKEN_PREFIX).is_some_and(|secret| {
         secret.len() == TOKEN_SECRET_LENGTH
@@ -1064,6 +1101,11 @@ fn write_new_export_file(path: &Path, bytes: &[u8]) -> CloudResult<()> {
 
 fn response_error(status: StatusCode, payload: &Value, request_id: Option<&str>) -> String {
     let request_suffix = request_id.map_or_else(String::new, |value| format!(" ({value})"));
+    if let Some(code) = expense_classification_terminal_code(payload) {
+        return format!(
+            "TM expense classification run ended; press AI automatic classification again to start a new run, which may use one monthly attempt and cost up to $0.01 [TM_ERROR_CODE:{code}]{request_suffix}"
+        );
+    }
     match status {
         StatusCode::UNAUTHORIZED => {
             format!("TM cloud authentication failed; run secure setup again{request_suffix}")
@@ -1100,6 +1142,13 @@ fn response_error(status: StatusCode, payload: &Value, request_id: Option<&str>)
             format!("TM cloud request failed: {code}{request_suffix}")
         }
     }
+}
+
+fn expense_classification_terminal_code(payload: &Value) -> Option<&str> {
+    payload
+        .pointer("/error/code")
+        .and_then(Value::as_str)
+        .filter(|code| EXPENSE_CLASSIFICATION_TERMINAL_CODES.contains(code))
 }
 
 #[cfg(windows)]
@@ -1144,12 +1193,15 @@ fn load_token_from_os_store() -> CloudResult<String> {
 
 #[cfg(test)]
 mod tests {
+    use reqwest::StatusCode;
     use serde_json::json;
     use tempfile::tempdir;
 
     use super::{
-        materialize_export, optional_expense_idempotency_key, valid_command_name, valid_token,
-        validate_base_url,
+        EXPENSE_CLASSIFICATION_AI_CONFIRMATION, EXPENSE_CLASSIFICATION_CONFIRMATION,
+        EXPENSE_CLASSIFICATION_PATH, expense_ai_confirmation, expense_classification_terminal_code,
+        materialize_export, optional_expense_idempotency_key, response_error, valid_command_name,
+        valid_token, validate_base_url,
     };
 
     #[cfg(windows)]
@@ -1194,6 +1246,44 @@ mod tests {
                 "accepted invalid key: {invalid}"
             );
         }
+    }
+
+    #[test]
+    fn expense_classification_bridge_uses_the_exact_protected_contract() {
+        assert_eq!(
+            EXPENSE_CLASSIFICATION_PATH,
+            ["expenses", "classifications:run"]
+        );
+        assert_eq!(
+            EXPENSE_CLASSIFICATION_CONFIRMATION,
+            "expense-classification-run"
+        );
+        assert_eq!(
+            expense_ai_confirmation("classify_expense_transactions"),
+            Some(EXPENSE_CLASSIFICATION_AI_CONFIRMATION)
+        );
+        assert_eq!(expense_ai_confirmation("list_expense_transactions"), None);
+    }
+
+    #[test]
+    fn cloud_errors_preserve_only_safe_classification_terminal_codes() {
+        let terminal = json!({
+            "error": { "code": "EXPENSE_CLASSIFICATION_LEASE_EXPIRED" }
+        });
+        assert_eq!(
+            expense_classification_terminal_code(&terminal),
+            Some("EXPENSE_CLASSIFICATION_LEASE_EXPIRED")
+        );
+        assert!(
+            response_error(StatusCode::CONFLICT, &terminal, Some("request-1"))
+                .contains("[TM_ERROR_CODE:EXPENSE_CLASSIFICATION_LEASE_EXPIRED]")
+        );
+
+        let arbitrary = json!({ "error": { "code": "SECRET_INTERNAL_CODE" } });
+        assert_eq!(expense_classification_terminal_code(&arbitrary), None);
+        let message = response_error(StatusCode::CONFLICT, &arbitrary, None);
+        assert!(!message.contains("SECRET_INTERNAL_CODE"));
+        assert!(!message.contains("TM_ERROR_CODE"));
     }
 
     #[cfg(windows)]

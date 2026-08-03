@@ -50,7 +50,7 @@ case "$schema_version" in
         exit 1
         ;;
 esac
-if [ "$schema_version" -lt 1 ] || [ "$schema_version" -gt 15 ]; then
+if [ "$schema_version" -lt 1 ] || [ "$schema_version" -gt 16 ]; then
     echo "event=tm_backup_failed reason=unsupported_schema_version" >&2
     exit 1
 fi
@@ -193,6 +193,22 @@ expense_mutation_receipts'
         )"
         if [ "$table_exists" != "1" ]; then
             echo "event=tm_backup_failed reason=required_expense_table_missing table=$table" >&2
+            exit 1
+        fi
+    done
+fi
+if [ "$schema_version" -ge 16 ]; then
+    expense_classification_required_tables='expense_ai_classification_batches
+expense_ai_classification_items
+expense_ai_classification_receipts'
+    for table in $expense_classification_required_tables; do
+        table_exists="$(
+            sqlite3 -readonly "$snapshot" \
+                "SELECT COUNT(*) FROM sqlite_schema
+                 WHERE type = 'table' AND name = '$table';"
+        )"
+        if [ "$table_exists" != "1" ]; then
+            echo "event=tm_backup_failed reason=required_expense_classification_table_missing table=$table" >&2
             exit 1
         fi
     done
@@ -419,6 +435,129 @@ if [ "$schema_version" -ge 15 ]; then
     )"
     if [ "$expense_schema_semantic_summary" != "20|8|7|5|9|0|0|0|0|0|0|0|0" ]; then
         echo "event=tm_backup_failed reason=expense_schema_semantics summary=$expense_schema_semantic_summary" >&2
+        exit 1
+    fi
+    schema_semantics_validated=true
+fi
+if [ "$schema_version" -ge 16 ]; then
+    expense_classification_semantic_summary="$(
+        sqlite3 -readonly "$snapshot" "
+            WITH objects AS (
+                SELECT type,
+                       name,
+                       lower(
+                           replace(replace(replace(replace(sql, ' ', ''), char(9), ''), char(10), ''), char(13), '')
+                       ) AS normalized_sql
+                FROM sqlite_schema
+                WHERE sql IS NOT NULL
+            ), required_tables(name) AS (
+                VALUES
+                    ('expense_ai_classification_batches'),
+                    ('expense_ai_classification_items'),
+                    ('expense_ai_classification_receipts')
+            ), required_event_columns(name) AS (
+                VALUES ('classification_source'), ('classification_confidence')
+            ), required_batch_columns(name) AS (
+                VALUES
+                    ('request_id'), ('quota_month_start'), ('target_month_start'),
+                    ('attempt_number'), ('input_sha256'), ('prompt_version'), ('model'),
+                    ('batch_status'), ('result_json'), ('privacy_skipped_count'),
+                    ('version_conflict_count'), ('cost_microusd'), ('completed_at')
+            ), required_item_columns(name) AS (
+                VALUES
+                    ('batch_request_id'), ('item_id'), ('event_id'), ('review_id'),
+                    ('expected_event_version'), ('expected_review_version'),
+                     ('suggested_category'), ('confidence'), ('disposition'), ('applied_at')
+            ), required_receipt_columns(name) AS (
+                VALUES
+                    ('request_id'), ('target_month_start'), ('terminal_status'),
+                    ('result_json'), ('created_at'), ('completed_at')
+            ), required_indexes(name) AS (
+                VALUES
+                    ('idx_expense_ai_classification_batches_quota'),
+                    ('idx_expense_ai_classification_batches_status'),
+                    ('idx_expense_ai_classification_batches_active_input'),
+                    ('idx_expense_ai_classification_items_item'),
+                    ('idx_expense_ai_classification_items_review')
+            ), required_triggers(name, normalized_sql) AS (
+                VALUES
+                    ('expense_ai_classification_receipts_immutable_update',
+                     'createtriggerexpense_ai_classification_receipts_immutable_updatebeforeupdateonexpense_ai_classification_receiptsbeginselectraise(abort,''expenseaiclassificationreceiptsareimmutable'');end'),
+                    ('expense_ai_classification_receipts_immutable_delete',
+                     'createtriggerexpense_ai_classification_receipts_immutable_deletebeforedeleteonexpense_ai_classification_receiptsbeginselectraise(abort,''expenseaiclassificationreceiptscannotbedeleted'');end')
+            ), forbidden_plaintext_columns(name) AS (
+                SELECT name FROM pragma_table_info('expense_ai_classification_batches')
+                WHERE name IN (
+                    'merchant', 'merchant_name', 'merchant_blind_index',
+                    'payment_method_fingerprint', 'counterparty', 'memo', 'prompt', 'prompt_text'
+                )
+                UNION ALL
+                SELECT name FROM pragma_table_info('expense_ai_classification_items')
+                WHERE name IN (
+                    'merchant', 'merchant_name', 'merchant_blind_index',
+                    'payment_method_fingerprint', 'counterparty', 'memo', 'prompt', 'prompt_text'
+                )
+                UNION ALL
+                SELECT name FROM pragma_table_info('expense_ai_classification_receipts')
+                WHERE name IN (
+                    'merchant', 'merchant_name', 'merchant_blind_index',
+                    'payment_method_fingerprint', 'counterparty', 'memo', 'prompt', 'prompt_text'
+                )
+            )
+            SELECT
+                (SELECT COUNT(*) FROM required_tables AS required
+                 JOIN objects ON objects.type = 'table' AND objects.name = required.name) || '|' ||
+                (SELECT COUNT(*) FROM required_event_columns AS required
+                 JOIN pragma_table_info('expense_events') AS present ON present.name = required.name) || '|' ||
+                (SELECT COUNT(*) FROM required_batch_columns AS required
+                 JOIN pragma_table_info('expense_ai_classification_batches') AS present
+                   ON present.name = required.name) || '|' ||
+                (SELECT COUNT(*) FROM required_item_columns AS required
+                 JOIN pragma_table_info('expense_ai_classification_items') AS present
+                   ON present.name = required.name) || '|' ||
+                (SELECT COUNT(*) FROM required_receipt_columns AS required
+                 JOIN pragma_table_info('expense_ai_classification_receipts') AS present
+                   ON present.name = required.name) || '|' ||
+                (SELECT COUNT(*) FROM required_indexes AS required
+                 JOIN objects ON objects.type = 'index' AND objects.name = required.name) || '|' ||
+                (SELECT COUNT(*) FROM required_triggers AS required
+                 JOIN objects ON objects.type = 'trigger'
+                             AND objects.name = required.name
+                             AND objects.normalized_sql = required.normalized_sql) || '|' ||
+                (SELECT COUNT(*) FROM objects
+                 WHERE type = 'index'
+                   AND name = 'idx_expense_ai_classification_batches_active_input'
+                   AND normalized_sql LIKE '%createuniqueindex%'
+                   AND normalized_sql LIKE '%onexpense_ai_classification_batches(input_sha256,prompt_version)%'
+                   AND normalized_sql LIKE '%wherebatch_statusin(''claimed'',''staged'',''applied'')%') || '|' ||
+                (SELECT COUNT(*) FROM forbidden_plaintext_columns) || '|' ||
+                (SELECT COUNT(*) FROM expense_ai_classification_receipts AS receipt
+                 WHERE receipt.terminal_status <> 'no_candidates'
+                    OR receipt.result_json <>
+                       json_object(
+                           'itemGroupCount', 0,
+                           'reviewCount', 0,
+                           'resultCount', 0,
+                           'confirmedCount', 0,
+                           'provisionalCount', 0,
+                           'reviewRequiredCount', 0,
+                           'privacySkippedCount', 0,
+                           'versionConflictCount', 0,
+                           'actualCostMicrousd', 0
+                       )
+                    OR EXISTS (
+                        SELECT 1 FROM expense_ai_classification_batches AS batch
+                        WHERE batch.request_id = receipt.request_id
+                    )) || '|' ||
+                (SELECT COUNT(*) FROM expense_ai_classification_items AS item
+                 LEFT JOIN expense_ai_classification_batches AS batch
+                   ON batch.request_id = item.batch_request_id
+                 LEFT JOIN expense_events AS event ON event.id = item.event_id
+                 LEFT JOIN expense_reviews AS review ON review.id = item.review_id
+                 WHERE batch.request_id IS NULL OR event.id IS NULL OR review.id IS NULL);"
+    )"
+    if [ "$expense_classification_semantic_summary" != "3|2|13|10|6|5|2|1|0|0|0" ]; then
+        echo "event=tm_backup_failed reason=expense_classification_schema_semantics summary=$expense_classification_semantic_summary" >&2
         exit 1
     fi
     schema_semantics_validated=true

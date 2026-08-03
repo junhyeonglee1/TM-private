@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use crate::{Error, Result, TmHome};
 
-pub(crate) const SCHEMA_VERSION: i64 = 15;
+pub(crate) const SCHEMA_VERSION: i64 = 16;
 const INITIAL_MIGRATION: &str = include_str!("../migrations/0001_initial.sql");
 const CHANGE_REQUESTS_MIGRATION: &str = include_str!("../migrations/0002_change_requests.sql");
 const CHANGE_REQUESTS_STRICT_CAS_MIGRATION: &str =
@@ -37,6 +37,8 @@ const STOCK_DAILY_SCREEN_MIGRATION: &str =
 const UNCATEGORIZED_PROJECT_MIGRATION: &str =
     include_str!("../migrations/0014_uncategorized_project.sql");
 const EXPENSE_REPORTING_MIGRATION: &str = include_str!("../migrations/0015_expense_reporting.sql");
+const EXPENSE_AI_CLASSIFICATION_MIGRATION: &str =
+    include_str!("../migrations/0016_expense_ai_classification.sql");
 const BUSY_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone)]
@@ -300,6 +302,18 @@ impl Database {
             transaction.pragma_update(None, "user_version", 15_i64)?;
             transaction.commit()?;
         }
+        if current_version < 16 {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(EXPENSE_AI_CLASSIFICATION_MIGRATION)?;
+            transaction.execute(
+                "INSERT INTO schema_migrations(version, name, applied_at)
+                 VALUES (16, 'expense-ai-hybrid-classification', ?1)",
+                [now_utc()],
+            )?;
+            transaction.pragma_update(None, "user_version", 16_i64)?;
+            transaction.commit()?;
+        }
         Ok(())
     }
 
@@ -403,7 +417,6 @@ pub(crate) fn validate_schema_semantics(connection: &Connection, version: i64) -
             "wheresystem_keyisnotnull",
         ],
     )?;
-
     for (name, fragments) in [
         (
             "tasks_project_required_insert",
@@ -761,6 +774,156 @@ pub(crate) fn validate_schema_semantics(connection: &Connection, version: i64) -
     if inconsistent_primary_links != 0 {
         return Err(Error::Invariant(format!(
             "schema 15 primary expense links must agree with their event; found {inconsistent_primary_links} inconsistent links"
+        )));
+    }
+
+    if version < 16 {
+        return Ok(());
+    }
+
+    require_schema_object(
+        connection,
+        "table",
+        "expense_events",
+        &[
+            "classification_sourcetextnotnulldefault'deterministic'",
+            "classification_confidenceinteger",
+            "check(classification_sourcein('deterministic','user_rule','manual','ai'))",
+            "check(classification_confidenceisnullorclassification_confidencebetween0and100)",
+        ],
+    )?;
+    require_schema_object(
+        connection,
+        "table",
+        "expense_ai_classification_batches",
+        &[
+            "target_month_starttextnotnull",
+            "attempt_numberintegernotnullcheck(attempt_numberbetween1and12)",
+            "batch_statustextnotnulldefault'claimed'",
+            "check(batch_statusin('claimed','staged','applied','failed','stale'))",
+            "result_jsontextcheck(result_jsonisnullorjson_valid(result_json))",
+            "item_group_countintegernotnull",
+            "review_countintegernotnull",
+            "privacy_skipped_countintegernotnulldefault0",
+            "version_conflict_countintegernotnulldefault0",
+            "cost_microusdintegernotnulldefault0",
+            "failure_codetextcheck(failure_codeisnullorfailure_codein(",
+        ],
+    )?;
+    require_schema_object(
+        connection,
+        "table",
+        "expense_ai_classification_items",
+        &[
+            "batch_request_idtextnotnull",
+            "event_idtextnotnull",
+            "review_idtextnotnull",
+            "expected_event_versionintegernotnull",
+            "expected_review_versionintegernotnull",
+            "confidenceinteger",
+            "dispositiontext",
+            "check(dispositionisnullordispositionin('confirmed','provisional','review_required','privacy_skipped'))",
+        ],
+    )?;
+    require_schema_object(
+        connection,
+        "table",
+        "expense_ai_classification_receipts",
+        &[
+            "request_idtextprimarykeynotnull",
+            "target_month_starttextnotnull",
+            "terminal_statustextnotnull",
+            "check(terminal_status='no_candidates')",
+            "result_jsontextnotnull",
+            "check(result_json='{\"itemgroupcount\":0,\"reviewcount\":0,\"resultcount\":0,\"confirmedcount\":0,\"provisionalcount\":0,\"reviewrequiredcount\":0,\"privacyskippedcount\":0,\"versionconflictcount\":0,\"actualcostmicrousd\":0}')",
+            "completed_attextnotnull",
+        ],
+    )?;
+    for index in [
+        "idx_expense_ai_classification_batches_quota",
+        "idx_expense_ai_classification_batches_status",
+        "idx_expense_ai_classification_items_item",
+        "idx_expense_ai_classification_items_review",
+    ] {
+        require_schema_object(connection, "index", index, &["createindex"])?;
+    }
+    require_schema_object(
+        connection,
+        "index",
+        "idx_expense_ai_classification_batches_active_input",
+        &[
+            "createuniqueindex",
+            "onexpense_ai_classification_batches(input_sha256,prompt_version)",
+            "wherebatch_statusin('claimed','staged','applied')",
+        ],
+    )?;
+    require_schema_object(
+        connection,
+        "trigger",
+        "expense_ai_classification_receipts_immutable_update",
+        &["beforeupdateonexpense_ai_classification_receipts"],
+    )?;
+    require_schema_object(
+        connection,
+        "trigger",
+        "expense_ai_classification_receipts_immutable_delete",
+        &["beforedeleteonexpense_ai_classification_receipts"],
+    )?;
+
+    for table in [
+        "expense_ai_classification_batches",
+        "expense_ai_classification_items",
+        "expense_ai_classification_receipts",
+    ] {
+        let pragma = format!("PRAGMA table_info(\"{table}\")");
+        let mut statement = connection.prepare(&pragma)?;
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if let Some(column) = [
+            "merchant",
+            "merchant_name",
+            "merchant_blind_index",
+            "payment_method_fingerprint",
+            "counterparty",
+            "memo",
+            "prompt",
+            "prompt_text",
+        ]
+        .iter()
+        .find(|column| columns.iter().any(|candidate| candidate == **column))
+        {
+            return Err(Error::Invariant(format!(
+                "schema 16 forbids duplicated sensitive expense classification column {table}.{column}"
+            )));
+        }
+    }
+
+    let overlapping_receipts: i64 = connection.query_row(
+        "SELECT count(*)
+         FROM expense_ai_classification_receipts AS receipt
+         JOIN expense_ai_classification_batches AS batch
+           ON batch.request_id = receipt.request_id",
+        [],
+        |row| row.get(0),
+    )?;
+    if overlapping_receipts != 0 {
+        return Err(Error::Invariant(format!(
+            "schema 16 classification request IDs cannot be both receipts and batches; found {overlapping_receipts} overlaps"
+        )));
+    }
+
+    let invalid_no_candidate_receipts: i64 = connection.query_row(
+        "SELECT count(*)
+         FROM expense_ai_classification_receipts AS receipt
+         WHERE receipt.result_json !=
+            '{\"itemGroupCount\":0,\"reviewCount\":0,\"resultCount\":0,\"confirmedCount\":0,\"provisionalCount\":0,\"reviewRequiredCount\":0,\"privacySkippedCount\":0,\"versionConflictCount\":0,\"actualCostMicrousd\":0}'",
+        [],
+        |row| row.get(0),
+    )?;
+    if invalid_no_candidate_receipts != 0 {
+        return Err(Error::Invariant(format!(
+            "schema 16 no-candidate receipts must contain only the fixed zero-result shape; found {invalid_no_candidate_receipts} invalid rows"
         )));
     }
 

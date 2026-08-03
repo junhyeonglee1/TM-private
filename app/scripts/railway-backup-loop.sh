@@ -38,7 +38,7 @@ while :; do
     fi
     if [ -s "$database" ]; then
         current_schema="$(sqlite3 -readonly "$database" 'PRAGMA user_version;' 2>/dev/null || true)"
-        if [ "$current_schema" = "15" ]; then
+        if [ "$current_schema" -ge 15 ] 2>/dev/null; then
             current_probe_count="$(
                 sqlite3 -readonly "$database" \
                     "SELECT COUNT(*) FROM expense_crypto_metadata
@@ -65,7 +65,7 @@ while :; do
     fi
     if [ -n "$current_schema" ] && [ "$current_schema" -lt 15 ] 2>/dev/null; then
         probe_state_matches=true
-    elif [ "$current_schema" = "15" ] \
+    elif [ "$current_schema" -ge 15 ] 2>/dev/null \
         && [ -n "$current_probe_present" ] \
         && [ "$last_probe_present" = "$current_probe_present" ] \
         && [ "$last_probe_sha256" = "$current_probe_sha256" ]; then

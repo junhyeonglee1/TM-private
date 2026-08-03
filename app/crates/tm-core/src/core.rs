@@ -1432,6 +1432,18 @@ impl TmCore {
             .map_err(Into::into)
     }
 
+    pub fn migration_name(&self, version: i64) -> Result<Option<String>> {
+        let connection = self.database.connect()?;
+        connection
+            .query_row(
+                "SELECT name FROM schema_migrations WHERE version = ?1",
+                [version],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn health(&self) -> Result<HealthReport> {
         let connection = self.database.connect()?;
         let schema_version: i64 =

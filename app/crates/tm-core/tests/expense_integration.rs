@@ -3,16 +3,21 @@ use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tm_core::{
+    AiBudgetPolicy, AiTokenUsage, ClaimExpenseAiClassificationBatchInput,
     ConfirmRecurringPaidInput, CreateRecurringExpenseInput, EncryptedExpenseText, Error,
-    ExpenseCategory, ExpenseCryptoProbe, ExpenseDirection, ExpenseEventKind, ExpenseImportAdapter,
+    ExpenseAiClassificationBatchStatus, ExpenseAiClassificationBindingInput,
+    ExpenseAiClassificationDisposition, ExpenseAiClassificationGroupInput,
+    ExpenseAiClassificationSuggestion, ExpenseCategory, ExpenseClassificationSource,
+    ExpenseCryptoProbe, ExpenseDirection, ExpenseEventKind, ExpenseImportAdapter,
     ExpenseImportPreview, ExpenseImportPreviewInput, ExpenseImportPreviewRow,
     ExpenseMutationCommand, ExpenseMutationRequest, ExpenseReportFact, ExpenseReportObservation,
     ExpenseReportStatus, ExpenseReviewFilter, ExpenseReviewReason, ExpenseReviewScope,
     ExpenseReviewStatus, ExpenseSourceKind, ExpenseTransactionFilter, MatchRecurringExpenseInput,
     NormalizedExpenseImport, NormalizedExpenseRow, OverrideExpenseTransactionInput,
     RecurringAmountKind, RecurringDueRule, RecurringExpenseItem, RecurringExpenseStatus,
-    RecurringOccurrenceStatus, ResolveExpenseReviewInput, Result, SaveExpenseReportInput, TmCore,
-    TmHome, UpdateExpenseSourceStatusInput, UpdateRecurringExpenseInput, expense_text_aad,
+    RecurringOccurrenceStatus, ResolveExpenseReviewInput, Result, SaveExpenseReportInput,
+    StageExpenseAiClassificationBatchInput, TmCore, TmHome, UpdateExpenseSourceStatusInput,
+    UpdateRecurringExpenseInput, expense_text_aad,
 };
 use uuid::Uuid;
 
@@ -350,9 +355,9 @@ fn expense_key_initialization_is_allowed_only_before_any_ledger_state() -> Resul
 }
 
 #[test]
-fn schema_fifteen_imports_reconciles_and_summarizes_without_plaintext() -> Result<()> {
+fn current_schema_imports_reconciles_and_summarizes_without_plaintext() -> Result<()> {
     let (_temporary, core) = fixture()?;
-    assert_eq!(core.health()?.schema_version, 15);
+    assert_eq!(core.health()?.schema_version, 16);
     let probe = ExpenseCryptoProbe {
         key_version: 1,
         nonce: "nonce-for-expense-key-probe".to_owned(),
@@ -1107,6 +1112,36 @@ fn restore_merge_forward_preserves_latest_mutable_expense_projections() -> Resul
     core.claim_expense_report_attempt_for_report(month, month, "restore-ai-attempt")?;
     let old_backup = core.create_backup()?;
 
+    import_ai_classification_purchases(&core, month, &['r'])?;
+    let classification_candidate = core
+        .list_expense_ai_classification_candidates(month, 20)?
+        .into_iter()
+        .next()
+        .expect("restore classification candidate");
+    let classification_batch =
+        core.claim_expense_ai_classification_batch(ClaimExpenseAiClassificationBatchInput {
+            request_id: "restore-classification-batch".to_owned(),
+            quota_month_start: month,
+            target_month_start: month,
+            input_sha256: digest('s'),
+            prompt_version: "expense-classification-v1".to_owned(),
+            model: "gpt-test".to_owned(),
+            max_attempts: 12,
+            groups: vec![ExpenseAiClassificationGroupInput {
+                item_id: "restore-private-item".to_owned(),
+                privacy_skipped: true,
+                bindings: vec![classification_binding(&classification_candidate)],
+            }],
+        })?;
+    assert_eq!(
+        classification_batch.status,
+        ExpenseAiClassificationBatchStatus::Applied
+    );
+    core.store_no_candidate_expense_ai_classification_receipt(
+        "restore-no-candidates-receipt",
+        month,
+    )?;
+
     let updated = core.override_expense_transaction(
         &resolved.transaction.id,
         OverrideExpenseTransactionInput {
@@ -1184,6 +1219,29 @@ fn restore_merge_forward_preserves_latest_mutable_expense_projections() -> Resul
         |row| row.get(0),
     )?;
     assert_eq!(allocation_count, 0);
+    let restored_classification = core
+        .get_expense_ai_classification_batch("restore-classification-batch")?
+        .expect("classification batch survives restore merge-forward");
+    assert_eq!(
+        restored_classification.status,
+        ExpenseAiClassificationBatchStatus::Applied
+    );
+    assert_eq!(restored_classification.privacy_skipped_count, 1);
+    let restored_classification_items: i64 = connection.query_row(
+        "SELECT count(*) FROM expense_ai_classification_items
+         WHERE batch_request_id = 'restore-classification-batch'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(restored_classification_items, 1);
+    let restored_receipt = core
+        .get_expense_ai_classification_receipt("restore-no-candidates-receipt")?
+        .expect("no-candidate receipt survives restore merge-forward");
+    assert_eq!(restored_receipt.target_month_start, month);
+    assert_eq!(
+        restored_receipt.status,
+        tm_core::ExpenseAiClassificationReceiptStatus::NoCandidates
+    );
     Ok(())
 }
 
@@ -2843,7 +2901,7 @@ fn classification_rule_retroactive_resolution_preserves_critical_reviews() -> Re
 }
 
 #[test]
-fn classification_rules_only_reclassify_allowed_rows_and_preserve_accounting_semantics()
+fn classification_rules_only_apply_to_normalized_purchase_rows_and_preserve_accounting_semantics()
 -> Result<()> {
     let (_temporary, core) = fixture()?;
     let source_fingerprint = digest('d');
@@ -3025,16 +3083,17 @@ fn classification_rules_only_reclassify_allowed_rows_and_preserve_accounting_sem
             .find(|transaction| transaction.posted_date.day() == day)
             .expect("transaction for day")
     };
-    assert_eq!(find(2).kind, ExpenseEventKind::Purchase);
-    assert_eq!(find(2).category, ExpenseCategory::Shopping);
-    assert_eq!(find(2).status, tm_core::ExpenseEventStatus::Confirmed);
+    assert_eq!(find(2).kind, ExpenseEventKind::UnknownP2p);
+    assert_eq!(find(2).category, ExpenseCategory::Unconfirmed);
+    assert_eq!(find(2).status, tm_core::ExpenseEventStatus::Unconfirmed);
     assert_eq!(find(3).kind, ExpenseEventKind::Refund);
     assert_eq!(find(3).category, ExpenseCategory::RefundIncome);
     assert_eq!(find(4).kind, ExpenseEventKind::CardPayment);
     assert_eq!(find(4).status, tm_core::ExpenseEventStatus::Excluded);
     assert_eq!(find(4).exclusion_reason.as_deref(), Some("card_payment"));
-    assert_eq!(find(5).kind, ExpenseEventKind::Purchase);
-    assert_eq!(find(5).category, ExpenseCategory::Shopping);
+    assert_eq!(find(5).kind, ExpenseEventKind::UnknownP2p);
+    assert_eq!(find(5).category, ExpenseCategory::Unconfirmed);
+    assert_eq!(find(5).status, tm_core::ExpenseEventStatus::Unconfirmed);
     assert_eq!(find(6).kind, ExpenseEventKind::UnknownP2p);
     assert_eq!(find(6).status, tm_core::ExpenseEventStatus::Unconfirmed);
 
@@ -4519,6 +4578,893 @@ fn legacy_null_payment_classification_rule_is_not_applied() -> Result<()> {
         .items
         .iter()
         .any(|review| review.reason == ExpenseReviewReason::CategoryConfirmation)
+    );
+    Ok(())
+}
+
+fn import_ai_classification_purchases(
+    core: &TmCore,
+    month: NaiveDate,
+    markers: &[char],
+) -> Result<()> {
+    let source_fingerprint = digest('z');
+    let coverage_end =
+        NaiveDate::from_ymd_opt(month.year(), month.month(), 28).expect("valid coverage end");
+    let rows = markers
+        .iter()
+        .enumerate()
+        .map(|(index, marker)| {
+            row(
+                &source_fingerprint,
+                &format!("ai-classification-{index}"),
+                u32::try_from(index + 1).expect("small row index"),
+                NaiveDate::from_ymd_opt(
+                    month.year(),
+                    month.month(),
+                    u32::try_from(index + 1).expect("small day"),
+                )
+                .expect("valid transaction date"),
+                ExpenseEventKind::Purchase,
+                ExpenseDirection::Debit,
+                10_000 + i64::try_from(index).expect("small amount index"),
+                Some(ExpenseCategory::Other),
+                *marker,
+            )
+        })
+        .collect();
+    preview_and_import(
+        core,
+        NormalizedExpenseImport {
+            adapter: ExpenseImportAdapter::KbCardUsageV1,
+            source_kind: ExpenseSourceKind::Card,
+            source_fingerprint,
+            file_sha256: digest('y'),
+            normalized_sha256: digest('x'),
+            coverage_start: month,
+            coverage_end,
+            rejected_count: 0,
+            rows,
+        },
+    )?;
+    Ok(())
+}
+
+fn classification_binding(
+    candidate: &tm_core::ExpenseAiClassificationCandidate,
+) -> ExpenseAiClassificationBindingInput {
+    ExpenseAiClassificationBindingInput {
+        event_id: candidate.event_id.clone(),
+        event_version: candidate.event_version,
+        review_id: candidate.review_id.clone(),
+        review_version: candidate.review_version,
+    }
+}
+
+#[test]
+fn expense_ai_classification_applies_thresholds_without_learning_rules_and_replays_safely()
+-> Result<()> {
+    let (temporary, core) = fixture()?;
+    let month = NaiveDate::from_ymd_opt(2028, 1, 1).expect("valid month");
+    import_ai_classification_purchases(&core, month, &['a', 'b', 'c', 'd'])?;
+    let candidates = core.list_expense_ai_classification_candidates(month, 10)?;
+    assert_eq!(candidates.len(), 4);
+
+    let groups = candidates
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| ExpenseAiClassificationGroupInput {
+            item_id: format!("item-{}", index + 1),
+            privacy_skipped: index == 3,
+            bindings: vec![classification_binding(candidate)],
+        })
+        .collect::<Vec<_>>();
+    let claim_input = ClaimExpenseAiClassificationBatchInput {
+        request_id: "classification-thresholds".to_owned(),
+        quota_month_start: month,
+        target_month_start: month,
+        input_sha256: digest('w'),
+        prompt_version: "expense-classification-v1".to_owned(),
+        model: "gpt-test".to_owned(),
+        max_attempts: 12,
+        groups,
+    };
+    let claimed = core.claim_expense_ai_classification_batch(claim_input.clone())?;
+    assert_eq!(claimed.status, ExpenseAiClassificationBatchStatus::Claimed);
+    assert_eq!(claimed.item_group_count, 4);
+    assert_eq!(claimed.review_count, 4);
+    assert_eq!(claimed.privacy_skipped_count, 1);
+    assert!(!claimed.replayed);
+
+    let replayed_claim = core.claim_expense_ai_classification_batch(claim_input.clone())?;
+    assert!(replayed_claim.replayed);
+    let mut duplicate_active = claim_input.clone();
+    duplicate_active.request_id = "classification-thresholds-active-duplicate".to_owned();
+    assert!(matches!(
+        core.claim_expense_ai_classification_batch(duplicate_active),
+        Err(Error::Conflict(_))
+    ));
+
+    let stage_input = StageExpenseAiClassificationBatchInput {
+        request_id: claim_input.request_id.clone(),
+        suggestions: vec![
+            ExpenseAiClassificationSuggestion {
+                item_id: "item-1".to_owned(),
+                category: ExpenseCategory::Food,
+                confidence: 95,
+            },
+            ExpenseAiClassificationSuggestion {
+                item_id: "item-2".to_owned(),
+                category: ExpenseCategory::Shopping,
+                confidence: 80,
+            },
+            ExpenseAiClassificationSuggestion {
+                item_id: "item-3".to_owned(),
+                category: ExpenseCategory::Cafe,
+                confidence: 60,
+            },
+        ],
+        usage: AiTokenUsage {
+            input_tokens: 100,
+            cached_input_tokens: 25,
+            output_tokens: 20,
+            total_tokens: 120,
+        },
+        cost_microusd: 321,
+        latency_ms: 45,
+    };
+    let staged = core.stage_expense_ai_classification_batch(stage_input.clone())?;
+    assert_eq!(staged.status, ExpenseAiClassificationBatchStatus::Staged);
+    assert_eq!(
+        core.get_staged_expense_ai_classification_suggestions(&claim_input.request_id)?,
+        Some(stage_input.suggestions.clone())
+    );
+    let applied = core.apply_expense_ai_classification_batch(&claim_input.request_id)?;
+    assert_eq!(applied.status, ExpenseAiClassificationBatchStatus::Applied);
+    assert_eq!(applied.confirmed_count, 1);
+    assert_eq!(applied.provisional_count, 1);
+    assert_eq!(applied.review_required_count, 1);
+    assert_eq!(applied.privacy_skipped_count, 1);
+    assert_eq!(applied.cost_microusd, 321);
+
+    let staged_replay = core.stage_expense_ai_classification_batch(stage_input)?;
+    assert_eq!(
+        staged_replay.status,
+        ExpenseAiClassificationBatchStatus::Applied
+    );
+    assert!(staged_replay.replayed);
+    let applied_replay = core.apply_expense_ai_classification_batch(&claim_input.request_id)?;
+    assert!(applied_replay.replayed);
+
+    let transactions = core.list_expense_transactions(ExpenseTransactionFilter {
+        month_start: month,
+        cursor: None,
+        limit: 20,
+    })?;
+    let by_id = |event_id: &str| {
+        transactions
+            .items
+            .iter()
+            .find(|transaction| transaction.id == event_id)
+            .expect("classified transaction")
+    };
+    let high = by_id(&candidates[0].event_id);
+    assert_eq!(high.category, ExpenseCategory::Food);
+    assert_eq!(high.classification_source, ExpenseClassificationSource::Ai);
+    assert_eq!(high.classification_confidence, Some(95));
+    assert!(!high.is_provisional);
+    let medium = by_id(&candidates[1].event_id);
+    assert_eq!(medium.category, ExpenseCategory::Shopping);
+    assert_eq!(
+        medium.classification_source,
+        ExpenseClassificationSource::Ai
+    );
+    assert_eq!(medium.classification_confidence, Some(80));
+    assert!(medium.is_provisional);
+    let low = by_id(&candidates[2].event_id);
+    assert_eq!(low.category, ExpenseCategory::Other);
+    assert_eq!(
+        low.classification_source,
+        ExpenseClassificationSource::Deterministic
+    );
+    assert_eq!(low.classification_confidence, None);
+    let private = by_id(&candidates[3].event_id);
+    assert_eq!(
+        private.classification_source,
+        ExpenseClassificationSource::Deterministic
+    );
+
+    let pending = core.list_expense_reviews_scoped(
+        ExpenseReviewFilter {
+            month_start: Some(month),
+            status: Some(ExpenseReviewStatus::Pending),
+            cursor: None,
+            limit: 20,
+        },
+        ExpenseReviewScope::Required,
+    )?;
+    assert_eq!(pending.items.len(), 2);
+    let low_review = pending
+        .items
+        .iter()
+        .find(|review| review.id == candidates[2].review_id)
+        .expect("low-confidence review");
+    assert_eq!(
+        low_review.suggestion_source,
+        Some(ExpenseClassificationSource::Ai)
+    );
+    assert_eq!(low_review.suggestion_confidence, Some(60));
+    assert_eq!(low_review.suggested_category, Some(ExpenseCategory::Cafe));
+    let privacy_review = pending
+        .items
+        .iter()
+        .find(|review| review.id == candidates[3].review_id)
+        .expect("privacy review");
+    assert_eq!(privacy_review.suggestion_source, None);
+    assert_eq!(privacy_review.suggestion_confidence, None);
+    assert_eq!(
+        core.get_expense_month_summary(month)?.status,
+        ExpenseReportStatus::Provisional
+    );
+    assert!(
+        core.list_expense_ai_classification_candidates(month, 10)?
+            .is_empty()
+    );
+
+    let connection = Connection::open(TmHome::new(temporary.path()).database_path())?;
+    let learned_rules: u32 = connection.query_row(
+        "SELECT count(*) FROM expense_rules WHERE rule_kind = 'classification'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(learned_rules, 0);
+    let dispositions = connection
+        .prepare(
+            "SELECT disposition FROM expense_ai_classification_items
+             WHERE batch_request_id = ?1 ORDER BY item_id",
+        )?
+        .query_map([&claim_input.request_id], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    assert_eq!(
+        dispositions,
+        vec![
+            ExpenseAiClassificationDisposition::Confirmed
+                .as_str()
+                .to_owned(),
+            ExpenseAiClassificationDisposition::Provisional
+                .as_str()
+                .to_owned(),
+            ExpenseAiClassificationDisposition::ReviewRequired
+                .as_str()
+                .to_owned(),
+            ExpenseAiClassificationDisposition::PrivacySkipped
+                .as_str()
+                .to_owned(),
+        ]
+    );
+    let result_json: String = connection.query_row(
+        "SELECT result_json FROM expense_ai_classification_batches WHERE request_id = ?1",
+        [&claim_input.request_id],
+        |row| row.get(0),
+    )?;
+    for candidate in &candidates {
+        assert!(!result_json.contains(&candidate.event_id));
+        assert!(!result_json.contains(&candidate.review_id));
+        assert!(!result_json.contains(&candidate.merchant_blind_index));
+        assert!(!result_json.contains(&candidate.payment_method_fingerprint));
+    }
+
+    let mut cached_input = claim_input;
+    cached_input.request_id = "classification-thresholds-cached".to_owned();
+    cached_input.quota_month_start =
+        NaiveDate::from_ymd_opt(2028, 2, 1).expect("valid next quota month");
+    let cached = core.claim_expense_ai_classification_batch(cached_input)?;
+    assert_eq!(cached.request_id, "classification-thresholds");
+    assert!(cached.replayed);
+    Ok(())
+}
+
+#[test]
+fn expense_ai_classification_is_all_or_none_when_a_candidate_version_changes() -> Result<()> {
+    let (_temporary, core) = fixture()?;
+    let month = NaiveDate::from_ymd_opt(2028, 3, 1).expect("valid month");
+    import_ai_classification_purchases(&core, month, &['e', 'f'])?;
+    let candidates = core.list_expense_ai_classification_candidates(month, 10)?;
+    assert_eq!(candidates.len(), 2);
+    let claim = ClaimExpenseAiClassificationBatchInput {
+        request_id: "classification-stale".to_owned(),
+        quota_month_start: month,
+        target_month_start: month,
+        input_sha256: digest('v'),
+        prompt_version: "expense-classification-v1".to_owned(),
+        model: "gpt-test".to_owned(),
+        max_attempts: 12,
+        groups: candidates
+            .iter()
+            .enumerate()
+            .map(|(index, candidate)| ExpenseAiClassificationGroupInput {
+                item_id: format!("stale-item-{}", index + 1),
+                privacy_skipped: false,
+                bindings: vec![classification_binding(candidate)],
+            })
+            .collect(),
+    };
+    core.claim_expense_ai_classification_batch(claim.clone())?;
+    core.stage_expense_ai_classification_batch(StageExpenseAiClassificationBatchInput {
+        request_id: claim.request_id.clone(),
+        suggestions: vec![
+            ExpenseAiClassificationSuggestion {
+                item_id: "stale-item-1".to_owned(),
+                category: ExpenseCategory::Food,
+                confidence: 99,
+            },
+            ExpenseAiClassificationSuggestion {
+                item_id: "stale-item-2".to_owned(),
+                category: ExpenseCategory::Shopping,
+                confidence: 99,
+            },
+        ],
+        usage: AiTokenUsage {
+            input_tokens: 10,
+            cached_input_tokens: 0,
+            output_tokens: 5,
+            total_tokens: 15,
+        },
+        cost_microusd: 10,
+        latency_ms: 2,
+    })?;
+
+    core.resolve_expense_review(
+        &candidates[0].review_id,
+        ResolveExpenseReviewInput {
+            expected_version: candidates[0].review_version,
+            kind: ExpenseEventKind::Purchase,
+            category: ExpenseCategory::Health,
+            duplicate_of_event_id: None,
+            related_event_id: None,
+            personal_amount_minor: None,
+            create_rule: false,
+        },
+    )?;
+    let stale = core.apply_expense_ai_classification_batch(&claim.request_id)?;
+    assert_eq!(stale.status, ExpenseAiClassificationBatchStatus::Stale);
+    assert_eq!(stale.failure_code.as_deref(), Some("version_conflict"));
+    assert_eq!(stale.version_conflict_count, 1);
+    assert_eq!(stale.confirmed_count, 0);
+    assert_eq!(stale.provisional_count, 0);
+    assert_eq!(stale.review_required_count, 0);
+
+    let transactions = core.list_expense_transactions(ExpenseTransactionFilter {
+        month_start: month,
+        cursor: None,
+        limit: 10,
+    })?;
+    let manually_resolved = transactions
+        .items
+        .iter()
+        .find(|transaction| transaction.id == candidates[0].event_id)
+        .expect("manually resolved transaction");
+    assert_eq!(manually_resolved.category, ExpenseCategory::Health);
+    assert_eq!(
+        manually_resolved.classification_source,
+        ExpenseClassificationSource::Manual
+    );
+    let untouched = transactions
+        .items
+        .iter()
+        .find(|transaction| transaction.id == candidates[1].event_id)
+        .expect("untouched transaction");
+    assert_eq!(untouched.category, ExpenseCategory::Other);
+    assert_eq!(
+        untouched.classification_source,
+        ExpenseClassificationSource::Deterministic
+    );
+    assert_eq!(untouched.classification_confidence, None);
+    let retry_candidates = core.list_expense_ai_classification_candidates(month, 10)?;
+    assert_eq!(retry_candidates.len(), 1);
+    assert_eq!(retry_candidates[0].event_id, candidates[1].event_id);
+    Ok(())
+}
+
+#[test]
+fn expense_ai_privacy_skips_survive_a_failed_mixed_batch() -> Result<()> {
+    let (_temporary, core) = fixture()?;
+    let month = NaiveDate::from_ymd_opt(2028, 4, 1).expect("valid month");
+    import_ai_classification_purchases(&core, month, &['g', 'h'])?;
+    let candidates = core.list_expense_ai_classification_candidates(month, 10)?;
+    assert_eq!(candidates.len(), 2);
+    let claim = ClaimExpenseAiClassificationBatchInput {
+        request_id: "classification-privacy-failure".to_owned(),
+        quota_month_start: month,
+        target_month_start: month,
+        input_sha256: digest('u'),
+        prompt_version: "expense-classification-v1".to_owned(),
+        model: "gpt-test".to_owned(),
+        max_attempts: 12,
+        groups: vec![
+            ExpenseAiClassificationGroupInput {
+                item_id: "privacy-item".to_owned(),
+                privacy_skipped: true,
+                bindings: vec![classification_binding(&candidates[0])],
+            },
+            ExpenseAiClassificationGroupInput {
+                item_id: "model-item".to_owned(),
+                privacy_skipped: false,
+                bindings: vec![classification_binding(&candidates[1])],
+            },
+        ],
+    };
+    core.claim_expense_ai_classification_batch(claim.clone())?;
+    let failed = core.fail_expense_ai_classification_batch(&claim.request_id, "transport")?;
+    assert_eq!(failed.status, ExpenseAiClassificationBatchStatus::Failed);
+    assert_eq!(failed.privacy_skipped_count, 1);
+    let retry_candidates = core.list_expense_ai_classification_candidates(month, 10)?;
+    assert_eq!(retry_candidates.len(), 1);
+    assert_eq!(retry_candidates[0].event_id, candidates[1].event_id);
+
+    let required = core.list_expense_reviews_scoped(
+        ExpenseReviewFilter {
+            month_start: Some(month),
+            status: Some(ExpenseReviewStatus::Pending),
+            cursor: None,
+            limit: 10,
+        },
+        ExpenseReviewScope::Required,
+    )?;
+    assert_eq!(required.items.len(), 1);
+    assert_eq!(required.items[0].id, candidates[0].review_id);
+    assert_eq!(required.items[0].suggestion_source, None);
+    Ok(())
+}
+
+#[test]
+fn expense_ai_candidates_exclude_allocations_critical_reviews_rules_and_transfers() -> Result<()> {
+    let (temporary, core) = fixture()?;
+    let month = NaiveDate::from_ymd_opt(2028, 5, 1).expect("valid month");
+    import_ai_classification_purchases(&core, month, &['i', 'j', 'k'])?;
+    let initial = core.list_expense_ai_classification_candidates(month, 10)?;
+    assert_eq!(initial.len(), 3);
+    let connection = Connection::open(TmHome::new(temporary.path()).database_path())?;
+    connection.execute(
+        "INSERT INTO expense_allocations(
+            id, event_id, allocation_kind, allocation_source,
+            amount_minor, currency, created_at
+         ) VALUES (?1, ?2, 'personal', 'user', 1, 'KRW', ?3)",
+        params![
+            Uuid::now_v7().to_string(),
+            initial[0].event_id,
+            "2028-05-10T00:00:00Z"
+        ],
+    )?;
+    connection.execute(
+        "INSERT INTO expense_reviews(
+            id, event_id, review_reason, review_status, created_at
+         ) VALUES (?1, ?2, 'manual_override', 'pending', ?3)",
+        params![
+            Uuid::now_v7().to_string(),
+            initial[1].event_id,
+            "2028-05-10T00:00:00Z"
+        ],
+    )?;
+    connection.execute(
+        "INSERT INTO expense_rules(
+            id, rule_kind, merchant_blind_index, payment_method_fingerprint,
+            event_kind, category, created_at
+         ) VALUES (?1, 'classification', ?2, ?3, 'purchase', 'food', ?4)",
+        params![
+            Uuid::now_v7().to_string(),
+            initial[2].merchant_blind_index,
+            initial[2].payment_method_fingerprint,
+            "2028-05-10T00:00:00Z"
+        ],
+    )?;
+    drop(connection);
+
+    let source_fingerprint = digest('t');
+    preview_and_import(
+        &core,
+        NormalizedExpenseImport {
+            adapter: ExpenseImportAdapter::KbAccountHistoryV1,
+            source_kind: ExpenseSourceKind::Account,
+            source_fingerprint: source_fingerprint.clone(),
+            file_sha256: digest('s'),
+            normalized_sha256: digest('r'),
+            coverage_start: month,
+            coverage_end: month,
+            rejected_count: 0,
+            rows: vec![row(
+                &source_fingerprint,
+                "unsafe-p2p",
+                1,
+                month,
+                ExpenseEventKind::UnknownP2p,
+                ExpenseDirection::Debit,
+                50_000,
+                None,
+                'q',
+            )],
+        },
+    )?;
+    assert!(
+        core.list_expense_ai_classification_candidates(month, 10)?
+            .is_empty()
+    );
+    assert!(
+        core.list_expense_reviews(ExpenseReviewFilter {
+            month_start: Some(month),
+            status: Some(ExpenseReviewStatus::Pending),
+            cursor: None,
+            limit: 20,
+        })?
+        .items
+        .iter()
+        .any(|review| review.reason == ExpenseReviewReason::UnknownP2p)
+    );
+    Ok(())
+}
+
+#[test]
+fn expense_ai_classification_attempt_limit_is_atomic_and_bounded() -> Result<()> {
+    let (_temporary, core) = fixture()?;
+    let month = NaiveDate::from_ymd_opt(2028, 6, 1).expect("valid month");
+    import_ai_classification_purchases(&core, month, &['l'])?;
+    let candidate = core
+        .list_expense_ai_classification_candidates(month, 10)?
+        .into_iter()
+        .next()
+        .expect("classification candidate");
+    let build_claim = |attempt: u8, max_attempts: u8| ClaimExpenseAiClassificationBatchInput {
+        request_id: format!("classification-attempt-{attempt}"),
+        quota_month_start: month,
+        target_month_start: month,
+        input_sha256: format!("{attempt:064x}"),
+        prompt_version: "expense-classification-v1".to_owned(),
+        model: "gpt-test".to_owned(),
+        max_attempts,
+        groups: vec![ExpenseAiClassificationGroupInput {
+            item_id: "attempt-item".to_owned(),
+            privacy_skipped: false,
+            bindings: vec![classification_binding(&candidate)],
+        }],
+    };
+    for attempt in 1..=2 {
+        let claim = core.claim_expense_ai_classification_batch(build_claim(attempt, 2))?;
+        assert_eq!(claim.attempt_number, attempt);
+        core.fail_expense_ai_classification_batch(&claim.request_id, "timeout")?;
+    }
+    assert!(matches!(
+        core.claim_expense_ai_classification_batch(build_claim(3, 2)),
+        Err(Error::Conflict(message)) if message.contains("monthly attempt limit")
+    ));
+    assert!(matches!(
+        core.claim_expense_ai_classification_batch(build_claim(4, 13)),
+        Err(Error::InvalidInput(_))
+    ));
+    Ok(())
+}
+
+#[test]
+fn all_privacy_expense_ai_batch_completes_without_model_usage() -> Result<()> {
+    let (_temporary, core) = fixture()?;
+    let month = NaiveDate::from_ymd_opt(2028, 7, 1).expect("valid month");
+    import_ai_classification_purchases(&core, month, &['m'])?;
+    let candidate = core
+        .list_expense_ai_classification_candidates(month, 10)?
+        .into_iter()
+        .next()
+        .expect("classification candidate");
+    let batch =
+        core.claim_expense_ai_classification_batch(ClaimExpenseAiClassificationBatchInput {
+            request_id: "classification-all-privacy".to_owned(),
+            quota_month_start: month,
+            target_month_start: month,
+            input_sha256: digest('p'),
+            prompt_version: "expense-classification-v1".to_owned(),
+            model: "gpt-test".to_owned(),
+            max_attempts: 12,
+            groups: vec![ExpenseAiClassificationGroupInput {
+                item_id: "privacy-only".to_owned(),
+                privacy_skipped: true,
+                bindings: vec![classification_binding(&candidate)],
+            }],
+        })?;
+    assert_eq!(batch.status, ExpenseAiClassificationBatchStatus::Applied);
+    assert_eq!(batch.privacy_skipped_count, 1);
+    assert_eq!(batch.usage.input_tokens, 0);
+    assert_eq!(batch.usage.output_tokens, 0);
+    assert_eq!(batch.cost_microusd, 0);
+    assert!(batch.completed_at.is_some());
+    assert!(
+        core.list_expense_ai_classification_candidates(month, 10)?
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[test]
+fn expense_ai_claim_leases_expire_but_staged_results_remain_recoverable() -> Result<()> {
+    let (_temporary, core) = fixture()?;
+    let month = NaiveDate::from_ymd_opt(2028, 8, 1).expect("valid month");
+    import_ai_classification_purchases(&core, month, &['n'])?;
+    let candidate = core
+        .list_expense_ai_classification_candidates(month, 10)?
+        .into_iter()
+        .next()
+        .expect("classification candidate");
+    let claim_for = |request_id: &str, input_marker: char| ClaimExpenseAiClassificationBatchInput {
+        request_id: request_id.to_owned(),
+        quota_month_start: month,
+        target_month_start: month,
+        input_sha256: digest(input_marker),
+        prompt_version: "expense-classification-v1".to_owned(),
+        model: "gpt-test".to_owned(),
+        max_attempts: 12,
+        groups: vec![ExpenseAiClassificationGroupInput {
+            item_id: "lease-item".to_owned(),
+            privacy_skipped: false,
+            bindings: vec![classification_binding(&candidate)],
+        }],
+    };
+    core.claim_expense_ai_classification_batch(claim_for("lease-claimed", 'o'))?;
+    let open = core.list_open_expense_ai_classification_batches(month)?;
+    assert_eq!(open.len(), 1);
+    assert_eq!(open[0].status, ExpenseAiClassificationBatchStatus::Claimed);
+    let claimed_ops = core.expense_ai_classification_ops_status()?;
+    assert_eq!(claimed_ops.claimed_count, 1);
+    assert_eq!(claimed_ops.staged_count, 0);
+    assert!(claimed_ops.oldest_open_created_at.is_some());
+    let claimed_latest = claimed_ops.latest.expect("latest claimed status");
+    assert_eq!(
+        claimed_latest.status,
+        tm_core::ExpenseAiClassificationSafeStatus::Claimed
+    );
+    assert_eq!(claimed_latest.target_month, "2028-08");
+    assert_eq!(
+        core.expire_claimed_expense_ai_classification_batches(month, "2000-01-01T00:00:00Z")?,
+        0
+    );
+    assert_eq!(
+        core.expire_claimed_expense_ai_classification_batches(month, "9999-01-01T00:00:00Z")?,
+        1
+    );
+    let expired = core
+        .get_expense_ai_classification_batch("lease-claimed")?
+        .expect("expired batch");
+    assert_eq!(expired.status, ExpenseAiClassificationBatchStatus::Failed);
+    assert_eq!(expired.failure_code.as_deref(), Some("lease_expired"));
+    assert!(expired.completed_at.is_some());
+
+    let budget_policy = AiBudgetPolicy {
+        warning_limit_microusd: 10_000_000,
+        hard_limit_microusd: 20_000_000,
+    };
+    let reservation = core.reserve_ai_budget_with_operation_limit(
+        "lease-staged",
+        "openai",
+        "gpt-test",
+        "expense_classification",
+        10_000,
+        budget_policy,
+        250_000,
+    )?;
+    let staged_claim =
+        core.claim_expense_ai_classification_batch(claim_for("lease-staged", 'p'))?;
+    core.stage_expense_ai_classification_batch(StageExpenseAiClassificationBatchInput {
+        request_id: staged_claim.request_id.clone(),
+        suggestions: vec![ExpenseAiClassificationSuggestion {
+            item_id: "lease-item".to_owned(),
+            category: ExpenseCategory::Education,
+            confidence: 91,
+        }],
+        usage: AiTokenUsage {
+            input_tokens: 8,
+            cached_input_tokens: 0,
+            output_tokens: 4,
+            total_tokens: 12,
+        },
+        cost_microusd: 5,
+        latency_ms: 1,
+    })?;
+    let open = core.list_open_expense_ai_classification_batches(month)?;
+    assert_eq!(open.len(), 1);
+    assert_eq!(open[0].request_id, "lease-staged");
+    assert_eq!(open[0].status, ExpenseAiClassificationBatchStatus::Staged);
+    let staged_ops = core.expense_ai_classification_ops_status()?;
+    assert_eq!(staged_ops.claimed_count, 0);
+    assert_eq!(staged_ops.staged_count, 1);
+    let staged_ops_json = serde_json::to_string(&staged_ops)?;
+    assert!(!staged_ops_json.contains("lease-staged"));
+    assert!(!staged_ops_json.contains(&candidate.event_id));
+    assert!(!staged_ops_json.contains(&candidate.review_id));
+    assert!(!staged_ops_json.contains(&candidate.merchant_blind_index));
+    assert!(!staged_ops_json.contains(&digest('p')));
+    assert_eq!(
+        core.expire_claimed_expense_ai_classification_batches(month, "9999-01-01T00:00:00Z")?,
+        0
+    );
+    let recovered = core.apply_expense_ai_classification_batch("lease-staged")?;
+    assert_eq!(
+        recovered.status,
+        ExpenseAiClassificationBatchStatus::Applied
+    );
+    assert_eq!(recovered.confirmed_count, 1);
+    let applied_ops = core.expense_ai_classification_ops_status()?;
+    assert_eq!(applied_ops.claimed_count, 0);
+    assert_eq!(applied_ops.staged_count, 0);
+    assert_eq!(applied_ops.oldest_open_created_at, None);
+    let applied_latest = applied_ops.latest.expect("latest applied status");
+    assert_eq!(
+        applied_latest.status,
+        tm_core::ExpenseAiClassificationSafeStatus::Applied
+    );
+    assert_eq!(applied_latest.target_month, "2028-08");
+    assert_eq!(applied_latest.confirmed_count, 1);
+    assert_eq!(applied_latest.actual_cost_microusd, 5);
+    assert_eq!(applied_latest.failure_code, None);
+    assert!(applied_latest.completed_at.is_some());
+    let unsettled = core.list_unsettled_terminal_expense_ai_classification_batches(month)?;
+    assert_eq!(unsettled.len(), 1);
+    assert_eq!(unsettled[0].request_id, "lease-staged");
+    core.settle_ai_budget(
+        &reservation,
+        recovered.cost_microusd,
+        Some(recovered.usage),
+        "succeeded",
+        budget_policy,
+    )?;
+    assert!(
+        core.list_unsettled_terminal_expense_ai_classification_batches(month)?
+            .is_empty()
+    );
+    assert!(
+        core.list_open_expense_ai_classification_batches(month)?
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[test]
+fn no_candidate_receipts_replay_exactly_and_are_mutually_exclusive_with_batches() -> Result<()> {
+    use std::sync::{Arc, Barrier};
+
+    let (temporary, core) = fixture()?;
+    let month = NaiveDate::from_ymd_opt(2028, 9, 1).expect("valid month");
+    import_ai_classification_purchases(&core, month, &['q'])?;
+    let candidate = core
+        .list_expense_ai_classification_candidates(month, 10)?
+        .into_iter()
+        .next()
+        .expect("classification candidate");
+    let claim_for = |request_id: &str, marker: char| ClaimExpenseAiClassificationBatchInput {
+        request_id: request_id.to_owned(),
+        quota_month_start: month,
+        target_month_start: month,
+        input_sha256: digest(marker),
+        prompt_version: "expense-classification-v1".to_owned(),
+        model: "gpt-test".to_owned(),
+        max_attempts: 12,
+        groups: vec![ExpenseAiClassificationGroupInput {
+            item_id: "receipt-race-item".to_owned(),
+            privacy_skipped: false,
+            bindings: vec![classification_binding(&candidate)],
+        }],
+    };
+
+    let receipt =
+        core.store_no_candidate_expense_ai_classification_receipt("receipt-first", month)?;
+    assert_eq!(
+        receipt.status,
+        tm_core::ExpenseAiClassificationReceiptStatus::NoCandidates
+    );
+    assert_eq!(
+        receipt.result,
+        tm_core::ExpenseAiClassificationReceiptResult::default()
+    );
+    assert!(!receipt.replayed);
+    let replay =
+        core.store_no_candidate_expense_ai_classification_receipt("receipt-first", month)?;
+    assert!(replay.replayed);
+    assert_eq!(replay.created_at, receipt.created_at);
+    assert_eq!(replay.completed_at, receipt.completed_at);
+    assert!(matches!(
+        core.store_no_candidate_expense_ai_classification_receipt(
+            "receipt-first",
+            NaiveDate::from_ymd_opt(2028, 10, 1).expect("valid other month")
+        ),
+        Err(Error::Conflict(_))
+    ));
+    assert!(matches!(
+        core.claim_expense_ai_classification_batch(claim_for("receipt-first", '1')),
+        Err(Error::Conflict(_))
+    ));
+
+    let batch_first = core.claim_expense_ai_classification_batch(claim_for("batch-first", '2'))?;
+    assert!(matches!(
+        core.store_no_candidate_expense_ai_classification_receipt("batch-first", month),
+        Err(Error::Conflict(_))
+    ));
+    core.fail_expense_ai_classification_batch(&batch_first.request_id, "timeout")?;
+
+    let barrier = Arc::new(Barrier::new(3));
+    let receipt_core = core.clone();
+    let receipt_barrier = barrier.clone();
+    let receipt_thread = std::thread::spawn(move || {
+        receipt_barrier.wait();
+        receipt_core
+            .store_no_candidate_expense_ai_classification_receipt("receipt-race", month)
+            .map(|_| "receipt")
+    });
+    let batch_core = core.clone();
+    let batch_barrier = barrier.clone();
+    let race_claim = claim_for("receipt-race", '3');
+    let batch_thread = std::thread::spawn(move || {
+        batch_barrier.wait();
+        batch_core
+            .claim_expense_ai_classification_batch(race_claim)
+            .map(|_| "batch")
+    });
+    barrier.wait();
+    let receipt_outcome = receipt_thread
+        .join()
+        .expect("receipt race thread must not panic");
+    let batch_outcome = batch_thread
+        .join()
+        .expect("batch race thread must not panic");
+    assert_ne!(receipt_outcome.is_ok(), batch_outcome.is_ok());
+    let losing_error = receipt_outcome
+        .err()
+        .or(batch_outcome.err())
+        .expect("one race participant must lose");
+    assert!(matches!(losing_error, Error::Conflict(_)));
+
+    let connection = Connection::open(TmHome::new(temporary.path()).database_path())?;
+    let coexistence: (u32, u32) = connection.query_row(
+        "SELECT
+            (SELECT count(*) FROM expense_ai_classification_receipts
+             WHERE request_id = 'receipt-race'),
+            (SELECT count(*) FROM expense_ai_classification_batches
+             WHERE request_id = 'receipt-race')",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    assert_eq!(coexistence.0 + coexistence.1, 1);
+    let receipt_json: String = connection.query_row(
+        "SELECT result_json FROM expense_ai_classification_receipts
+         WHERE request_id = 'receipt-first'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&receipt_json)?,
+        serde_json::json!({
+            "itemGroupCount": 0,
+            "reviewCount": 0,
+            "resultCount": 0,
+            "confirmedCount": 0,
+            "provisionalCount": 0,
+            "reviewRequiredCount": 0,
+            "privacySkippedCount": 0,
+            "versionConflictCount": 0,
+            "actualCostMicrousd": 0
+        })
+    );
+    assert!(
+        connection
+            .execute(
+                "UPDATE expense_ai_classification_receipts
+                 SET completed_at = '2099-01-01T00:00:00Z'
+                 WHERE request_id = 'receipt-first'",
+                [],
+            )
+            .is_err()
+    );
+    assert!(
+        connection
+            .execute(
+                "DELETE FROM expense_ai_classification_receipts
+                 WHERE request_id = 'receipt-first'",
+                [],
+            )
+            .is_err()
     );
     Ok(())
 }

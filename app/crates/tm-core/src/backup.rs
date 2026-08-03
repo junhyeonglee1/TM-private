@@ -20,7 +20,7 @@ use crate::{
         Database, SCHEMA_VERSION, database_lock, now_utc, register_runtime_functions,
         validate_schema_semantics,
     },
-    migration::{MANIFEST_TABLES, SCHEMA_14_MANIFEST_TABLE_COUNT},
+    migration::{MANIFEST_TABLES, SCHEMA_14_MANIFEST_TABLE_COUNT, SCHEMA_15_MANIFEST_TABLE_COUNT},
 };
 
 const DATABASE_BACKUP_LIMIT: usize = 30;
@@ -398,6 +398,13 @@ fn has_complete_schema_tables(connection: &Connection, version: i64) -> rusqlite
                 tables.last() == Some(&"app_state")
                     && MANIFEST_TABLES.get(SCHEMA_14_MANIFEST_TABLE_COUNT)
                         == Some(&"expense_crypto_metadata")
+            }),
+        15 => MANIFEST_TABLES
+            .get(..SCHEMA_15_MANIFEST_TABLE_COUNT)
+            .filter(|tables| {
+                tables.last() == Some(&"expense_mutation_receipts")
+                    && MANIFEST_TABLES.get(SCHEMA_15_MANIFEST_TABLE_COUNT)
+                        == Some(&"expense_ai_classification_batches")
             }),
         SCHEMA_VERSION => Some(MANIFEST_TABLES),
         _ => Some(&[]),
@@ -1292,6 +1299,7 @@ fn merge_expense_ledger(connection: &Connection, preserved_database: &Path) -> R
             "expense_ai_request_bindings",
             "expense_ai_attempts",
             "expense_mutation_receipts",
+            "expense_ai_classification_receipts",
         ] {
             let (columns, primary_key) = expense_table_columns(connection, table)?;
             let table_name = quote_sql_identifier(table);
@@ -1381,6 +1389,28 @@ fn merge_expense_ledger(connection: &Connection, preserved_database: &Path) -> R
                     )));
                 }
             }
+        }
+        // Classification items reference their batch with ON DELETE RESTRICT.
+        // Replace the authoritative pre-restore snapshot in dependency-safe order.
+        connection.execute_batch(
+            "DELETE FROM main.expense_ai_classification_items;
+             DELETE FROM main.expense_ai_classification_batches;",
+        )?;
+        for table in [
+            "expense_ai_classification_batches",
+            "expense_ai_classification_items",
+        ] {
+            let (columns, _) = expense_table_columns(connection, table)?;
+            let table_name = quote_sql_identifier(table);
+            let column_list = columns
+                .iter()
+                .map(|column| quote_sql_identifier(column))
+                .collect::<Vec<_>>()
+                .join(", ");
+            connection.execute_batch(&format!(
+                "INSERT INTO main.{table_name}({column_list})
+                 SELECT {column_list} FROM expense_preserved.{table_name};"
+            ))?;
         }
         connection.execute_batch("COMMIT;")?;
         Ok(())
@@ -1841,7 +1871,10 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{backup_file_evidence, should_skip};
-    use crate::{Result, migration::SCHEMA_14_MANIFEST_TABLE_COUNT};
+    use crate::{
+        Result,
+        migration::{SCHEMA_14_MANIFEST_TABLE_COUNT, SCHEMA_15_MANIFEST_TABLE_COUNT},
+    };
 
     #[test]
     fn source_snapshot_excludes_generated_and_sensitive_content() {
@@ -1873,6 +1906,27 @@ mod tests {
         assert_eq!(
             super::MANIFEST_TABLES.get(SCHEMA_14_MANIFEST_TABLE_COUNT),
             Some(&"expense_crypto_metadata")
+        );
+    }
+
+    #[test]
+    fn schema_fifteen_manifest_boundary_precedes_classification_tables() {
+        assert_eq!(SCHEMA_15_MANIFEST_TABLE_COUNT, 65);
+        assert_eq!(
+            super::MANIFEST_TABLES.get(SCHEMA_15_MANIFEST_TABLE_COUNT - 1),
+            Some(&"expense_mutation_receipts")
+        );
+        assert_eq!(
+            super::MANIFEST_TABLES.get(SCHEMA_15_MANIFEST_TABLE_COUNT),
+            Some(&"expense_ai_classification_batches")
+        );
+        assert_eq!(
+            super::MANIFEST_TABLES.get(SCHEMA_15_MANIFEST_TABLE_COUNT + 1),
+            Some(&"expense_ai_classification_items")
+        );
+        assert_eq!(
+            super::MANIFEST_TABLES.get(SCHEMA_15_MANIFEST_TABLE_COUNT + 2),
+            Some(&"expense_ai_classification_receipts")
         );
     }
 

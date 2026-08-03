@@ -18,6 +18,34 @@ describe("모바일 PWA 지출", () => {
     expect(app).not.toContain('"/api/v1/expenses/imports"');
   });
 
+  it("AI 자동 분류는 확인 필요 화면에서 한 번의 명시 클릭으로만 실행한다", () => {
+    expect(shell).toContain('id="expense-classification-run"');
+    expect(shell).toContain('id="expense-classification-result"');
+    expect(shell).toContain("개인정보 필터를 거친 업체 표시명만 OpenAI에 보냅니다.");
+    expect(shell).toContain("1회 최대 $0.01 · 서울 기준 월 12회 · 이 기능 월 $0.25에서 중단");
+    expect(app).toContain('byId("expense-classification-run").addEventListener("click", (event) => void classifyMobileExpenses(event.currentTarget))');
+    expect(app).toContain('expenseMutation("/api/v1/expenses/classifications:run"');
+    expect(app).toContain('operation: "expense-classification-run"');
+    expect(app).toContain('aiConfirmation: "expense-classification"');
+    expect(app).toContain("result.manualReviewCount");
+    expect(app).toContain("result.privacySkippedCount");
+    expect(app).toContain("result.versionConflictCount");
+    expect(app).toContain("거래가 변경되어 이번 자동 분류를 적용하지 않았습니다");
+    expect(app).toContain("추가 후보가 생기면 AI 자동 분류 버튼을 다시 눌러 이어서 처리할 수 있습니다.");
+    const loader = app.match(/async function loadExpenses[\s\S]*?(?=function renderExpenses)/)?.[0];
+    expect(loader).toBeTruthy();
+    expect(loader).not.toContain("classifications:run");
+  });
+
+  it("분류 출처와 0~100 신뢰도는 서버 필드에서 안전한 text node 배지로 표시한다", () => {
+    expect(app).toContain("const expenseClassificationSourceLabels = {");
+    expect(app).toContain('ai: "AI 분류"');
+    expect(app).toContain("Math.min(100, Number(confidence))");
+    expect(app).toContain('const badge = text("span", label, `expense-classification-badge ${source}`)');
+    expect(app).toContain("appendExpenseClassificationBadge(metadata, item.classificationSource, item.classificationConfidence)");
+    expect(app).toContain("appendExpenseClassificationBadge(title, review.suggestionSource, review.suggestionConfidence, true)");
+  });
+
   it("AI 해설은 명시 호출·동일 요청 재확인·새 과금 요청을 구분한다", () => {
     expect(app).toContain('generate.addEventListener("click", () => void generateMobileExpenseReport(generate, false))');
     expect(app).toContain('newRequest.addEventListener("click", () => void generateMobileExpenseReport(newRequest, true))');
@@ -86,6 +114,52 @@ describe("모바일 PWA 지출", () => {
     expect(calls[4].options.headers["idempotency-key"]).not.toBe(retryKey);
   });
 
+  it("AI classification terminal errors discard the key for a new explicit run", async () => {
+    const helperSource = app.match(/function mutationHeaders[\s\S]*?(?=function activeProject)/)?.[0];
+    expect(helperSource).toBeTruthy();
+    const calls: Array<{ options: { headers: Record<string, string> } }> = [];
+    let terminal = true;
+    let sequence = 0;
+    const api = async (_path: string, options: { headers: Record<string, string> }) => {
+      calls.push({ options });
+      if (terminal) {
+        throw Object.assign(new Error("lease expired"), {
+          code: "EXPENSE_CLASSIFICATION_LEASE_EXPIRED",
+        });
+      }
+      return { ok: true };
+    };
+    const helpers = Function(
+      "api",
+      "crypto",
+      "expenseClassificationTerminalCodes",
+      `"use strict"; const pendingExpenseMutationKeys = new Map(); ${helperSource}; return { expenseMutation };`,
+    )(
+      api,
+      { randomUUID: () => `key-${++sequence}` },
+      new Set(["EXPENSE_CLASSIFICATION_LEASE_EXPIRED"]),
+    ) as {
+      expenseMutation: (path: string, input: Record<string, unknown>) => Promise<unknown>;
+    };
+    const request = {
+      operation: "expense-classification-run",
+      resource: "2026-08",
+      body: { month: "2026-08" },
+    };
+
+    await expect(helpers.expenseMutation("/classification", request)).rejects.toThrow("lease expired");
+    const terminalKey = calls[0].options.headers["idempotency-key"];
+    terminal = false;
+    await helpers.expenseMutation("/classification", request);
+    expect(calls[1].options.headers["idempotency-key"]).not.toBe(terminalKey);
+  });
+
+  it("classification terminal guidance discloses the new attempt and maximum cost", () => {
+    expect(app).toContain("expenseClassificationTerminalCodes.has(error.code)");
+    expect(app).toContain("새 월간 시도 1회와 최대 $0.01 비용이 발생할 수 있습니다.");
+    expect(app).toContain("같은 요청으로 다시 확인할 수 있습니다.");
+  });
+
   it("정기지출 최초 연결과 이후 자동 연결 동의를 별도 값으로 전송한다", () => {
     expect(app).toContain("const body = { eventId, enableFutureAutoMatch }");
     expect(app).toContain("autoMatch.checked = false");
@@ -134,6 +208,7 @@ describe("모바일 PWA 지출", () => {
       "expense-source-update",
       "expense-transaction-override",
       "expense-review-resolve",
+      "expense-classification-run",
       "expense-report-generate",
       "expense-report-feedback",
       "recurring-expense-delete",

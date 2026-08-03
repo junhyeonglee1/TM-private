@@ -61,6 +61,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         railway_usage,
                         stock_config,
                         config.expense_ai_enabled,
+                        config.expense_classification_ai_enabled,
                         config.expense_rollout,
                     )
                 }

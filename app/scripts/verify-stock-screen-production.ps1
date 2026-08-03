@@ -11,7 +11,7 @@ Set-StrictMode -Version Latest
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 Add-Type -AssemblyName System.Net.Http
 
-$expectedSchemaVersion = 15
+$expectedSchemaVersion = 16
 $expectedFeatureHardLimitMicrousd = 2000000
 $resource = 'TM Cloud Production'
 $userName = 'single-user'

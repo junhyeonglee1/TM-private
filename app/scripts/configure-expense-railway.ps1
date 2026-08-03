@@ -873,6 +873,7 @@ try {
     $featureResult = Invoke-TmBoundedProcess -FilePath $railway `
         -Arguments ([string[]]@(
             'variable', 'set', "TM_EXPENSE_AI_ENABLED=$ExpenseAiEnabled",
+            'TM_EXPENSE_CLASSIFICATION_AI_ENABLED=false',
             "TM_BUILD_COMMIT_SHA=$ExpectedHeadSha",
             "TM_EXPENSE_EXPECTED_KEY_FINGERPRINT=$localKeyFingerprint",
             'TM_EXPENSE_ROLLOUT_MODE=locked', '--skip-deploys',
@@ -916,6 +917,7 @@ try {
             @(
                 'TM_EXPENSE_DATA_KEY_V1',
                 'TM_EXPENSE_AI_ENABLED',
+                'TM_EXPENSE_CLASSIFICATION_AI_ENABLED',
                 'TM_BUILD_COMMIT_SHA',
                 'TM_EXPENSE_EXPECTED_KEY_FINGERPRINT',
                 'TM_EXPENSE_ROLLOUT_MODE'
@@ -923,6 +925,7 @@ try {
         } else {
             @(
                 'TM_EXPENSE_AI_ENABLED',
+                'TM_EXPENSE_CLASSIFICATION_AI_ENABLED',
                 'TM_BUILD_COMMIT_SHA',
                 'TM_EXPENSE_EXPECTED_KEY_FINGERPRINT',
                 'TM_EXPENSE_ROLLOUT_MODE'

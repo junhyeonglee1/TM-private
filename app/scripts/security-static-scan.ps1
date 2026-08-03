@@ -128,6 +128,9 @@ foreach ($required in @(
     '--label "org.opencontainers.image.revision=${TM_SOURCE_SHA}"',
     '-CommitSha $env:TM_SOURCE_SHA',
     '--platform linux/amd64',
+    'Verify schema 16 backup receipt JSON semantics',
+    "docker run --rm --entrypoint sqlite3 tm-server:step16 :memory:",
+    "SELECT json_object('itemGroupCount',0",
     'requirements-pip-audit-lock.txt',
     'operations-toolchain.lock.json',
     'tm-step16-container-provenance',
@@ -204,6 +207,7 @@ $schemaMatch = [System.Text.RegularExpressions.Regex]::Match(
     'const\s+SCHEMA_VERSION:\s*i64\s*=\s*(\d+);'
 )
 $backupOnce = [System.IO.File]::ReadAllText((Join-Path $appRoot 'scripts\railway-backup-once.sh'), [System.Text.Encoding]::UTF8)
+$backupLoop = [System.IO.File]::ReadAllText((Join-Path $appRoot 'scripts\railway-backup-loop.sh'), [System.Text.Encoding]::UTF8)
 if (-not $schemaMatch.Success) {
     $violations.Add('The current database schema version could not be determined.')
 }
@@ -258,6 +262,7 @@ else {
         'Assert-TmSignedToolMatches',
         'Production expense configuration refuses -Force and -Confirm:$false.',
         "'TM_EXPENSE_DATA_KEY_V1', '--stdin', '--skip-deploys'",
+        'TM_EXPENSE_CLASSIFICATION_AI_ENABLED=false',
         'TM_BUILD_COMMIT_SHA',
         'receiptId',
         'expiresAtUtc',
@@ -450,6 +455,137 @@ if ($expenseVerifier -notmatch "BaseUri = 'https://tm-server-production-5573\.up
     $violations.Add('The production expense verifier must remain origin-pinned, backup-aware, and read-only.')
 }
 
+$expenseClassificationVerifierPath = Join-Path $appRoot 'scripts\verify-expense-classification-production.ps1'
+if (-not (Test-Path -LiteralPath $expenseClassificationVerifierPath -PathType Leaf)) {
+    $violations.Add('The schema 16 expense classification production verifier is missing.')
+}
+else {
+    $expenseClassificationVerifier = [System.IO.File]::ReadAllText(
+        $expenseClassificationVerifierPath,
+        [System.Text.Encoding]::UTF8
+    )
+    foreach ($required in @(
+        "`$baseUri = 'https://tm-server-production-5573.up.railway.app'",
+        'ExpectedHeadSha',
+        'ExpectedDeploymentId',
+        'expenseClassificationAiEnabled',
+        'expenseClassificationBudget',
+        'latestPreMigrationSchemaVersion',
+        'currentSchemaMigrationName',
+        'expense-ai-hybrid-classification',
+        'remoteBackup.schemaVersion',
+        'remoteBackup.schemaSemanticsValidated',
+        'readOnlyVerification = $true',
+        '[System.Net.Http.HttpMethod]::Get',
+        '$classification.claimedCount',
+        '$classification.stagedCount',
+        '$classification.oldestOpenCreatedAt'
+    )) {
+        if (-not $expenseClassificationVerifier.Contains($required)) {
+            $violations.Add("The schema 16 expense classification verifier is missing: $required")
+        }
+    }
+    if ($expenseClassificationVerifier -match '(?i)HttpMethod\]::(?:Post|Put|Patch|Delete)' -or
+        $expenseClassificationVerifier -match '(?i)-Method\s+(?:Post|Put|Patch|Delete)' -or
+        $expenseClassificationVerifier -match '\[switch\]\$Mutate' -or
+        $expenseClassificationVerifier -match 'Set-Clipboard') {
+        $violations.Add('The schema 16 expense classification verifier must remain read-only and secret-safe.')
+    }
+}
+
+$expenseClassificationRolloutPath = Join-Path $appRoot 'scripts\deploy-verified-expense-classification-railway.ps1'
+if (-not (Test-Path -LiteralPath $expenseClassificationRolloutPath -PathType Leaf)) {
+    $violations.Add('The schema 16 two-phase classification rollout script is missing.')
+}
+else {
+    $expenseClassificationRollout = [System.IO.File]::ReadAllText(
+        $expenseClassificationRolloutPath,
+        [System.Text.Encoding]::UTF8
+    )
+    foreach ($required in @(
+        "[ValidateSet('Phase1', 'Phase2')]",
+        '[switch]$ApproveActivation',
+        '[switch]$RunGuardSelfTest',
+        'Get-TmVerifiedActionsArtifactEvidence',
+        'Assert-TmCanonicalGitState',
+        'Assert-TmReceiptIntegrityProof',
+        'Assert-TmPendingReceiptState',
+        'TM_EXPENSE_CLASSIFICATION_AI_ENABLED=$Enabled',
+        'TM_EXPENSE_AI_ENABLED=false',
+        "'--skip-deploys'",
+        'verify-expense-classification-production.ps1',
+        'Wait-ClassificationVerifier',
+        '$activationUploadAttempted = $true',
+        'if ($activationUploadAttempted -and $null -ne $source)',
+        'failClosedRollbackSucceeded'
+    )) {
+        if (-not $expenseClassificationRollout.Contains($required)) {
+            $violations.Add("The schema 16 two-phase rollout guard is missing: $required")
+        }
+    }
+}
+
+$expenseClassificationMigrationPath = Join-Path $appRoot 'crates\tm-core\migrations\0016_expense_ai_classification.sql'
+$expenseClassificationSourcePath = Join-Path $appRoot 'crates\tm-server\src\expense_classification.rs'
+if (-not (Test-Path -LiteralPath $expenseClassificationMigrationPath -PathType Leaf) -or
+    -not (Test-Path -LiteralPath $expenseClassificationSourcePath -PathType Leaf)) {
+    $violations.Add('The schema 16 expense classification migration or server boundary is missing.')
+}
+else {
+    $expenseClassificationMigration = [System.IO.File]::ReadAllText(
+        $expenseClassificationMigrationPath,
+        [System.Text.Encoding]::UTF8
+    )
+    $expenseClassificationSource = [System.IO.File]::ReadAllText(
+        $expenseClassificationSourcePath,
+        [System.Text.Encoding]::UTF8
+    )
+    foreach ($required in @(
+        'classification_source TEXT NOT NULL DEFAULT ''deterministic''',
+        'classification_confidence INTEGER',
+        "SET classification_source = 'manual'",
+        "review_reason IN ('category_confirmation', 'manual_override')",
+        'expense_ai_classification_batches',
+        'expense_ai_classification_receipts',
+        'expense_ai_classification_receipts_immutable_update',
+        'expense_ai_classification_receipts_immutable_delete',
+        '{"itemGroupCount":0,"reviewCount":0,"resultCount":0,"confirmedCount":0,"provisionalCount":0,"reviewRequiredCount":0,"privacySkippedCount":0,"versionConflictCount":0,"actualCostMicrousd":0}',
+        'target_month_start',
+        'attempt_number BETWEEN 1 AND 12',
+        'privacy_skipped_count',
+        'version_conflict_count',
+        'idx_expense_ai_classification_batches_active_input',
+        "WHERE batch_status IN ('claimed', 'staged', 'applied')"
+    )) {
+        if (-not $expenseClassificationMigration.Contains($required)) {
+            $violations.Add("The schema 16 expense classification migration is missing: $required")
+        }
+    }
+    if ($expenseClassificationMigration -match
+        '(?im)^\s*(?:merchant|merchant_name|merchant_blind_index|payment_method_fingerprint|counterparty|memo|prompt|prompt_text)\s+') {
+        $violations.Add('The schema 16 classification ledger must not duplicate merchant or financial plaintext.')
+    }
+    foreach ($required in @(
+        'gpt-5.4-nano-2026-03-17',
+        'expense-merchant-classification-v1',
+        'EXPENSE_CLASSIFICATION_MAXIMUM_COST_MICROUSD: u64 = 10_000',
+        'EXPENSE_CLASSIFICATION_MONTHLY_HARD_LIMIT_MICROUSD: u64 = 250_000',
+        'EXPENSE_CLASSIFICATION_MONTHLY_ATTEMPT_LIMIT: u8 = 12',
+        'EXPENSE_CLASSIFICATION_MAX_GROUPS: usize = 25',
+        'EXPENSE_CLASSIFICATION_MAX_REVIEWS: usize = 250',
+        'x-tm-confirm-ai-call',
+        '"store": false',
+        'sanitize_merchant_label'
+    )) {
+        if (-not $expenseClassificationSource.Contains($required)) {
+            $violations.Add("The expense classification server boundary is missing: $required")
+        }
+    }
+    if ($expenseClassificationSource -match 'EXPENSE_CLASSIFICATION_NOT_READY') {
+        $violations.Add('The expense classification production handler is still a non-ready stub.')
+    }
+}
+
 $expenseCryptoSource = [System.IO.File]::ReadAllText(
     (Join-Path $appRoot 'crates\tm-server\src\expense_crypto.rs'),
     [System.Text.Encoding]::UTF8
@@ -518,6 +654,28 @@ if ($backupOnce -notmatch 'expense_ai_request_bindings' -or
     $backupOnce -notmatch 'link\.posting_id = posting\.id' -or
     $backupOnce -notmatch 'event\.primary_posting_id IS NOT link\.posting_id') {
     $violations.Add('The remote backup script is missing schema 15 ledger and index semantics.')
+}
+if ($windowsBuildWorkflow -notmatch 'deploy-verified-expense-classification-railway\.ps1[\s\S]{0,300}-RunGuardSelfTest') {
+    $violations.Add('The Windows workflow does not execute the schema 16 two-phase rollout guard self-test.')
+}
+if ($backupOnce -notmatch 'expense_ai_classification_batches' -or
+    $backupOnce -notmatch 'expense_ai_classification_items' -or
+    $backupOnce -notmatch 'expense_ai_classification_receipts' -or
+    $backupOnce -notmatch 'expense_ai_classification_receipts_immutable_update' -or
+    $backupOnce -notmatch 'expense_ai_classification_receipts_immutable_delete' -or
+    $backupOnce -notmatch 'json_object\(' -or
+    $backupOnce -notmatch "'itemGroupCount', 0" -or
+    $backupOnce -notmatch 'actualCostMicrousd' -or
+    $backupOnce -notmatch 'classification_source' -or
+    $backupOnce -notmatch 'classification_confidence' -or
+    $backupOnce -notmatch 'target_month_start' -or
+    $backupOnce -notmatch 'idx_expense_ai_classification_batches_active_input' -or
+    $backupOnce -notmatch 'forbidden_plaintext_columns') {
+    $violations.Add('The remote backup script is missing schema 16 classification ledger semantics.')
+}
+if ($backupLoop -notmatch '\[ "\$current_schema" -ge 15 \] 2>/dev/null' -or
+    $backupLoop -match '\[ "\$current_schema" = "15" \]') {
+    $violations.Add('The remote backup loop must preserve the expense crypto probe guard for schema 15 and later.')
 }
 
 $sidecarSource = [System.IO.File]::ReadAllText(

@@ -43,7 +43,7 @@ fn initializes_schema_with_uuid_v7_utc_and_wal() -> Result<()> {
     let (temporary, core) = fixture()?;
     let health = core.health()?;
     assert!(health.ok);
-    assert_eq!(health.schema_version, 15);
+    assert_eq!(health.schema_version, 16);
     assert_eq!(health.journal_mode.to_ascii_lowercase(), "wal");
     assert!(
         std::path::Path::new(&health.database_path)

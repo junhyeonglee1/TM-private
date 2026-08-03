@@ -15,6 +15,7 @@ import type {
   ExpenseEventKind,
   ExpenseImportCommitResult,
   ExpenseImportPreview,
+  ExpenseClassificationRunResult,
   ExpenseMonthSummary,
   ExpenseSourceStatus,
   ExpenseReportResult,
@@ -611,6 +612,8 @@ const sampleExpenses = (today: string): {
       relatedEventId: null,
       isProvisional: false,
       pendingReviewId: null,
+      classificationSource: "deterministic",
+      classificationConfidence: null,
       version: 1,
     },
     {
@@ -633,6 +636,8 @@ const sampleExpenses = (today: string): {
       relatedEventId: null,
       isProvisional: false,
       pendingReviewId: null,
+      classificationSource: "deterministic",
+      classificationConfidence: null,
       version: 1,
     },
     {
@@ -655,6 +660,8 @@ const sampleExpenses = (today: string): {
       relatedEventId: null,
       isProvisional: false,
       pendingReviewId: null,
+      classificationSource: "deterministic",
+      classificationConfidence: null,
       version: 1,
     },
     {
@@ -677,6 +684,8 @@ const sampleExpenses = (today: string): {
       relatedEventId: null,
       isProvisional: true,
       pendingReviewId: "review-p2p",
+      classificationSource: "deterministic",
+      classificationConfidence: null,
       version: 1,
     },
     {
@@ -699,6 +708,8 @@ const sampleExpenses = (today: string): {
       relatedEventId: null,
       isProvisional: false,
       pendingReviewId: null,
+      classificationSource: "deterministic",
+      classificationConfidence: null,
       version: 1,
     },
     {
@@ -721,6 +732,8 @@ const sampleExpenses = (today: string): {
       relatedEventId: null,
       isProvisional: false,
       pendingReviewId: null,
+      classificationSource: "deterministic",
+      classificationConfidence: null,
       version: 1,
     },
   ];
@@ -734,6 +747,8 @@ const sampleExpenses = (today: string): {
       suggestedKind: "settlement_sent",
       suggestedCategory: "transfer_settlement",
       suggestedDuplicateOfEventId: null,
+      suggestionSource: null,
+      suggestionConfidence: null,
       createdAt: now(),
       resolvedAt: null,
       version: 1,
@@ -944,6 +959,7 @@ export class MemoryTransport implements CommandTransport {
   private recurringOccurrenceOverrides = new Map<string, RecurringExpenseOccurrence>();
   private expenseImportPreviews = new Map<string, ExpenseImportPreview>();
   private expenseReport: ExpenseReportResult | null = null;
+  private expenseClassificationRun: ExpenseClassificationRunResult | null = null;
   private stockWatchlist: StockWatchlistItem[] = [];
   private stockScreen = sampleStockScreen(this.snapshot.today);
 
@@ -1007,6 +1023,8 @@ export class MemoryTransport implements CommandTransport {
           textValue(args.reviewId),
           args.input as ResolveExpenseReviewInput,
         );
+      case "classify_expense_transactions":
+        return this.classifyExpenseTransactions(textValue(args.month));
       case "list_recurring_expenses":
         return this.expenses.recurring;
       case "list_recurring_expense_occurrences":
@@ -1343,6 +1361,8 @@ export class MemoryTransport implements CommandTransport {
       ? "사용자가 중복 거래로 분류"
       : excludedKinds.includes(input.kind) ? "사용자가 비지출 이동으로 분류" : null;
     transaction.isProvisional = false;
+    transaction.classificationSource = "manual";
+    transaction.classificationConfidence = null;
     transaction.version += 1;
     return transaction;
   }
@@ -1376,8 +1396,49 @@ export class MemoryTransport implements CommandTransport {
       : ["internal_transfer", "card_payment", "wallet_topup"].includes(input.kind)
       ? "excluded"
       : "confirmed";
+    transaction.classificationSource = "manual";
+    transaction.classificationConfidence = null;
     this.expenses.reviews = this.expenses.reviews.filter((item) => item.id !== reviewId);
     return null;
+  }
+
+  private classifyExpenseTransactions(month: string): ExpenseClassificationRunResult {
+    if (!/^\d{4}-\d{2}$/.test(month)) throw new Error("월 형식이 올바르지 않습니다.");
+    if (this.expenseClassificationRun?.targetMonth === month) {
+      return { ...this.expenseClassificationRun, cached: true };
+    }
+    const candidates = this.expenses.transactions.filter((transaction) =>
+      transaction.occurredAt.startsWith(`${month}-`)
+      && ["expense-coffee", "expense-openai"].includes(transaction.id)
+      && transaction.classificationSource !== "ai");
+    candidates.forEach((transaction) => {
+      transaction.classificationSource = "ai";
+      transaction.classificationConfidence = 93;
+      transaction.version += 1;
+    });
+    const manualReviewCount = this.expenses.reviews.filter((review) =>
+      review.status === "pending"
+      && review.transaction.occurredAt.startsWith(`${month}-`)
+      && review.reason !== "category_confirmation").length;
+    this.expenseClassificationRun = {
+      runId: candidates.length > 0 ? id("expense-classification") : null,
+      targetMonth: month,
+      status: candidates.length > 0 ? "applied" : "no_candidates",
+      candidateGroupCount: candidates.length,
+      affectedTransactionCount: candidates.length,
+      autoConfirmedCount: candidates.length,
+      provisionalCount: 0,
+      manualReviewCount,
+      privacySkippedCount: manualReviewCount,
+      versionConflictCount: 0,
+      cached: false,
+      costMicrousd: candidates.length > 0 ? 1_200 : 0,
+      attemptNumber: candidates.length > 0 ? 1 : null,
+      monthlyLimitMicrousd: 250_000,
+      remainingMicrousd: candidates.length > 0 ? 248_800 : 250_000,
+      completedAt: now(),
+    };
+    return this.expenseClassificationRun;
   }
 
   private listRecurringExpenseOccurrences(month: string): RecurringExpenseOccurrence[] {

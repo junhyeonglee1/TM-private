@@ -12,6 +12,7 @@ import type {
   DayEntryStatus,
   ExpenseImportCommitResult,
   ExpenseImportPreview,
+  ExpenseClassificationRunResult,
   ExpenseMonthSummary,
   ExpenseSourceStatus,
   ExpenseReportResult,
@@ -184,6 +185,7 @@ export interface TmApi {
   ): Promise<ExpenseTransaction>;
   listExpenseReviews(input: ListExpenseReviewsInput): Promise<ExpenseReviewPage>;
   resolveExpenseReview(reviewId: string, input: ResolveExpenseReviewInput): Promise<void>;
+  classifyExpenseTransactions(month: string): Promise<ExpenseClassificationRunResult>;
   listRecurringExpenses(): Promise<RecurringExpenseItem[]>;
   listRecurringExpenseOccurrences(month: string): Promise<RecurringExpenseOccurrence[]>;
   createRecurringExpense(input: CreateRecurringExpenseInput): Promise<RecurringExpenseItem>;
@@ -216,6 +218,7 @@ export type ExpenseMutationCommandName =
   | "update_expense_source"
   | "override_expense_transaction"
   | "resolve_expense_review"
+  | "classify_expense_transactions"
   | "create_recurring_expense"
   | "update_recurring_expense"
   | "delete_recurring_expense"
@@ -261,6 +264,39 @@ const run = async (
   await transport.invoke<unknown>(command, args);
 };
 
+const expenseClassificationTerminalCodes = new Set([
+  "EXPENSE_CLASSIFICATION_BUDGET_EXHAUSTED",
+  "EXPENSE_CLASSIFICATION_BUDGET_PERSISTENCE_FAILED",
+  "EXPENSE_CLASSIFICATION_COST_INVALID",
+  "EXPENSE_CLASSIFICATION_IDEMPOTENCY_CONFLICT",
+  "EXPENSE_CLASSIFICATION_IDEMPOTENCY_TERMINAL",
+  "EXPENSE_CLASSIFICATION_LEASE_EXPIRED",
+  "EXPENSE_CLASSIFICATION_OPENAI_AUTHENTICATION_FAILED",
+  "EXPENSE_CLASSIFICATION_OPENAI_RATE_LIMITED",
+  "EXPENSE_CLASSIFICATION_OPENAI_REQUEST_REJECTED",
+  "EXPENSE_CLASSIFICATION_OPENAI_RESPONSE_INVALID",
+  "EXPENSE_CLASSIFICATION_OPENAI_UNAVAILABLE",
+  "EXPENSE_CLASSIFICATION_PREVIOUS_RUN_RECOVERED",
+  "EXPENSE_CLASSIFICATION_PREVIOUSLY_FAILED",
+  "EXPENSE_CLASSIFICATION_STAGE_FAILED",
+  "EXPENSE_CLASSIFICATION_TIMEOUT",
+]);
+
+export const expenseClassificationTerminalErrorCode = (error: unknown): string | null => {
+  const directCode = error && typeof error === "object" && "code" in error
+    ? Reflect.get(error, "code")
+    : null;
+  if (typeof directCode === "string" && expenseClassificationTerminalCodes.has(directCode)) {
+    return directCode;
+  }
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  const markedCode = message.match(/\[TM_ERROR_CODE:([A-Z_]+)\]/)?.[1] ?? null;
+  return markedCode && expenseClassificationTerminalCodes.has(markedCode) ? markedCode : null;
+};
+
+export const isExpenseClassificationTerminalError = (error: unknown): boolean =>
+  expenseClassificationTerminalErrorCode(error) !== null;
+
 export const createApi = (
   transport: CommandTransport,
   options: { canImportExpenses?: boolean } = {},
@@ -283,10 +319,22 @@ export const createApi = (
       pending = { fingerprint, key: `desktop-expense:${crypto.randomUUID()}` };
       pendingExpenseMutations.set(scope, pending);
     }
-    const result = await transport.invoke<T>(command, {
-      ...args,
-      idempotencyKey: pending.key,
-    });
+    let result: T;
+    try {
+      result = await transport.invoke<T>(command, {
+        ...args,
+        idempotencyKey: pending.key,
+      });
+    } catch (error) {
+      if (
+        command === "classify_expense_transactions"
+        && isExpenseClassificationTerminalError(error)
+        && pendingExpenseMutations.get(scope)?.key === pending.key
+      ) {
+        pendingExpenseMutations.delete(scope);
+      }
+      throw error;
+    }
     if (pendingExpenseMutations.get(scope)?.key === pending.key) {
       pendingExpenseMutations.delete(scope);
     }
@@ -384,6 +432,12 @@ export const createApi = (
     transport.invoke<ExpenseReviewPage>("list_expense_reviews", { input }),
   resolveExpenseReview: (reviewId, input) =>
     invokeExpenseMutation<void>("resolve_expense_review", { reviewId, input }, reviewId),
+  classifyExpenseTransactions: (month) =>
+    invokeExpenseMutation<ExpenseClassificationRunResult>(
+      "classify_expense_transactions",
+      { month },
+      month,
+    ),
   listRecurringExpenses: () =>
     transport.invoke<RecurringExpenseItem[]>("list_recurring_expenses"),
   listRecurringExpenseOccurrences: (month) =>

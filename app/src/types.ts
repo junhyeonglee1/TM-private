@@ -602,6 +602,27 @@ export interface ExpenseMonthSummary {
   };
 }
 
+export type ExpenseClassificationSource = "deterministic" | "user_rule" | "manual" | "ai";
+
+export interface ExpenseClassificationRunResult {
+  runId: string | null;
+  targetMonth: string;
+  status: "applied" | "no_candidates" | "stale";
+  candidateGroupCount: number;
+  affectedTransactionCount: number;
+  autoConfirmedCount: number;
+  provisionalCount: number;
+  manualReviewCount: number;
+  privacySkippedCount: number;
+  versionConflictCount: number;
+  cached: boolean;
+  costMicrousd: number;
+  attemptNumber: number | null;
+  monthlyLimitMicrousd: number;
+  remainingMicrousd: number;
+  completedAt: string;
+}
+
 export interface ExpenseTransaction {
   id: string;
   kind: ExpenseEventKind;
@@ -622,6 +643,8 @@ export interface ExpenseTransaction {
   relatedEventId: string | null;
   isProvisional: boolean;
   pendingReviewId: string | null;
+  classificationSource: ExpenseClassificationSource;
+  classificationConfidence: number | null;
   version: number;
 }
 
@@ -645,6 +668,8 @@ export interface ExpenseReview {
   suggestedKind: ExpenseEventKind | null;
   suggestedCategory: ExpenseCategory | null;
   suggestedDuplicateOfEventId: string | null;
+  suggestionSource: ExpenseClassificationSource | null;
+  suggestionConfidence: number | null;
   createdAt: string;
   resolvedAt: string | null;
   version: number;

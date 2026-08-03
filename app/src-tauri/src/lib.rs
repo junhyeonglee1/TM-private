@@ -185,6 +185,7 @@ pub fn run() {
             expense_commands::delete_recurring_expense,
             expense_commands::confirm_recurring_expense_paid,
             expense_commands::match_recurring_expense_occurrence,
+            expense_commands::classify_expense_transactions,
             expense_commands::generate_expense_report,
             expense_commands::latest_expense_report,
             expense_commands::rate_expense_report,

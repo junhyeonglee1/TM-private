@@ -27,6 +27,7 @@ const state = {
   expenseSummary: null,
   expenseReport: null,
   expenseReportRetryNeeded: false,
+  expenseClassificationResult: null,
   expenseSources: [],
   expenseTransactions: [],
   recurringMatchTransactions: [],
@@ -56,6 +57,23 @@ const state = {
   stockScreenResultGeneration: 0
 };
 const pendingExpenseMutationKeys = new Map();
+const expenseClassificationTerminalCodes = new Set([
+  "EXPENSE_CLASSIFICATION_BUDGET_EXHAUSTED",
+  "EXPENSE_CLASSIFICATION_BUDGET_PERSISTENCE_FAILED",
+  "EXPENSE_CLASSIFICATION_COST_INVALID",
+  "EXPENSE_CLASSIFICATION_IDEMPOTENCY_CONFLICT",
+  "EXPENSE_CLASSIFICATION_IDEMPOTENCY_TERMINAL",
+  "EXPENSE_CLASSIFICATION_LEASE_EXPIRED",
+  "EXPENSE_CLASSIFICATION_OPENAI_AUTHENTICATION_FAILED",
+  "EXPENSE_CLASSIFICATION_OPENAI_RATE_LIMITED",
+  "EXPENSE_CLASSIFICATION_OPENAI_REQUEST_REJECTED",
+  "EXPENSE_CLASSIFICATION_OPENAI_RESPONSE_INVALID",
+  "EXPENSE_CLASSIFICATION_OPENAI_UNAVAILABLE",
+  "EXPENSE_CLASSIFICATION_PREVIOUS_RUN_RECOVERED",
+  "EXPENSE_CLASSIFICATION_PREVIOUSLY_FAILED",
+  "EXPENSE_CLASSIFICATION_STAGE_FAILED",
+  "EXPENSE_CLASSIFICATION_TIMEOUT"
+]);
 const costRefreshIntervalMs = 5 * 60 * 1000;
 const defaultApiHardLimitMicrousd = 20_000_000;
 const defaultCloudHardLimitMicrousd = 30_000_000;
@@ -1270,6 +1288,13 @@ const expenseReviewReasonLabels = {
   import_rejected: "가져오기 거부 행 확인"
 };
 
+const expenseClassificationSourceLabels = {
+  deterministic: "자동 규칙",
+  user_rule: "내 규칙",
+  manual: "수동 확정",
+  ai: "AI 분류"
+};
+
 const recurringOccurrenceLabels = {
   scheduled: "예정",
   due_today: "오늘 납부",
@@ -1291,6 +1316,25 @@ function formatExpenseMoney(amountMinor, currency) {
   } catch {
     return `${amount.toLocaleString("ko-KR")} ${currency}`;
   }
+}
+
+function formatExpenseMicroUsd(amountMicrousd) {
+  const dollars = Number(amountMicrousd) / 1_000_000;
+  return `$${dollars.toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 4 })}`;
+}
+
+function appendExpenseClassificationBadge(parent, source, confidence, suggestion = false) {
+  const sourceLabel = expenseClassificationSourceLabels[source];
+  if (!sourceLabel) return;
+  const label = `${sourceLabel}${suggestion ? " 제안" : ""}`;
+  const normalizedConfidence = confidence === null || confidence === undefined
+    ? null
+    : Math.round(Math.max(0, Math.min(100, Number(confidence))));
+  const confidenceLabel = normalizedConfidence === null ? "" : ` · 신뢰도 ${normalizedConfidence}%`;
+  const badge = text("span", label, `expense-classification-badge ${source}`);
+  badge.setAttribute("aria-label", `${label}${confidenceLabel}`);
+  badge.title = `분류 출처: ${label}${confidenceLabel}`;
+  parent.append(badge);
 }
 
 const expenseFactMetricLabels = {
@@ -1381,7 +1425,10 @@ function expenseQuery(path, params) {
 }
 
 async function loadExpenses(month = state.expenseMonth || todaySeoul().slice(0, 7)) {
-  if (state.expenseMonth !== month) state.expenseReportRetryNeeded = false;
+  if (state.expenseMonth !== month) {
+    state.expenseReportRetryNeeded = false;
+    state.expenseClassificationResult = null;
+  }
   state.expenseMonth = month;
   byId("expense-month-label").textContent = "불러오는 중…";
   loadingList(byId("expense-transactions-list"));
@@ -1438,8 +1485,74 @@ function renderExpenses() {
   byId("expense-month-label").textContent = expenseMonthLabel(state.expenseMonth);
   renderExpenseSummary();
   renderExpenseTransactions();
+  renderExpenseClassification();
   renderExpenseReviews();
   renderRecurringExpenses();
+}
+
+function renderExpenseClassification() {
+  const root = byId("expense-classification-result");
+  clear(root);
+  const result = state.expenseClassificationResult;
+  show("expense-classification-result", Boolean(result && result.targetMonth === state.expenseMonth));
+  if (!result || result.targetMonth !== state.expenseMonth) return;
+  root.className = `expense-classification-result ${result.status}`;
+  const title = result.status === "applied"
+    ? "자동 분류를 적용했습니다"
+    : result.status === "no_candidates"
+      ? "분류할 후보가 없습니다"
+      : "거래가 변경되어 이번 자동 분류를 적용하지 않았습니다";
+  const attempt = result.cached
+    ? "캐시된 동일 결과"
+    : result.attemptNumber === null
+      ? "청구 시도 없음"
+      : `${result.attemptNumber}번째 시도`;
+  root.append(text("strong", title), text("small", `${attempt} · ${new Date(result.completedAt).toLocaleString("ko-KR")}`));
+  const metrics = text("div", "", "expense-classification-metrics");
+  [
+    ["후보 그룹", result.candidateGroupCount],
+    ["영향 거래", result.affectedTransactionCount],
+    ["자동 확정", result.autoConfirmedCount],
+    ["잠정 분류", result.provisionalCount],
+    ["남은 수동 확인", result.manualReviewCount],
+    ["개인정보 보호 제외", result.privacySkippedCount]
+  ].forEach(([label, value]) => metrics.append(text("span", `${label} ${value}`)));
+  if (result.versionConflictCount > 0) metrics.append(text("span", `동시 변경 충돌 ${result.versionConflictCount}`));
+  root.append(metrics, text(
+    "small",
+    `이번 호출 ${formatExpenseMicroUsd(result.costMicrousd)} · 월 한도 ${formatExpenseMicroUsd(result.monthlyLimitMicrousd)} · 남은 한도 ${formatExpenseMicroUsd(result.remainingMicrousd)}`
+  ), text("small", "추가 후보가 생기면 AI 자동 분류 버튼을 다시 눌러 이어서 처리할 수 있습니다."));
+}
+
+async function classifyMobileExpenses(button) {
+  const targetMonth = state.expenseMonth;
+  if (!targetMonth) return;
+  setBusy(button, true, "AI 자동 분류");
+  try {
+    const body = { month: targetMonth };
+    const result = await expenseMutation("/api/v1/expenses/classifications:run", {
+      operation: "expense-classification-run",
+      resource: targetMonth,
+      body,
+      aiConfirmation: "expense-classification"
+    });
+    if (state.expenseMonth !== targetMonth) return;
+    state.expenseClassificationResult = result;
+    await loadExpenses(targetMonth);
+    toast(result.status === "applied"
+      ? `AI 자동 분류를 적용했습니다. 수동 확인 ${result.manualReviewCount}건이 남았습니다.`
+      : result.status === "no_candidates"
+        ? "AI로 분류할 새 거래 후보가 없습니다."
+        : `거래가 변경되어 이번 자동 분류를 적용하지 않았습니다. 수동 확인 ${result.manualReviewCount}건을 확인해 주세요.`);
+  } catch (error) {
+    if (state.expenseMonth === targetMonth) {
+      toast(`${error.message} ${expenseClassificationTerminalCodes.has(error.code)
+        ? "AI 자동 분류 버튼을 다시 눌러 새 실행을 시작해 주세요. 새 월간 시도 1회와 최대 $0.01 비용이 발생할 수 있습니다."
+        : "같은 요청으로 다시 확인할 수 있습니다."}`);
+    }
+  } finally {
+    setBusy(button, false, "AI 자동 분류");
+  }
 }
 
 function renderExpenseSummary() {
@@ -1678,7 +1791,10 @@ function renderExpenseTransactions() {
     title.append(text("small", `${item.postedDate} · ${expenseKindLabels[item.kind] || item.kind}`));
     heading.append(title, text("strong", formatExpenseMoney(item.amountMinor, item.currency)));
     card.append(heading);
-    card.append(text("p", `${expenseCategoryLabels[item.category] || item.category} · ${item.sourceKind || "수동"} · ${item.status}`));
+    const metadata = text("div", "", "expense-transaction-meta");
+    metadata.append(text("p", `${expenseCategoryLabels[item.category] || item.category} · ${item.sourceKind || "수동"} · ${item.status}`));
+    appendExpenseClassificationBadge(metadata, item.classificationSource, item.classificationConfidence);
+    card.append(metadata);
     if (item.exclusionReason) card.append(text("small", item.exclusionReason, "expense-exclusion"));
     if (item.kind === "manual_recurring") {
       card.append(text("small", "수동 납부 기록은 정기지출 발생 건에서 관리합니다."));
@@ -1883,6 +1999,7 @@ function renderExpenseReviews() {
     const title = text("div");
     title.append(text("strong", transaction.merchant || transaction.counterparty || "표시 이름 없음"));
     title.append(text("small", `${transaction.postedDate} · ${expenseReviewReasonLabels[review.reason] || review.reason}`));
+    appendExpenseClassificationBadge(title, review.suggestionSource, review.suggestionConfidence, true);
     heading.append(title, text("strong", formatExpenseMoney(transaction.amountMinor, transaction.currency)));
 
     if (review.reason === "recurring_match_candidate") {
@@ -2431,6 +2548,7 @@ byId("expense-next").addEventListener("click", () => void loadExpenses(shiftMont
 byId("expense-transactions-more").addEventListener("click", (event) => void loadMoreExpenseTransactions(event.currentTarget));
 byId("expense-reviews-more").addEventListener("click", (event) => void loadMoreExpenseReviews(event.currentTarget));
 byId("expense-category-reviews-more").addEventListener("click", (event) => void loadMoreExpenseCategoryReviews(event.currentTarget));
+byId("expense-classification-run").addEventListener("click", (event) => void classifyMobileExpenses(event.currentTarget));
 byId("expense-review-categories-toggle").addEventListener("click", () => {
   state.showExpensePurchaseCategories = !state.showExpensePurchaseCategories;
   renderExpenseReviews();
@@ -2826,7 +2944,19 @@ async function expenseMutation(path, {
   }
   const headers = mutationHeaders(operation, version, pending.key);
   if (aiConfirmation) headers["x-tm-confirm-ai-call"] = aiConfirmation;
-  const result = await api(path, { method, headers, body });
+  let result;
+  try {
+    result = await api(path, { method, headers, body });
+  } catch (error) {
+    if (
+      operation === "expense-classification-run"
+      && expenseClassificationTerminalCodes.has(error.code)
+      && pendingExpenseMutationKeys.get(action)?.key === pending.key
+    ) {
+      pendingExpenseMutationKeys.delete(action);
+    }
+    throw error;
+  }
   if (pendingExpenseMutationKeys.get(action)?.key === pending.key) {
     pendingExpenseMutationKeys.delete(action);
   }

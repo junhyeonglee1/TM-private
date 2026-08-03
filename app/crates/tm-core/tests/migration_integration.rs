@@ -91,6 +91,20 @@ fn schema_fourteen_fixture(prefix: &str) -> Result<(TempDir, PathBuf)> {
     Ok((temporary, database_path))
 }
 
+fn schema_fifteen_fixture(prefix: &str) -> Result<(TempDir, PathBuf)> {
+    let (temporary, database_path) = schema_fourteen_fixture(prefix)?;
+    let connection = Connection::open(&database_path)?;
+    connection.execute_batch(include_str!("../migrations/0015_expense_reporting.sql"))?;
+    connection.execute(
+        "INSERT INTO schema_migrations(version, name, applied_at)
+         VALUES (15, 'schema-15-fixture', '2026-08-01T00:00:00.000Z')",
+        [],
+    )?;
+    connection.pragma_update(None, "user_version", 15_i64)?;
+    drop(connection);
+    Ok((temporary, database_path))
+}
+
 fn task_input(title: &str, description: &str) -> CreateTaskInput {
     CreateTaskInput {
         project_id: None,
@@ -103,7 +117,7 @@ fn task_input(title: &str, description: &str) -> CreateTaskInput {
 }
 
 #[test]
-fn schema_fifteen_migrates_schema_fourteen_without_losing_existing_work() -> Result<()> {
+fn current_schema_migrates_schema_fourteen_without_losing_existing_work() -> Result<()> {
     let (temporary, database_path) = schema_fourteen_fixture("tm-schema15-expenses-")?;
     let project_id = Uuid::now_v7().to_string();
     let task_id = Uuid::now_v7().to_string();
@@ -139,7 +153,7 @@ fn schema_fifteen_migrates_schema_fourteen_without_losing_existing_work() -> Res
     drop(connection);
 
     let core = TmCore::open(TmHome::new(temporary.path()))?;
-    assert_eq!(core.health()?.schema_version, 15);
+    assert_eq!(core.health()?.schema_version, 16);
     assert!(core.health()?.ok);
     let task = core.get_task(&task_id)?;
     assert_eq!(task.project_id.as_deref(), Some(project_id.as_str()));
@@ -155,7 +169,7 @@ fn schema_fifteen_migrates_schema_fourteen_without_losing_existing_work() -> Res
     );
 
     let manifest = core.migration_manifest()?;
-    assert_eq!(manifest.schema_version, 15);
+    assert_eq!(manifest.schema_version, 16);
     for table in [
         "expense_crypto_metadata",
         "expense_sources",
@@ -177,6 +191,9 @@ fn schema_fifteen_migrates_schema_fourteen_without_losing_existing_work() -> Res
         "expense_ai_request_bindings",
         "expense_ai_attempts",
         "expense_mutation_receipts",
+        "expense_ai_classification_batches",
+        "expense_ai_classification_items",
+        "expense_ai_classification_receipts",
     ] {
         assert!(manifest.tables.contains_key(table), "missing {table}");
     }
@@ -187,6 +204,170 @@ fn schema_fifteen_migrates_schema_fourteen_without_losing_existing_work() -> Res
     );
     let inspected = TmCore::inspect_migration_database(&database_path)?;
     assert!(manifest.logically_matches(&inspected));
+    Ok(())
+}
+
+#[test]
+fn schema_sixteen_migrates_schema_fifteen_expenses_with_defaults_and_backup() -> Result<()> {
+    let (temporary, database_path) = schema_fifteen_fixture("tm-schema16-expense-ai-")?;
+    let event_id = Uuid::now_v7().to_string();
+    let category_reviewed_event_id = Uuid::now_v7().to_string();
+    let manually_overridden_event_id = Uuid::now_v7().to_string();
+    let pending_review_event_id = Uuid::now_v7().to_string();
+    let connection = Connection::open(&database_path)?;
+    connection.execute(
+        "INSERT INTO expense_events(
+            id, event_kind, category, event_status, amount_minor, currency,
+            occurred_at, posted_date, is_provisional, created_at, updated_at, version
+         ) VALUES (
+            ?1, 'manual_recurring', 'ott_subscriptions', 'confirmed', 14900, 'KRW',
+            '2026-08-01T00:00:00+09:00', '2026-08-01', 1,
+            '2026-08-01T00:00:00.000Z', '2026-08-01T00:00:00.000Z', 3
+        )",
+        [&event_id],
+    )?;
+    for (id, category, amount_minor) in [
+        (&category_reviewed_event_id, "food", 21_000_i64),
+        (&manually_overridden_event_id, "health", 32_000_i64),
+        (&pending_review_event_id, "shopping", 43_000_i64),
+    ] {
+        connection.execute(
+            "INSERT INTO expense_events(
+                id, event_kind, category, event_status, amount_minor, currency,
+                occurred_at, posted_date, is_provisional, created_at, updated_at, version
+             ) VALUES (
+                ?1, 'purchase', ?2, 'confirmed', ?3, 'KRW',
+                '2026-08-02T00:00:00+09:00', '2026-08-02', 0,
+                '2026-08-02T00:00:00.000Z', '2026-08-02T00:00:00.000Z', 4
+             )",
+            params![id, category, amount_minor],
+        )?;
+    }
+    connection.execute(
+        "INSERT INTO expense_reviews(
+            id, event_id, review_reason, review_status, resolved_kind,
+            resolved_category, created_at, resolved_at, version
+         ) VALUES (?1, ?2, 'category_confirmation', 'resolved', 'purchase', 'food',
+                   '2026-08-02T00:00:00.000Z', '2026-08-02T01:00:00.000Z', 2)",
+        params![Uuid::now_v7().to_string(), category_reviewed_event_id],
+    )?;
+    for review_reason in ["category_confirmation", "manual_override"] {
+        connection.execute(
+            "INSERT INTO expense_reviews(
+                id, event_id, review_reason, review_status, resolved_kind,
+                resolved_category, created_at, resolved_at, version
+             ) VALUES (?1, ?2, ?3, 'resolved', 'purchase', 'health',
+                       '2026-08-02T00:00:00.000Z', '2026-08-02T01:00:00.000Z', 2)",
+            params![
+                Uuid::now_v7().to_string(),
+                manually_overridden_event_id,
+                review_reason
+            ],
+        )?;
+    }
+    connection.execute(
+        "INSERT INTO expense_reviews(
+            id, event_id, review_reason, review_status, created_at, version
+         ) VALUES (?1, ?2, 'category_confirmation', 'pending',
+                   '2026-08-02T00:00:00.000Z', 1)",
+        params![Uuid::now_v7().to_string(), pending_review_event_id],
+    )?;
+    drop(connection);
+
+    let core = TmCore::open(TmHome::new(temporary.path()))?;
+    assert_eq!(core.health()?.schema_version, 16);
+    assert!(core.health()?.ok);
+    let connection = Connection::open(&database_path)?;
+    let preserved: (String, String, Option<u8>, u64) = connection.query_row(
+        "SELECT category, classification_source, classification_confidence, version
+         FROM expense_events WHERE id = ?1",
+        [&event_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    )?;
+    assert_eq!(preserved.0, "ott_subscriptions");
+    assert_eq!(preserved.1, "deterministic");
+    assert_eq!(preserved.2, None);
+    assert_eq!(preserved.3, 3);
+    for manually_classified_id in [&category_reviewed_event_id, &manually_overridden_event_id] {
+        let provenance: (String, Option<u8>, u64) = connection.query_row(
+            "SELECT classification_source, classification_confidence, version
+             FROM expense_events WHERE id = ?1",
+            [manually_classified_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(provenance, ("manual".to_owned(), None, 4));
+    }
+    let pending_provenance: (String, Option<u8>, u64) = connection.query_row(
+        "SELECT classification_source, classification_confidence, version
+         FROM expense_events WHERE id = ?1",
+        [&pending_review_event_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )?;
+    assert_eq!(pending_provenance, ("deterministic".to_owned(), None, 4));
+    let active_input_index: String = connection.query_row(
+        "SELECT sql FROM sqlite_schema
+         WHERE type = 'index'
+           AND name = 'idx_expense_ai_classification_batches_active_input'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert!(active_input_index.contains("CREATE UNIQUE INDEX"));
+    assert!(active_input_index.contains("WHERE batch_status IN ('claimed', 'staged', 'applied')"));
+    drop(connection);
+
+    let manifest = core.migration_manifest()?;
+    assert_eq!(manifest.schema_version, 16);
+    assert!(
+        manifest
+            .tables
+            .contains_key("expense_ai_classification_batches")
+    );
+    assert!(
+        manifest
+            .tables
+            .contains_key("expense_ai_classification_items")
+    );
+    assert!(
+        manifest
+            .tables
+            .contains_key("expense_ai_classification_receipts")
+    );
+    let pre_migration = core
+        .list_backups()?
+        .into_iter()
+        .find(|backup| backup.trigger == "pre_migration")
+        .ok_or_else(|| Error::Invariant("schema 15 pre-migration backup missing".to_owned()))?;
+    let proof = core.verify_database_backup(&pre_migration.path)?;
+    assert_eq!(proof.schema_version, 15);
+    assert_eq!(proof.integrity_check, "ok");
+    assert!(proof.schema_semantics_validated);
+    Ok(())
+}
+
+#[test]
+fn schema_sixteen_semantics_reject_expanded_no_candidate_receipt_payloads() -> Result<()> {
+    let (temporary, core) = fixture()?;
+    drop(core);
+    let database_path = TmHome::new(temporary.path()).database_path();
+    let connection = Connection::open(&database_path)?;
+    connection.execute_batch("PRAGMA ignore_check_constraints = ON;")?;
+    connection.execute(
+        "INSERT INTO expense_ai_classification_receipts(
+            request_id, target_month_start, terminal_status,
+            result_json, created_at, completed_at
+         ) VALUES (
+            'unsafe-receipt', '2028-01-01', 'no_candidates',
+            '{\"merchant\":\"must-not-persist\"}',
+            '2028-01-01T00:00:00Z', '2028-01-01T00:00:00Z'
+         )",
+        [],
+    )?;
+    connection.execute_batch("PRAGMA ignore_check_constraints = OFF;")?;
+    drop(connection);
+    assert!(matches!(
+        TmCore::open(TmHome::new(temporary.path())),
+        Err(Error::Invariant(message)) if message.contains("fixed zero-result shape")
+    ));
     Ok(())
 }
 
@@ -290,7 +471,7 @@ fn schema_fourteen_adopts_one_active_uncategorized_project_and_backfills_tasks()
     drop(connection);
 
     let core = TmCore::open(TmHome::new(temporary.path()))?;
-    assert_eq!(core.health()?.schema_version, 15);
+    assert_eq!(core.health()?.schema_version, 16);
     let projects = core.list_projects(true)?;
     let system_projects = projects
         .iter()
@@ -428,10 +609,10 @@ fn manifest_is_deterministic_and_does_not_expose_row_contents() -> Result<()> {
     let first = core.migration_manifest()?;
     let second = core.migration_manifest()?;
     assert!(first.logically_matches(&second));
-    assert_eq!(first.schema_version, 15);
+    assert_eq!(first.schema_version, 16);
     assert_eq!(
         first.migration_versions,
-        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
     );
     assert_eq!(first.logical_sha256.len(), 64);
     assert_eq!(first.tables["tasks"].row_count, 1);
