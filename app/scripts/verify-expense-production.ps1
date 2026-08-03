@@ -173,6 +173,7 @@ function Assert-ExpectedRailwayDeployment {
     $deploymentCreatedAt = [DateTimeOffset]::MinValue
     $lockedCreatedAt = [DateTimeOffset]::MinValue
     $recoveryVerifiedAt = [DateTimeOffset]::MinValue
+    $maximumRecoveryClockSkew = [TimeSpan]::FromMinutes(5)
     $recovered = [bool]$DeploymentResult.lockedDeploymentRecoveredAfterActivation
     $receiptLockedStatus = [string]$DeploymentResult.lockedDeploymentStatus
     $currentLockedStatus = [string]$locked.status
@@ -213,7 +214,11 @@ function Assert-ExpectedRailwayDeployment {
         ($recovered -and (-not [DateTimeOffset]::TryParse(
             [string]$DeploymentResult.lockedDeploymentRecoveryVerifiedAtUtc,
             [ref]$recoveryVerifiedAt
-        ) -or $recoveryVerifiedAt.ToUniversalTime() -lt $ordered[0].CreatedAt))) {
+        ) -or
+            $recoveryVerifiedAt.ToUniversalTime().Add($maximumRecoveryClockSkew) -lt
+                $ordered[0].CreatedAt -or
+            $recoveryVerifiedAt.ToUniversalTime() -gt
+                [DateTimeOffset]::UtcNow.Add($maximumRecoveryClockSkew)))) {
         throw 'The deployment pair does not satisfy the exact live enabled recovery proof.'
     }
     return $deployment
