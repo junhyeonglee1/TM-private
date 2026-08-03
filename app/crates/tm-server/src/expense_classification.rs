@@ -133,7 +133,6 @@ struct PreparedClassification {
     groups: Vec<ExpenseAiClassificationGroupInput>,
     prompt_items: Vec<PromptItem>,
     input_sha256: String,
-    privacy_skipped_count: usize,
 }
 
 struct PreparedGroup {
@@ -550,7 +549,6 @@ fn prepare_candidates(
     });
     let mut groups = Vec::with_capacity(grouped.len().min(EXPENSE_CLASSIFICATION_MAX_GROUPS));
     let mut prompt_items = Vec::with_capacity(groups.capacity());
-    let mut privacy_skipped_count = 0_usize;
     for (index, (_, mut group)) in grouped
         .into_iter()
         .take(EXPENSE_CLASSIFICATION_MAX_GROUPS)
@@ -559,9 +557,7 @@ fn prepare_candidates(
         group.bindings.sort();
         let item_id = format!("item-{:03}", index + 1);
         let privacy_skipped = group.merchant.is_none();
-        if privacy_skipped {
-            privacy_skipped_count = privacy_skipped_count.saturating_add(group.bindings.len());
-        } else if let Some(merchant) = group.merchant {
+        if let Some(merchant) = group.merchant {
             prompt_items.push(PromptItem {
                 item_id: item_id.clone(),
                 merchant,
@@ -585,7 +581,6 @@ fn prepare_candidates(
         groups,
         prompt_items,
         input_sha256: hex_sha256(&canonical),
-        privacy_skipped_count,
     })
 }
 
@@ -1652,7 +1647,15 @@ mod tests {
         assert_eq!(first.prompt_items[0].item_id, "item-001");
         assert_eq!(first.prompt_items[0].merchant, "스타벅스 #");
         assert!(!first.groups[0].privacy_skipped);
-        assert_eq!(first.privacy_skipped_count, 24);
+        assert_eq!(
+            first
+                .groups
+                .iter()
+                .filter(|group| group.privacy_skipped)
+                .map(|group| group.bindings.len())
+                .sum::<usize>(),
+            24
+        );
         assert_eq!(first.groups, second.groups);
         assert_eq!(first.prompt_items, second.prompt_items);
         assert_eq!(first.input_sha256, second.input_sha256);
