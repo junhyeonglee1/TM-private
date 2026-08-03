@@ -83,6 +83,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Expense sidecar build failed with exit code $LASTEXITCODE" }
           $sidecar = Join-Path $dist 'tm-office-decryptor.exe'
           if (-not (Test-Path -LiteralPath $sidecar -PathType Leaf)) { throw 'Expense sidecar executable was not created.' }
+          python sidecars/verify_packaged_decryptor.py $sidecar
+          if ($LASTEXITCODE -ne 0) { throw "Packaged expense sidecar verification failed with exit code $LASTEXITCODE" }
           $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
           $startInfo.FileName = $sidecar
           $startInfo.UseShellExecute = $false

@@ -69,7 +69,7 @@ jobs:
       - name: Verify and audit expense workbook sidecar
         shell: bash
         run: |
-          python -m py_compile app/sidecars/tm_office_decryptor.py
+          python -m py_compile app/sidecars/tm_office_decryptor.py app/sidecars/verify_packaged_decryptor.py
           python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes --requirement app/sidecars/requirements-expense-sidecar-lock.txt
           python -m pip install --disable-pip-version-check --no-input --only-binary=:all: --require-hashes --requirement app/sidecars/requirements-pip-audit-lock.txt
           python -m unittest discover -s app/sidecars -p 'test_*.py'
