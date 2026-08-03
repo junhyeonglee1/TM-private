@@ -197,7 +197,9 @@ pub(super) async fn run(
         core_read(core, &request_id, move |core| {
             core.list_expense_ai_classification_candidates(
                 target_month_start,
-                EXPENSE_CLASSIFICATION_MAX_REVIEWS,
+                EXPENSE_CLASSIFICATION_MAX_REVIEWS
+                    .try_into()
+                    .expect("expense classification review limit fits in u32"),
             )
         })
         .await?
