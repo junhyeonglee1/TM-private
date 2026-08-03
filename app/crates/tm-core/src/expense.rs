@@ -2984,7 +2984,7 @@ fn validate_expense_ai_classification_claim_replay(
         .collect::<Vec<_>>();
     expected.sort();
     let mut statement = connection.prepare(
-        "SELECT item_id, disposition = 'privacy_skipped', event_id,
+        "SELECT item_id, COALESCE(disposition = 'privacy_skipped', 0), event_id,
                 expected_event_version, review_id, expected_review_version
          FROM expense_ai_classification_items
          WHERE batch_request_id = ?1

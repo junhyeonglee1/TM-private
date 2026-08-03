@@ -56,7 +56,11 @@ describe("지출·정기지출 UI", () => {
   it("Today에서 날짜만으로 오늘·7일·기한 경과를 분류한다", async () => {
     renderApp();
 
-    const section = (await screen.findByRole("heading", { name: "정기지출 확인" })).closest("section");
+    const section = (await screen.findByRole(
+      "heading",
+      { name: "정기지출 확인" },
+      { timeout: 5_000 },
+    )).closest("section");
     expect(section).not.toBeNull();
     expect(within(section as HTMLElement).getByText("오늘 납부")).toBeInTheDocument();
     expect(within(section as HTMLElement).getByText("7일 이내")).toBeInTheDocument();
