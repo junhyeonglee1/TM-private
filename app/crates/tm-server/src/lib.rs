@@ -7868,6 +7868,276 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn expense_mutation_receipts_rehydrate_crypto_context_without_exposing_it() {
+        let (_temporary, core) = test_core();
+        let router = build_cloud_authenticated_router(core.clone(), test_auth_config());
+        let bearer = format!("Bearer {}", test_auth_token());
+        let mut import = expense_import_body();
+        import["rows"][0]["counterparty"] = json!("receipt counterparty");
+        import["rows"][0]["memo"] = json!("receipt memo");
+        let import = expense_api::sign_test_expense_import_value(import);
+
+        let preview = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/expenses/imports/preview")
+                    .header("authorization", &bearer)
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "expense-context-preview")
+                    .header("if-none-match", "*")
+                    .header("x-tm-confirm-mutation", "expense-import-preview")
+                    .body(Body::from(import.to_string()))
+                    .expect("build expense context preview"),
+            )
+            .await
+            .expect("call expense context preview");
+        assert_eq!(preview.status(), StatusCode::OK);
+        let preview = response_json(preview).await;
+        let preview_session_id = preview["data"]["sessionId"]
+            .as_str()
+            .expect("expense context preview session ID");
+        let import = expense_import_body_with_preview_session(import, preview_session_id);
+        let imported = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/expenses/imports")
+                    .header("authorization", &bearer)
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "expense-context-import")
+                    .header("if-none-match", "*")
+                    .header("x-tm-confirm-mutation", "expense-import")
+                    .body(Body::from(import.to_string()))
+                    .expect("build expense context import"),
+            )
+            .await
+            .expect("call expense context import");
+        assert_eq!(imported.status(), StatusCode::CREATED);
+
+        let reviews = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(
+                        "/api/v1/expenses/reviews?month=2026-08&status=pending&scope=category_confirmation&limit=100",
+                    )
+                    .header("authorization", &bearer)
+                    .body(Body::empty())
+                    .expect("build expense context review request"),
+            )
+            .await
+            .expect("call expense context review request");
+        assert_eq!(reviews.status(), StatusCode::OK);
+        let reviews = response_json(reviews).await;
+        let review = reviews["data"]["items"]
+            .as_array()
+            .expect("expense context review items")
+            .iter()
+            .find(|review| review["transaction"]["counterparty"] == "receipt counterparty")
+            .expect("review with all encrypted fields")
+            .clone();
+        let review_id = review["id"].as_str().expect("expense review ID");
+        let review_version = review["version"].as_u64().expect("expense review version");
+        let event_id = review["transaction"]["id"]
+            .as_str()
+            .expect("expense event ID");
+        let resolve_body = json!({
+            "kind": "purchase",
+            "category": "cafe",
+            "duplicateOfEventId": null,
+            "relatedEventId": null,
+            "personalAmountMinor": null,
+            "createRule": false
+        });
+        let resolve_path = format!("/api/v1/expenses/reviews/{review_id}/resolve");
+
+        let resolved = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(resolve_path.as_str())
+                    .header("authorization", &bearer)
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "expense-context-resolve")
+                    .header("if-match", format!("\"{review_version}\""))
+                    .header("x-tm-confirm-mutation", "expense-review-resolve")
+                    .body(Body::from(resolve_body.to_string()))
+                    .expect("build expense context resolution"),
+            )
+            .await
+            .expect("call expense context resolution");
+        assert_eq!(resolved.status(), StatusCode::OK);
+        let resolved_etag = resolved
+            .headers()
+            .get("etag")
+            .and_then(|value| value.to_str().ok())
+            .expect("resolved expense review ETag")
+            .to_owned();
+        let resolved = response_json(resolved).await;
+        assert_eq!(resolved["data"]["status"], "resolved");
+        assert_eq!(
+            resolved["data"]["transaction"]["counterparty"],
+            "receipt counterparty"
+        );
+        assert_eq!(resolved["data"]["transaction"]["memo"], "receipt memo");
+        assert!(
+            resolved["data"]["transaction"]
+                .get("cryptoContext")
+                .is_none()
+        );
+        let serialized_resolved = resolved.to_string();
+        for forbidden in [
+            "cryptoContext",
+            "ciphertext",
+            "blindIndex",
+            "sourceFingerprint",
+            "stableKey",
+        ] {
+            assert!(!serialized_resolved.contains(forbidden));
+        }
+        let resolved_version = resolved["data"]["version"]
+            .as_u64()
+            .expect("resolved review version");
+
+        let replayed = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(resolve_path.as_str())
+                    .header("authorization", &bearer)
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "expense-context-resolve")
+                    .header("if-match", format!("\"{review_version}\""))
+                    .header("x-tm-confirm-mutation", "expense-review-resolve")
+                    .body(Body::from(resolve_body.to_string()))
+                    .expect("build expense context resolution replay"),
+            )
+            .await
+            .expect("call expense context resolution replay");
+        assert_eq!(replayed.status(), StatusCode::OK);
+        assert_eq!(
+            replayed
+                .headers()
+                .get("x-tm-idempotency-replayed")
+                .and_then(|value| value.to_str().ok()),
+            Some("true")
+        );
+        assert_eq!(
+            replayed
+                .headers()
+                .get("etag")
+                .and_then(|value| value.to_str().ok()),
+            Some(resolved_etag.as_str())
+        );
+        let replayed = response_json(replayed).await;
+        assert_eq!(replayed["data"]["version"], resolved_version);
+        assert_eq!(
+            replayed["data"]["transaction"]["counterparty"],
+            "receipt counterparty"
+        );
+        assert_eq!(
+            core.get_expense_review(review_id)
+                .expect("read resolved expense review")
+                .version,
+            resolved_version
+        );
+
+        let event_version = resolved["data"]["transaction"]["version"]
+            .as_u64()
+            .expect("resolved expense event version");
+        let override_body = json!({
+            "kind": "purchase",
+            "category": "food",
+            "duplicateOfEventId": null,
+            "relatedEventId": null,
+            "personalAmountMinor": null,
+            "clearRelatedEvent": false,
+            "clearPersonalAmount": false,
+            "createRule": false
+        });
+        let override_path = format!("/api/v1/expenses/transactions/{event_id}");
+        let overridden = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(override_path.as_str())
+                    .header("authorization", &bearer)
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "expense-context-override")
+                    .header("if-match", format!("\"{event_version}\""))
+                    .header("x-tm-confirm-mutation", "expense-transaction-override")
+                    .body(Body::from(override_body.to_string()))
+                    .expect("build expense context override"),
+            )
+            .await
+            .expect("call expense context override");
+        assert_eq!(overridden.status(), StatusCode::OK);
+        let overridden_etag = overridden
+            .headers()
+            .get("etag")
+            .and_then(|value| value.to_str().ok())
+            .expect("overridden expense transaction ETag")
+            .to_owned();
+        let overridden = response_json(overridden).await;
+        assert_eq!(overridden["data"]["category"], "food");
+        assert_eq!(overridden["data"]["counterparty"], "receipt counterparty");
+        assert_eq!(overridden["data"]["memo"], "receipt memo");
+        assert!(overridden["data"].get("cryptoContext").is_none());
+        let overridden_version = overridden["data"]["version"]
+            .as_u64()
+            .expect("overridden transaction version");
+
+        let override_replay = router
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(override_path.as_str())
+                    .header("authorization", bearer)
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "expense-context-override")
+                    .header("if-match", format!("\"{event_version}\""))
+                    .header("x-tm-confirm-mutation", "expense-transaction-override")
+                    .body(Body::from(override_body.to_string()))
+                    .expect("build expense context override replay"),
+            )
+            .await
+            .expect("call expense context override replay");
+        assert_eq!(override_replay.status(), StatusCode::OK);
+        assert_eq!(
+            override_replay
+                .headers()
+                .get("x-tm-idempotency-replayed")
+                .and_then(|value| value.to_str().ok()),
+            Some("true")
+        );
+        assert_eq!(
+            override_replay
+                .headers()
+                .get("etag")
+                .and_then(|value| value.to_str().ok()),
+            Some(overridden_etag.as_str())
+        );
+        let override_replay = response_json(override_replay).await;
+        assert_eq!(override_replay["data"]["version"], overridden_version);
+        assert_eq!(
+            override_replay["data"]["counterparty"],
+            "receipt counterparty"
+        );
+        assert_eq!(
+            core.get_expense_transaction(event_id)
+                .expect("read overridden expense transaction")
+                .version,
+            overridden_version
+        );
+    }
+
+    #[tokio::test]
     async fn expense_mutation_preconditions_fail_closed_at_the_router() {
         let (_temporary, core) = test_core();
         let router = build_cloud_authenticated_router(core, test_auth_config());

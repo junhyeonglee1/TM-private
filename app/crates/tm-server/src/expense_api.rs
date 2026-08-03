@@ -537,6 +537,12 @@ pub(super) async fn override_transaction(
         ExpectedVersion::Exact,
         &request_id,
     )?;
+    let preflight_event_id = event_id.clone();
+    let preflight = core_read(state.core.clone(), &request_id, move |core| {
+        core.get_expense_transaction(&preflight_event_id)
+    })
+    .await?;
+    decrypt_transaction(preflight, &crypto, &request_id)?;
     let (transaction, replayed): (ExpenseTransaction, bool) = execute_expense_mutation(
         state.core.clone(),
         &request_id,
@@ -557,6 +563,12 @@ pub(super) async fn override_transaction(
             },
         },
     )
+    .await?;
+    // crypto_context is deliberately absent from receipts. Reattach only the context
+    // from the ledger row whose immutable encrypted envelopes match this exact receipt.
+    let transaction = core_read(state.core.clone(), &request_id, move |core| {
+        core.rehydrate_expense_transaction_crypto_context(transaction)
+    })
     .await?;
     let version = transaction.version;
     let dto = decrypt_transaction(transaction, &crypto, &request_id)?;
@@ -718,6 +730,12 @@ pub(super) async fn resolve_review(
         &request_id,
     )?;
     let expected_version = required_expected_version(&preconditions, &request_id)?;
+    let preflight_review_id = review_id.clone();
+    let preflight = core_read(state.core.clone(), &request_id, move |core| {
+        core.get_expense_review(&preflight_review_id)
+    })
+    .await?;
+    decrypt_review(preflight, &crypto, &request_id)?;
     let (review, replayed): (ExpenseReview, bool) = execute_expense_mutation(
         state.core.clone(),
         &request_id,
@@ -736,6 +754,12 @@ pub(super) async fn resolve_review(
             },
         },
     )
+    .await?;
+    // crypto_context is deliberately absent from receipts. Reattach only the context
+    // from the ledger row whose immutable encrypted envelopes match this exact receipt.
+    let review = core_read(state.core.clone(), &request_id, move |core| {
+        core.rehydrate_expense_review_crypto_context(review)
+    })
     .await?;
     let version = review.version;
     let dto = decrypt_review(review, &crypto, &request_id)?;

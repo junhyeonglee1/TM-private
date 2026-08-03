@@ -843,7 +843,29 @@ fn excluded_transactions_can_be_overridden_and_month_snapshots_only_change_on_mu
     assert!(!first.replayed);
     let replay = core.execute_expense_mutation(request)?;
     assert!(replay.replayed);
+    assert!(first.value.get("cryptoContext").is_none());
+    assert!(replay.value.get("cryptoContext").is_none());
     let overridden: tm_core::ExpenseTransaction = serde_json::from_value(first.value)?;
+    let replayed: tm_core::ExpenseTransaction = serde_json::from_value(replay.value)?;
+    assert!(overridden.crypto_context.is_none());
+    assert!(replayed.crypto_context.is_none());
+    assert_eq!(overridden.merchant, excluded.merchant);
+    let rehydrated = core.rehydrate_expense_transaction_crypto_context(overridden.clone())?;
+    assert_eq!(rehydrated.crypto_context, excluded.crypto_context);
+    assert_eq!(rehydrated.merchant, overridden.merchant);
+    let replayed = core.rehydrate_expense_transaction_crypto_context(replayed)?;
+    assert_eq!(replayed.crypto_context, excluded.crypto_context);
+    let mut mismatched = overridden.clone();
+    mismatched
+        .merchant
+        .as_mut()
+        .expect("encrypted merchant")
+        .ciphertext
+        .push_str("-mismatch");
+    assert!(matches!(
+        core.rehydrate_expense_transaction_crypto_context(mismatched),
+        Err(Error::Invariant(_))
+    ));
     assert_eq!(overridden.status, tm_core::ExpenseEventStatus::Confirmed);
     assert_eq!(overridden.kind, ExpenseEventKind::Purchase);
     assert_eq!(

@@ -1455,6 +1455,34 @@ impl TmCore {
         Ok(ExpenseTransactionPage { items, next_cursor })
     }
 
+    /// Reloads a transaction from its immutable ledger identity so callers can recover
+    /// the local-only authenticated-encryption context after a serde receipt round trip.
+    pub fn get_expense_transaction(&self, event_id: &str) -> Result<ExpenseTransaction> {
+        validate_label("expense event ID", event_id, 128)?;
+        query_expense_transaction(&self.database.connect()?, event_id)
+    }
+
+    /// Restores the local-only encryption context omitted from a serialized mutation
+    /// receipt after verifying that its encrypted fields still belong to the ledger row.
+    pub fn rehydrate_expense_transaction_crypto_context(
+        &self,
+        mut item: ExpenseTransaction,
+    ) -> Result<ExpenseTransaction> {
+        validate_label("expense event ID", &item.id, 128)?;
+        let trusted = query_expense_transaction(&self.database.connect()?, &item.id)?;
+        if item.merchant != trusted.merchant
+            || item.counterparty != trusted.counterparty
+            || item.memo != trusted.memo
+        {
+            return Err(Error::Invariant(
+                "serialized expense transaction encryption does not match its ledger row"
+                    .to_owned(),
+            ));
+        }
+        item.crypto_context = trusted.crypto_context;
+        Ok(item)
+    }
+
     pub fn list_expense_reviews(&self, filter: ExpenseReviewFilter) -> Result<ExpenseReviewPage> {
         self.list_expense_reviews_scoped(filter, ExpenseReviewScope::All)
     }
@@ -1558,6 +1586,34 @@ impl TmCore {
             })
             .flatten();
         Ok(ExpenseReviewPage { items, next_cursor })
+    }
+
+    /// Reloads a review and its transaction from the ledger, including the transaction's
+    /// local-only authenticated-encryption context omitted from serialized receipts.
+    pub fn get_expense_review(&self, review_id: &str) -> Result<ExpenseReview> {
+        validate_label("expense review ID", review_id, 128)?;
+        query_expense_review(&self.database.connect()?, review_id)
+    }
+
+    /// Restores a serialized review transaction's local-only encryption context after
+    /// verifying its identity and encrypted fields against the ledger.
+    pub fn rehydrate_expense_review_crypto_context(
+        &self,
+        mut item: ExpenseReview,
+    ) -> Result<ExpenseReview> {
+        validate_label("expense review ID", &item.id, 128)?;
+        let trusted = query_expense_review(&self.database.connect()?, &item.id)?;
+        if item.transaction.id != trusted.transaction.id
+            || item.transaction.merchant != trusted.transaction.merchant
+            || item.transaction.counterparty != trusted.transaction.counterparty
+            || item.transaction.memo != trusted.transaction.memo
+        {
+            return Err(Error::Invariant(
+                "serialized expense review encryption does not match its ledger row".to_owned(),
+            ));
+        }
+        item.transaction.crypto_context = trusted.transaction.crypto_context;
+        Ok(item)
     }
 
     pub fn resolve_expense_review(

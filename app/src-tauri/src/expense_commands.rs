@@ -296,13 +296,23 @@ pub(crate) fn override_expense_transaction(
     state: State<'_, AppState>,
 ) -> CommandResult<Value> {
     require_local(&state)?;
+    let crypto = local_crypto(&state)?;
+    let preflight = state
+        .core
+        .get_expense_transaction(&event_id)
+        .map_err(command_error)?;
+    transaction_value(crypto, &preflight)?;
     let result = execute_local_mutation(
         &state,
         ExpenseMutationCommand::OverrideTransaction { event_id, input },
         idempotency_key,
     )?;
     let transaction: ExpenseTransaction = serde_json::from_value(result).map_err(command_error)?;
-    transaction_value(local_crypto(&state)?, &transaction)
+    let transaction = state
+        .core
+        .rehydrate_expense_transaction_crypto_context(transaction)
+        .map_err(command_error)?;
+    transaction_value(crypto, &transaction)
 }
 
 #[tauri::command]
@@ -334,13 +344,23 @@ pub(crate) fn resolve_expense_review(
     state: State<'_, AppState>,
 ) -> CommandResult<Value> {
     require_local(&state)?;
+    let crypto = local_crypto(&state)?;
+    let preflight = state
+        .core
+        .get_expense_review(&review_id)
+        .map_err(command_error)?;
+    review_value(crypto, &preflight)?;
     let result = execute_local_mutation(
         &state,
         ExpenseMutationCommand::ResolveReview { review_id, input },
         idempotency_key,
     )?;
     let review: ExpenseReview = serde_json::from_value(result).map_err(command_error)?;
-    review_value(local_crypto(&state)?, &review)
+    let review = state
+        .core
+        .rehydrate_expense_review_crypto_context(review)
+        .map_err(command_error)?;
+    review_value(crypto, &review)
 }
 
 #[tauri::command]
