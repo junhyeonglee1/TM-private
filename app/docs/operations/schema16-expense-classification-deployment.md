@@ -11,6 +11,7 @@ schema 16은 기존 schema 15 지출 원장을 유지하면서 AI 분류 이력�
 5. 1단계와 2단계 모두 같은 clean commit의 exact source archive만 배포한다.
 6. 기존 지출 해설 switch `TM_EXPENSE_AI_ENABLED`는 두 단계 모두 `false`로 유지한다.
 7. 배포 verifier는 GET 요청만 사용하며 비밀값을 조회하거나 출력하지 않는다.
+8. 비대화식 실행은 `-ApproveDeployment`에 phase, exact commit SHA, STEP 10/16 run ID를 모두 넣는다. 승인 원문은 저장하지 않고 SHA-256만 보호된 receipt에 기록한다.
 
 이 PC에서는 Windows 애플리케이션 제어 정책 때문에 Cargo가 만든 실행 파일을 로컬 성공 조건으로 사용하지 않는다. 관리자 권한으로 우회하지 않는다. 로컬에서는 rustfmt, TypeScript 검사, PowerShell parser, 정적 보안 검사와 `git diff --check`만 실행하고 Rust/Tauri 컴파일은 GitHub Actions에서 확정한다.
 
@@ -50,6 +51,7 @@ dry run이 통과하면 실제 1단계를 실행한다.
   -ExpectedHeadSha '<40자리_COMMIT_SHA>' `
   -Step10RunId <STEP10_RUN_ID> `
   -Step16RunId <STEP16_RUN_ID> `
+  -ApproveDeployment 'TM_EXPENSE_CLASSIFICATION_DEPLOY_V1:Phase1:<40자리_COMMIT_SHA>:<STEP10_RUN_ID>:<STEP16_RUN_ID>' `
   -Apply
 ```
 
@@ -61,7 +63,7 @@ dry run이 통과하면 실제 1단계를 실행한다.
 - classification claimed/staged가 0이고 기능이 꺼져 있는지 검증
 - DPAPI로 보호된 1단계 receipt와 단일 사용 승인 상태 저장
 
-1단계가 끝났다고 해서 2단계를 자동으로 실행하지 않는다. receipt를 검토하고 사용자에게 별도 활성화 승인을 받아야 한다.
+1단계와 2단계는 항상 별도 명령으로 실행한다. 전체 활성화 범위가 이미 승인된 자동 운영에서는 1단계 receipt 검증 후 같은 승인 범위 안에서 2단계 명령을 이어서 실행할 수 있다.
 
 ## 2단계: 별도 승인 후 분류 활성화
 
@@ -85,10 +87,13 @@ dry run이 통과하면 실제 1단계를 실행한다.
   -Step10RunId <STEP10_RUN_ID> `
   -Step16RunId <STEP16_RUN_ID> `
   -ApproveActivation `
+  -ApproveDeployment 'TM_EXPENSE_CLASSIFICATION_DEPLOY_V1:Phase2:<40자리_COMMIT_SHA>:<STEP10_RUN_ID>:<STEP16_RUN_ID>' `
   -Apply
 ```
 
 2단계는 1단계 receipt와 exact source를 다시 확인한 뒤 분류 switch만 켜고 같은 source를 재배포한다. 최종 verifier가 schema 16, 최신 원격 백업, `expenseClassificationAiEnabled=true`, `expenseAiEnabled=false`, 열린 classification 작업 0을 확인해야 성공이다. receipt는 한 번만 소비할 수 있다.
+
+`-ApproveDeployment`는 비밀키가 아니라 이미 받은 운영 승인을 정확한 release scope에만 적용하는 latch다. 값이 phase, SHA 또는 Actions run과 한 글자라도 다르면 mutation 전에 거부한다. `-Force`, `-Confirm:$false`, `-WhatIf`와의 혼합 우회는 허용하지 않는다. 비대화식 옵션을 생략하면 기존 `ShouldProcess` 확인창을 사용한다.
 
 ## 실패 시 fail-closed 처리
 

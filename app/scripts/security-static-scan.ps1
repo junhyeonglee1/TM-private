@@ -504,12 +504,18 @@ else {
     )
     foreach ($required in @(
         "[ValidateSet('Phase1', 'Phase2')]",
+        '[string]$ApproveDeployment',
         '[switch]$ApproveActivation',
         '[switch]$RunGuardSelfTest',
         'Get-TmVerifiedActionsArtifactEvidence',
         'Assert-TmCanonicalGitState',
         'Assert-TmReceiptIntegrityProof',
         'Assert-TmPendingReceiptState',
+        'TM_EXPENSE_CLASSIFICATION_DEPLOY_V1:',
+        '[System.StringComparison]::Ordinal',
+        'tm-exact-release-deployment-approval-v1',
+        'protected-phase-receipt-v1',
+        'ApproveDeployment cannot be combined with -WhatIf or -Confirm.',
         'TM_EXPENSE_CLASSIFICATION_AI_ENABLED=$Enabled',
         'TM_EXPENSE_AI_ENABLED=false',
         "'--skip-deploys'",

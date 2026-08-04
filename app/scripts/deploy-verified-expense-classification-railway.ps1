@@ -7,6 +7,7 @@ param(
     [long]$Step16RunId,
     [string]$PhaseOneReceiptPath,
     [string]$PhaseTwoResultPath,
+    [string]$ApproveDeployment,
     [switch]$ApproveActivation,
     [switch]$RunGuardSelfTest,
     [switch]$Apply,
@@ -36,7 +37,8 @@ $tokenCredentialUser = 'single-user'
 $mutexName = 'Local\TMExpenseProductionKeyConfiguration'
 $phaseOneReceiptKind = 'tm-expense-classification-phase1'
 $phaseTwoReceiptKind = 'tm-expense-classification-phase2'
-$receiptVersion = 1
+$deploymentApprovalKind = 'tm-exact-release-deployment-approval-v1'
+$receiptVersion = 2
 
 $appRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $tmRoot = [System.IO.Path]::GetFullPath((Join-Path $appRoot '..'))
@@ -72,6 +74,160 @@ function Assert-BooleanValue {
 
     if ($Value -isnot [bool] -or $Value -ne $Expected) {
         throw "$Name must be the Boolean value $Expected."
+    }
+}
+
+function Assert-DeploymentApprovalArguments {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Phase1', 'Phase2')]
+        [string]$ApprovalPhase,
+        [Parameter(Mandatory = $true)][bool]$ApplyRequested,
+        [Parameter(Mandatory = $true)][bool]$ActivationApproved,
+        [AllowNull()][string]$ApprovalValue,
+        [Parameter(Mandatory = $true)][bool]$ForceRequested,
+        [Parameter(Mandatory = $true)][bool]$ConfirmSpecified,
+        [Parameter(Mandatory = $true)][bool]$ConfirmValue,
+        [Parameter(Mandatory = $true)][bool]$WhatIfRequested
+    )
+
+    if ($ApprovalPhase -ceq 'Phase1' -and $ActivationApproved) {
+        throw 'ApproveActivation is valid only for Phase2.'
+    }
+    if ($ApprovalPhase -ceq 'Phase2' -and -not $ActivationApproved) {
+        throw 'Phase2 requires the explicit -ApproveActivation switch.'
+    }
+    $approvalProvided = -not [string]::IsNullOrWhiteSpace($ApprovalValue)
+    if ($approvalProvided -and -not $ApplyRequested) {
+        throw 'ApproveDeployment is valid only together with -Apply.'
+    }
+    if ($approvalProvided -and ($WhatIfRequested -or $ConfirmSpecified)) {
+        throw 'ApproveDeployment cannot be combined with -WhatIf or -Confirm.'
+    }
+    if ($ForceRequested -or ($ConfirmSpecified -and -not $ConfirmValue)) {
+        throw 'Production classification rollout refuses -Force and -Confirm:$false.'
+    }
+    return $approvalProvided
+}
+
+function Get-ExpectedDeploymentApproval {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Phase1', 'Phase2')]
+        [string]$ApprovalPhase
+    )
+
+    return 'TM_EXPENSE_CLASSIFICATION_DEPLOY_V1:{0}:{1}:{2}:{3}' -f @(
+        $ApprovalPhase,
+        $ExpectedHeadSha,
+        $Step10RunId,
+        $Step16RunId
+    )
+}
+
+function Get-DeploymentApprovalSha256 {
+    param([Parameter(Mandatory = $true)][string]$Value)
+
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($Value)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString(
+            $sha256.ComputeHash($bytes)
+        ) -replace '-', '').ToLowerInvariant()
+    }
+    finally {
+        $sha256.Dispose()
+        [Array]::Clear($bytes, 0, $bytes.Length)
+    }
+}
+
+function New-DeploymentApprovalRecord {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Phase1', 'Phase2')]
+        [string]$ApprovalPhase,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('exact-scope-parameter', 'interactive-should-process')]
+        [string]$Mode,
+        [AllowEmptyString()][string]$ApprovalValue = ''
+    )
+
+    $approvalSha256 = $null
+    if ($Mode -ceq 'exact-scope-parameter') {
+        $expected = Get-ExpectedDeploymentApproval -ApprovalPhase $ApprovalPhase
+        if (-not [string]::Equals(
+                $ApprovalValue,
+                $expected,
+                [System.StringComparison]::Ordinal
+            )) {
+            throw 'ApproveDeployment is not bound to this exact phase, commit, and Actions evidence.'
+        }
+        $approvalSha256 = Get-DeploymentApprovalSha256 -Value $ApprovalValue
+    }
+
+    return [pscustomobject][ordered]@{
+        kind = $deploymentApprovalKind
+        mode = $Mode
+        approvalSha256 = $approvalSha256
+        approvedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
+        phase = $ApprovalPhase
+        repository = $repository
+        branch = $expectedBranch
+        headSha = $ExpectedHeadSha
+        step10RunId = $Step10RunId
+        step16RunId = $Step16RunId
+        activationApproved = ($ApprovalPhase -ceq 'Phase2')
+        singleUseEnforcedBy = 'protected-phase-receipt-v1'
+    }
+}
+
+function Assert-DeploymentApprovalRecord {
+    param(
+        [Parameter(Mandatory = $true)]$Approval,
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Phase1', 'Phase2')]
+        [string]$ApprovalPhase
+    )
+
+    Assert-TmExactJsonProperties $Approval @(
+        'kind', 'mode', 'approvalSha256', 'approvedAtUtc', 'phase',
+        'repository', 'branch', 'headSha', 'step10RunId', 'step16RunId',
+        'activationApproved', 'singleUseEnforcedBy'
+    ) 'deployment approval record'
+    $approvedAt = [DateTimeOffset]::MinValue
+    $expectedActivationApproval = $ApprovalPhase -ceq 'Phase2'
+    Assert-BooleanValue `
+        $Approval.activationApproved `
+        $expectedActivationApproval `
+        'deploymentApproval.activationApproved'
+    if ([string]$Approval.kind -cne $deploymentApprovalKind -or
+        [string]$Approval.mode -notin @(
+            'exact-scope-parameter', 'interactive-should-process'
+        ) -or
+        [string]$Approval.phase -cne $ApprovalPhase -or
+        [string]$Approval.repository -cne $repository -or
+        [string]$Approval.branch -cne $expectedBranch -or
+        ([string]$Approval.headSha).ToLowerInvariant() -cne $ExpectedHeadSha -or
+        [long]$Approval.step10RunId -ne $Step10RunId -or
+        [long]$Approval.step16RunId -ne $Step16RunId -or
+        [string]$Approval.singleUseEnforcedBy -cne 'protected-phase-receipt-v1' -or
+        -not [DateTimeOffset]::TryParse(
+            [string]$Approval.approvedAtUtc,
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::RoundtripKind,
+            [ref]$approvedAt
+        )) {
+        throw 'The deployment approval is not bound to this exact phase and release evidence.'
+    }
+    if ([string]$Approval.mode -ceq 'exact-scope-parameter') {
+        $expectedApproval = Get-ExpectedDeploymentApproval -ApprovalPhase $ApprovalPhase
+        $expectedSha256 = Get-DeploymentApprovalSha256 -Value $expectedApproval
+        if ([string]$Approval.approvalSha256 -cne $expectedSha256) {
+            throw 'The deployment approval digest does not match this exact release scope.'
+        }
+    }
+    elseif ($null -ne $Approval.approvalSha256) {
+        throw 'Interactive deployment approval must not contain a scope parameter digest.'
     }
 }
 
@@ -700,10 +856,14 @@ function New-PhaseOneReceipt {
         [Parameter(Mandatory = $true)]$Source,
         [Parameter(Mandatory = $true)]$Deployment,
         [Parameter(Mandatory = $true)]$Verification,
+        [Parameter(Mandatory = $true)]$DeploymentApproval,
         [Parameter(Mandatory = $true)][string]$VerificationPath,
         [Parameter(Mandatory = $true)][string]$Message
     )
 
+    Assert-DeploymentApprovalRecord `
+        -Approval $DeploymentApproval `
+        -ApprovalPhase Phase1
     $now = [DateTimeOffset]::UtcNow
     return [ordered]@{
         success = $true
@@ -717,6 +877,7 @@ function New-PhaseOneReceipt {
         headSha = $ExpectedHeadSha
         step10RunId = $Step10RunId
         step16RunId = $Step16RunId
+        deploymentApproval = $DeploymentApproval
         actionsEvidence = [ordered]@{
             step10 = $Step10Evidence
             step16 = $Step16Evidence
@@ -755,7 +916,7 @@ function Read-PhaseOneReceipt {
     Assert-TmExactJsonProperties $receipt @(
         'success', 'receiptVersion', 'kind', 'receiptId', 'createdAtUtc',
         'expiresAtUtc', 'repository', 'branch', 'headSha', 'step10RunId',
-        'step16RunId', 'actionsEvidence', 'operatorTools', 'railwayCli',
+        'step16RunId', 'deploymentApproval', 'actionsEvidence', 'operatorTools', 'railwayCli',
         'projectId', 'environment', 'service', 'preDeployment',
         'sourceArchiveSha256', 'stagedSourceManifestSha256', 'deploymentId',
         'deploymentStatus', 'deploymentCreatedAt', 'deploymentMessage',
@@ -775,6 +936,9 @@ function Read-PhaseOneReceipt {
     )) {
         Assert-BooleanValue $receipt.$name $false "phaseOneReceipt.$name"
     }
+    Assert-DeploymentApprovalRecord `
+        -Approval $receipt.deploymentApproval `
+        -ApprovalPhase Phase1
     $receiptId = [Guid]::Empty
     $deploymentId = [Guid]::Empty
     $createdAt = [DateTimeOffset]::MinValue
@@ -844,9 +1008,13 @@ function Write-PhaseTwoReceipt {
         [Parameter(Mandatory = $true)]$Source,
         [Parameter(Mandatory = $true)]$Deployment,
         [Parameter(Mandatory = $true)]$Verification,
+        [Parameter(Mandatory = $true)]$DeploymentApproval,
         [Parameter(Mandatory = $true)][string]$Message
     )
 
+    Assert-DeploymentApprovalRecord `
+        -Approval $DeploymentApproval `
+        -ApprovalPhase Phase2
     $receipt = [ordered]@{
         success = $true
         receiptVersion = $receiptVersion
@@ -857,6 +1025,7 @@ function Write-PhaseTwoReceipt {
         headSha = $ExpectedHeadSha
         step10RunId = $Step10RunId
         step16RunId = $Step16RunId
+        deploymentApproval = $DeploymentApproval
         phaseOneReceiptId = [string]$PhaseOneReceipt.receiptId
         phaseOneReceiptSha256 = (
             Get-FileHash -LiteralPath $PhaseOneReceiptPath -Algorithm SHA256
@@ -914,10 +1083,129 @@ function Invoke-ClassificationDeploymentGuardSelfTest {
             throw 'Classification rollout self-test accepted ambiguous deployment IDs.'
         }
 
+        $validExplicitArguments = @{
+            ApprovalPhase = 'Phase1'
+            ApplyRequested = $true
+            ActivationApproved = $false
+            ApprovalValue = 'scope-latch'
+            ForceRequested = $false
+            ConfirmSpecified = $false
+            ConfirmValue = $false
+            WhatIfRequested = $false
+        }
+        if (-not (Assert-DeploymentApprovalArguments @validExplicitArguments)) {
+            throw 'Classification rollout self-test rejected explicit deployment approval.'
+        }
+        $validInteractiveArguments = @{
+            ApprovalPhase = 'Phase1'
+            ApplyRequested = $false
+            ActivationApproved = $false
+            ApprovalValue = $null
+            ForceRequested = $false
+            ConfirmSpecified = $false
+            ConfirmValue = $false
+            WhatIfRequested = $false
+        }
+        if (Assert-DeploymentApprovalArguments @validInteractiveArguments) {
+            throw 'Classification rollout self-test mislabeled interactive approval.'
+        }
+        $invalidArgumentSets = @(
+            @{
+                ApprovalPhase = 'Phase1'; ApplyRequested = $false
+                ActivationApproved = $true; ApprovalValue = $null
+                ForceRequested = $false; ConfirmSpecified = $false
+                ConfirmValue = $false; WhatIfRequested = $false
+            },
+            @{
+                ApprovalPhase = 'Phase2'; ApplyRequested = $false
+                ActivationApproved = $false; ApprovalValue = $null
+                ForceRequested = $false; ConfirmSpecified = $false
+                ConfirmValue = $false; WhatIfRequested = $false
+            },
+            @{
+                ApprovalPhase = 'Phase1'; ApplyRequested = $false
+                ActivationApproved = $false; ApprovalValue = 'scope-latch'
+                ForceRequested = $false; ConfirmSpecified = $false
+                ConfirmValue = $false; WhatIfRequested = $false
+            },
+            @{
+                ApprovalPhase = 'Phase1'; ApplyRequested = $true
+                ActivationApproved = $false; ApprovalValue = 'scope-latch'
+                ForceRequested = $false; ConfirmSpecified = $false
+                ConfirmValue = $false; WhatIfRequested = $true
+            },
+            @{
+                ApprovalPhase = 'Phase1'; ApplyRequested = $true
+                ActivationApproved = $false; ApprovalValue = 'scope-latch'
+                ForceRequested = $false; ConfirmSpecified = $true
+                ConfirmValue = $true; WhatIfRequested = $false
+            },
+            @{
+                ApprovalPhase = 'Phase1'; ApplyRequested = $true
+                ActivationApproved = $false; ApprovalValue = $null
+                ForceRequested = $true; ConfirmSpecified = $false
+                ConfirmValue = $false; WhatIfRequested = $false
+            },
+            @{
+                ApprovalPhase = 'Phase1'; ApplyRequested = $true
+                ActivationApproved = $false; ApprovalValue = $null
+                ForceRequested = $false; ConfirmSpecified = $true
+                ConfirmValue = $false; WhatIfRequested = $false
+            }
+        )
+        foreach ($invalidArguments in $invalidArgumentSets) {
+            $invalidArgumentsRejected = $false
+            try {
+                Assert-DeploymentApprovalArguments @invalidArguments | Out-Null
+            }
+            catch {
+                $invalidArgumentsRejected = $true
+            }
+            if (-not $invalidArgumentsRejected) {
+                throw 'Classification rollout self-test accepted an unsafe approval argument combination.'
+            }
+        }
+
         $script:ExpectedHeadSha = 'a' * 40
         $script:Step10RunId = 10
         $script:Step16RunId = 16
         $script:PhaseOneReceiptPath = Join-Path $root 'phase1.json'
+        $phaseOneApprovalValue = Get-ExpectedDeploymentApproval -ApprovalPhase Phase1
+        $phaseOneApproval = New-DeploymentApprovalRecord `
+            -ApprovalPhase Phase1 `
+            -Mode exact-scope-parameter `
+            -ApprovalValue $phaseOneApprovalValue
+        Assert-DeploymentApprovalRecord `
+            -Approval $phaseOneApproval `
+            -ApprovalPhase Phase1
+        $phaseTwoApprovalValue = Get-ExpectedDeploymentApproval -ApprovalPhase Phase2
+        $phaseTwoApproval = New-DeploymentApprovalRecord `
+            -ApprovalPhase Phase2 `
+            -Mode exact-scope-parameter `
+            -ApprovalValue $phaseTwoApprovalValue
+        Assert-DeploymentApprovalRecord `
+            -Approval $phaseTwoApproval `
+            -ApprovalPhase Phase2
+        foreach ($invalidApproval in @(
+            "$phaseOneApprovalValue-tampered",
+            $phaseTwoApprovalValue,
+            ($phaseOneApprovalValue -replace ':10:', ':11:'),
+            ($phaseOneApprovalValue -replace ':16$', ':17')
+        )) {
+            $invalidApprovalRejected = $false
+            try {
+                New-DeploymentApprovalRecord `
+                    -ApprovalPhase Phase1 `
+                    -Mode exact-scope-parameter `
+                    -ApprovalValue $invalidApproval | Out-Null
+            }
+            catch {
+                $invalidApprovalRejected = $true
+            }
+            if (-not $invalidApprovalRejected) {
+                throw 'Classification rollout self-test accepted mismatched deployment approval evidence.'
+            }
+        }
         $verification = [pscustomobject]@{
             success = $true
             verifiedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
@@ -973,6 +1261,7 @@ function Invoke-ClassificationDeploymentGuardSelfTest {
             headSha = $script:ExpectedHeadSha
             step10RunId = 10
             step16RunId = 16
+            deploymentApproval = $phaseOneApproval
             actionsEvidence = [ordered]@{ kind = 'self-test' }
             operatorTools = [ordered]@{ kind = 'self-test' }
             railwayCli = [ordered]@{ kind = 'self-test' }
@@ -998,6 +1287,13 @@ function Invoke-ClassificationDeploymentGuardSelfTest {
         }
         Add-TmReceiptIntegrityProof $receipt
         Write-TmJsonNoBom -Value $receipt -Path $script:PhaseOneReceiptPath
+        $receiptText = [System.IO.File]::ReadAllText(
+            $script:PhaseOneReceiptPath,
+            [System.Text.Encoding]::UTF8
+        )
+        if ($receiptText.Contains($phaseOneApprovalValue)) {
+            throw 'Classification rollout self-test persisted the raw deployment approval value.'
+        }
         $validated = Read-PhaseOneReceipt -Path $script:PhaseOneReceiptPath
         $stateParameters = @{
             StateKind = 'approval'
@@ -1052,17 +1348,20 @@ if ($ExpectedHeadSha -notmatch '^[0-9a-fA-F]{40}$' -or
     throw 'An exact 40-character commit SHA and successful STEP 10/STEP 16 run IDs are required.'
 }
 $ExpectedHeadSha = $ExpectedHeadSha.ToLowerInvariant()
-if ($Phase -ceq 'Phase1' -and $ApproveActivation) {
-    throw 'ApproveActivation is valid only for Phase2.'
+$whatIfRequested = $PSBoundParameters.ContainsKey('WhatIf') -and
+    [bool]$PSBoundParameters['WhatIf']
+$explicitConfirmRequested = $PSBoundParameters.ContainsKey('Confirm')
+$approvalArgumentParameters = @{
+    ApprovalPhase = $Phase
+    ApplyRequested = [bool]$Apply
+    ActivationApproved = [bool]$ApproveActivation
+    ApprovalValue = $ApproveDeployment
+    ForceRequested = [bool]$Force
+    ConfirmSpecified = $explicitConfirmRequested
+    ConfirmValue = [bool]$PSBoundParameters['Confirm']
+    WhatIfRequested = $whatIfRequested
 }
-if ($Phase -ceq 'Phase2' -and -not $ApproveActivation) {
-    throw 'Phase2 requires the explicit -ApproveActivation switch.'
-}
-$confirmBypassRequested = $PSBoundParameters.ContainsKey('Confirm') -and
-    -not [bool]$PSBoundParameters['Confirm']
-if ($Force -or $confirmBypassRequested) {
-    throw 'Production classification rollout refuses -Force and -Confirm:$false.'
-}
+$deploymentApprovalProvided = Assert-DeploymentApprovalArguments @approvalArgumentParameters
 
 $gitEvidence = $null
 $ghEvidence = $null
@@ -1081,6 +1380,16 @@ $activationDeploymentSucceeded = $false
 $failureRollbackAttempted = $false
 $failureRollbackSucceeded = $false
 $phaseOneReceipt = $null
+$deploymentApproval = $null
+if ($deploymentApprovalProvided) {
+    $deploymentApproval = New-DeploymentApprovalRecord `
+        -ApprovalPhase $Phase `
+        -Mode exact-scope-parameter `
+        -ApprovalValue $ApproveDeployment
+    Assert-DeploymentApprovalRecord `
+        -Approval $deploymentApproval `
+        -ApprovalPhase $Phase
+}
 
 try {
     New-Item -ItemType Directory -Force -Path $rolloutRoot | Out-Null
@@ -1153,9 +1462,20 @@ try {
             throw 'A protected Phase1 receipt already exists. Refusing to overwrite rollout evidence.'
         }
         $action = "Deploy exact schema 16 commit $ExpectedHeadSha with classification disabled"
-        if (-not $PSCmdlet.ShouldProcess('Railway production/tm-server', $action)) {
-            return
+        if ($null -eq $deploymentApproval) {
+            if (-not $PSCmdlet.ShouldProcess('Railway production/tm-server', $action)) {
+                return
+            }
+            $deploymentApproval = New-DeploymentApprovalRecord `
+                -ApprovalPhase Phase1 `
+                -Mode interactive-should-process
         }
+        else {
+            Write-Host 'Exact release deployment approval accepted for Phase1.'
+        }
+        Assert-DeploymentApprovalRecord `
+            -Approval $deploymentApproval `
+            -ApprovalPhase Phase1
 
         $stage = 'schema15-final-read-only-preflight'
         $finalPreflight = Assert-PhaseOneProductionPreflight (Invoke-ProductionOperationsStatus)
@@ -1180,6 +1500,7 @@ try {
             Source = $source
             Deployment = $deployment
             Verification = $verification
+            DeploymentApproval = $deploymentApproval
             VerificationPath = $phaseOneVerificationPath
             Message = $phaseOneMessage
         }
@@ -1248,9 +1569,20 @@ try {
         throw 'A protected Phase2 result already exists. Refusing to overwrite rollout evidence.'
     }
     $action = "Activate classification on exact commit $ExpectedHeadSha using Phase1 receipt $($phaseOneReceipt.receiptId)"
-    if (-not $PSCmdlet.ShouldProcess('Railway production/tm-server', $action)) {
-        return
+    if ($null -eq $deploymentApproval) {
+        if (-not $PSCmdlet.ShouldProcess('Railway production/tm-server', $action)) {
+            return
+        }
+        $deploymentApproval = New-DeploymentApprovalRecord `
+            -ApprovalPhase Phase2 `
+            -Mode interactive-should-process
     }
+    else {
+        Write-Host 'Exact release deployment approval accepted for Phase2.'
+    }
+    Assert-DeploymentApprovalRecord `
+        -Approval $deploymentApproval `
+        -ApprovalPhase Phase2
 
     $stage = 'phase2-final-evidence-check'
     $finalGitEvidence = Resolve-TmVerifiedGit
@@ -1289,7 +1621,13 @@ try {
     $pendingParameters.Consume = $true
     $null = Assert-TmPendingReceiptState @pendingParameters
     $stage = 'phase2-receipt'
-    Write-PhaseTwoReceipt -PhaseOneReceipt $phaseOneReceipt -Source $source -Deployment $deployment -Verification $verification -Message $phaseTwoMessage
+    Write-PhaseTwoReceipt `
+        -PhaseOneReceipt $phaseOneReceipt `
+        -Source $source `
+        -Deployment $deployment `
+        -Verification $verification `
+        -DeploymentApproval $deploymentApproval `
+        -Message $phaseTwoMessage
     Write-Host "Phase2 classification activation passed: $deploymentId" -ForegroundColor Green
     Write-Host "Protected Phase2 result: $PhaseTwoResultPath"
 }
@@ -1332,6 +1670,16 @@ catch {
         headSha = $ExpectedHeadSha
         step10RunId = $Step10RunId
         step16RunId = $Step16RunId
+        deploymentApprovalMode = if ($null -eq $deploymentApproval) {
+            $null
+        } else {
+            [string]$deploymentApproval.mode
+        }
+        deploymentApprovalSha256 = if ($null -eq $deploymentApproval) {
+            $null
+        } else {
+            [string]$deploymentApproval.approvalSha256
+        }
         deploymentId = $deploymentId
         classificationEnableAttempted = $classificationEnableAttempted
         activationUploadAttempted = $activationUploadAttempted
@@ -1362,4 +1710,6 @@ finally {
     if ($null -ne $mutex) {
         $mutex.Dispose()
     }
+    $ApproveDeployment = $null
+    Remove-Variable ApproveDeployment -ErrorAction SilentlyContinue
 }
