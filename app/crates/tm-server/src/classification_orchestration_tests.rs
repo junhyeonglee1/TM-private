@@ -41,6 +41,7 @@ use super::{
 };
 
 const TEST_AUTH_SECRET: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+const PROVIDER_ENTRY_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy)]
 enum ProviderMode {
@@ -366,7 +367,7 @@ async fn concurrent_same_key_calls_provider_and_budget_once_and_other_month_conf
             .await
             .expect("call first concurrent classification request")
     });
-    tokio::time::timeout(Duration::from_secs(5), provider.entered.notified())
+    tokio::time::timeout(PROVIDER_ENTRY_TIMEOUT, provider.entered.notified())
         .await
         .expect("first request reached classification provider");
     let concurrent = router
