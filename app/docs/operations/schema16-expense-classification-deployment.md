@@ -15,6 +15,8 @@ schema 16은 기존 schema 15 지출 원장을 유지하면서 AI 분류 이력�
 
 이 PC에서는 Windows 애플리케이션 제어 정책 때문에 Cargo가 만든 실행 파일을 로컬 성공 조건으로 사용하지 않는다. 관리자 권한으로 우회하지 않는다. 로컬에서는 rustfmt, TypeScript 검사, PowerShell parser, 정적 보안 검사와 `git diff --check`만 실행하고 Rust/Tauri 컴파일은 GitHub Actions에서 확정한다.
 
+검증 artifact 설치 후 Windows의 고정 실행 경로는 `C:\\Users\\tkfk0\\Desktop\\codex\\TM\\tm.exe`다. `build-release.ps1`은 호환용 `dist\\release`와 이 최상위 실행 묶음을 같은 manifest로 갱신한다.
+
 ## 사전 검증 순서
 
 ```powershell

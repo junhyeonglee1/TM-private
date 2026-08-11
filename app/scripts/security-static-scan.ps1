@@ -389,7 +389,15 @@ else {
         "ArtifactName 'tm-step10-windows-x64'",
         'PayloadDestination',
         'artifactDigest',
-        'downloadedZipSha256'
+        'downloadedZipSha256',
+        "Destination = Join-Path `$tmRoot 'tm.exe'",
+        "Destination = Join-Path `$tmRoot `$name",
+        'tm-office-decryptor.exe',
+        'STEP10_PROVENANCE.json',
+        'windows-client-before-',
+        '.tm-install-',
+        '[System.IO.FileShare]::None',
+        '[array]::Reverse($rollbackItems)'
     )) {
         if (-not $buildRelease.Contains($required)) {
             $violations.Add("The STEP 10 artifact retrieval guard is missing: $required")
@@ -398,6 +406,10 @@ else {
     if ($buildRelease -match '(?i)Get-Command\s+gh' -or
         $buildRelease -match '(?i)gh\s+run\s+(?:view|download)') {
         $violations.Add('STEP 10 artifact retrieval must not bypass the locked raw-ZIP evidence helper.')
+    }
+    if ($buildRelease -match '(?i)\bStop-Process\b' -or
+        $buildRelease -match '(?i)\btaskkill(?:\.exe)?\b') {
+        $violations.Add('The verified Windows installer must never terminate a running TM process.')
     }
 }
 

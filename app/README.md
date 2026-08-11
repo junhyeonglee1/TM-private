@@ -18,6 +18,8 @@ release 앱과 CLI는 고정 기본 경로만 사용한다. debug/test의 `TM_HO
 
 - 전체 검증(설치 없음): `scripts\\verify.ps1`
 - Windows x64 검증 artifact 설치: `scripts\\build-release.ps1 -Approved -RunId <Actions run ID> -ExpectedHeadSha <검증 commit SHA>`
+  - 해시 검증·잠금 확인·백업 후 `TM\\dist\\release`와 최상위 `TM\\tm.exe`를 함께 갱신한다.
+  - 사용자는 항상 `C:\\Users\\tkfk0\\Desktop\\codex\\TM\\tm.exe`를 실행한다.
 - 로컬 NSIS 빌드는 Windows 정책상 비활성화되어 있으며, `scripts\\build-nsis.ps1 -Approved`는 안전하게 중단한다.
 - DB 백업: `tm-cli backup create`
 - 소스 ZIP 스냅샷: `tm-cli backup source`

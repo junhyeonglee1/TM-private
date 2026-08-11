@@ -8,6 +8,9 @@
 /dist/
 /tm.exe
 /tm-cli.exe
+/tm-office-decryptor.exe
+/SHA256SUMS.txt
+/STEP10_PROVENANCE.json
 **/__pycache__/
 *.py[cod]
 

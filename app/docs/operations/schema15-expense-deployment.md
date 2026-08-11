@@ -37,6 +37,8 @@ Get-Content .\SHA256SUMS.txt
 .\scripts\build-release.ps1 -Approved -RunId <STEP 10 run ID> -ExpectedHeadSha <40자리 검증 commit SHA>
 ```
 
+스크립트는 검증된 세 실행 파일과 manifest·provenance를 `TM\\dist\\release`와 최상위 `TM` 경로에 함께 설치한다. 사용자가 실행하는 고정 경로는 `C:\\Users\\tkfk0\\Desktop\\codex\\TM\\tm.exe`다. 실행 중인 TM은 강제 종료하지 않으며, 잠긴 파일이 있으면 어떤 설치 파일도 바꾸기 전에 중단한다.
+
 STEP 16은 현재 checkout의 가변 파일을 직접 build context로 사용하지 않는다. exact commit의 `app` tree를 `git archive`로 만들고 그 archive만 `linux/amd64` 이미지로 build한다. [`container-supply-chain.lock.json`](../../container-supply-chain.lock.json)은 builder/runtime base manifest digest, Rust toolchain, Debian snapshot을 고정하며 [`verify-step16-container-supply-chain.ps1`](../../scripts/verify-step16-container-supply-chain.ps1)이 Dockerfile과 lock의 일치를 build 전후에 확인한다. Debian snapshot timestamp는 Docker `ARG`가 아니므로 Railway service variable로 덮어쓸 수 없다. Runtime의 첫 HTTPS 요청은 pinned builder에서 복사한 CA bundle로 bootstrap한다.
 
 성공한 STEP 16 run에서 `tm-step16-container-provenance`를 내려받아 `ARTIFACT-SHA256SUMS.txt`를 먼저 대조한 뒤 다음을 확인한다.
