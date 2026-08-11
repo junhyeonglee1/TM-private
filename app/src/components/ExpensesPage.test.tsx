@@ -573,7 +573,15 @@ describe("지출·정기지출 UI", () => {
 
   it("정기지출 최초 거래 연결은 월 거래 선택과 별도 자동 연결 동의를 요구한다", async () => {
     const user = userEvent.setup();
-    const { api } = renderApp();
+    const transport = createMemoryTransport();
+    const expenses = Reflect.get(transport, "expenses") as {
+      recurring: Array<{ id: string; dueDay: number | null }>;
+    };
+    const insuranceFixture = expenses.recurring.find((item) => item.id === "recurring-insurance");
+    if (!insuranceFixture) throw new Error("mock 보험료 정기지출 fixture가 없습니다.");
+    insuranceFixture.dueDay = 2;
+    const api = createApi(transport);
+    render(<App api={api} />);
     await openExpenses(user);
     await user.click(screen.getByRole("button", { name: "정기지출" }));
 
@@ -585,6 +593,10 @@ describe("지출·정기지출 UI", () => {
     const selector = within(insurance as HTMLElement).getByRole("combobox");
     const autoMatch = within(insurance as HTMLElement).getByRole("checkbox", { name: /이후 고신뢰 거래도 자동 연결/ });
     expect(autoMatch).not.toBeChecked();
+    await waitFor(() => {
+      expect(Array.from((selector as HTMLSelectElement).options)
+        .some((option) => option.value === "expense-lunch")).toBe(true);
+    });
     await user.selectOptions(selector, "expense-lunch");
     await user.click(within(insurance as HTMLElement).getByRole("button", { name: "거래 연결 확인" }));
 
