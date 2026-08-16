@@ -6812,7 +6812,7 @@ mod tests {
                 .to_vec(),
         )
         .expect("service worker is UTF-8");
-        assert!(service_worker.contains(r#"tm-mobile-shell-v16-expense-classification-v1"#));
+        assert!(service_worker.contains(r#"tm-mobile-shell-v16-simple-ui-v1"#));
         assert!(service_worker.contains(r#"request.method !== "GET""#));
 
         let stock_catalog = router
