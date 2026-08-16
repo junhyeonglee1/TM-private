@@ -399,33 +399,36 @@ export function App({ api = defaultApi }: AppProps) {
   ).length;
   const navigation: Array<{ title: string; items: NavigationItem[] }> = [
     {
-      title: "Task",
+      title: "할 일",
       items: [
-        { id: "inbox", label: "Inbox", icon: "inbox" },
         { id: "today", label: "오늘", icon: "today", count: snapshot.todayView.planned.length + snapshot.todayView.inProgress.length },
         { id: "calendar", label: "캘린더", icon: "calendar" },
         { id: "projects", label: "프로젝트", icon: "projects" },
-        { id: "history", label: "히스토리", icon: "history" },
+      ],
+    },
+    {
+      title: "생활",
+      items: [
+        { id: "expenses", label: "지출", icon: "chart" },
+        { id: "stocks", label: "주식", icon: "chart" },
       ],
     },
     {
       title: "기록",
       items: [
+        { id: "history", label: "지난 기록", icon: "history" },
         { id: "sessions", label: "작업 세션", icon: "timer" },
-        { id: "worklogs", label: "WorkLog", icon: "worklog" },
-        { id: "notes", label: "Note", icon: "note" },
+        { id: "worklogs", label: "작업 기록", icon: "worklog" },
+        { id: "notes", label: "메모", icon: "note" },
+        { id: "change-requests", label: "개선 요청", icon: "spark", count: pendingApprovalCount || undefined },
       ],
     },
     {
-      title: "도구",
+      title: "관리",
       items: [
-        { id: "expenses", label: "지출", icon: "chart" },
-        { id: "stocks", label: "주식", icon: "chart" },
-        { id: "search", label: "통합 검색", icon: "search" },
-        { id: "change-requests", label: "개선 요청함", icon: "spark", count: pendingApprovalCount || undefined },
         { id: "trash", label: "휴지통", icon: "trash", count: snapshot.trash.length || undefined },
-        { id: "devices", label: "기기 관리", icon: "shield" },
-        { id: "data", label: "백업 · 내보내기", icon: "database" },
+        { id: "devices", label: "모바일 기기", icon: "shield" },
+        { id: "data", label: "백업", icon: "database" },
       ],
     },
   ];
@@ -465,7 +468,8 @@ export function App({ api = defaultApi }: AppProps) {
     }
   };
 
-  const pageLabel = navigation.flatMap((section) => section.items).find((item) => item.id === page)?.label ?? "TM";
+  const pageLabel = navigation.flatMap((section) => section.items).find((item) => item.id === page)?.label
+    ?? (page === "search" ? "통합 검색" : page === "inbox" ? "Inbox" : "TM");
 
   return (
     <div className="app-shell">
@@ -480,7 +484,7 @@ export function App({ api = defaultApi }: AppProps) {
         <nav className="sidebar__nav">
           {navigation.map((section) => (
             <section key={section.title}>
-              <h2>{section.title}</h2>
+              <p className="sidebar__section-title">{section.title}</p>
               {section.items.map((item) => (
                 <button aria-current={page === item.id ? "page" : undefined} key={item.id} onClick={() => navigate(item.id)} type="button">
                   <Icon name={item.icon} /><span>{item.label}</span>{item.count !== undefined && <em>{item.count}</em>}

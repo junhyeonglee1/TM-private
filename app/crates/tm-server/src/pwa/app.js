@@ -3,7 +3,7 @@
 const pairingKey = "tm.mobile.pairing.v1";
 const state = {
   device: null,
-  activeTab: "assistant",
+  activeTab: "tasks",
   taskReport: null,
   taskReportTasks: new Map(),
   projects: [],
@@ -274,6 +274,7 @@ function showApp(device) {
   show("cost-status", true);
   renderDevice(device);
   startCostRefresh();
+  void loadTaskWorkspace();
   void loadTaskReport();
   void loadStockScreen();
   void loadExpenseDueBrief();
@@ -3133,38 +3134,23 @@ function renderTasks() {
 
 function taskCard(task) {
   const card = text("article", "", "item-card task-card");
-  const heading = text("div", "", "task-card-heading");
-  const open = text("button");
+  const open = text("button", "", "task-card-main");
   open.type = "button";
   open.setAttribute("aria-label", `${task.title} 상세 편집`);
   open.append(text("h2", task.title));
-  open.append(text("span", projectLabel(task.projectId), "task-project-name"));
+  const metaParts = [projectLabel(task.projectId)];
+  if (task.dueDate) metaParts.push(`기한 ${task.dueDate.slice(5).replace("-", ".")}`);
+  open.append(text("span", metaParts.join(" · "), "task-project-name"));
   open.addEventListener("click", () => openTaskForm(task));
   const status = text("span", taskStatusLabel(task.status), `task-status ${task.status}`);
-  heading.append(open, status);
-  card.append(heading);
-  if (task.description) card.append(text("p", task.description, "task-card-description"));
-  const meta = text("div", "", "item-meta");
-  meta.append(text("span", `우선순위 ${task.priority}`));
-  if (task.dueDate) meta.append(text("span", `기한 ${task.dueDate}`));
-  if (task.completedAt) {
-    meta.append(text("span", `완료 ${new Date(task.completedAt).toLocaleDateString("ko-KR")}`));
-  }
-  card.append(meta);
-  const actions = text("div", "", "task-card-actions");
-  const edit = text("button", "상세 편집", "task-edit");
-  edit.type = "button";
-  edit.addEventListener("click", () => openTaskForm(task));
-  actions.append(edit);
+  card.append(open, status);
   if (task.status === "todo" || task.status === "in_progress") {
-    const complete = text("button", "빠른 완료", "task-complete");
+    const complete = text("button", "완료", "task-complete");
     complete.type = "button";
+    complete.setAttribute("aria-label", `${task.title} 완료`);
     complete.addEventListener("click", () => void completeTask(task, complete));
-    actions.append(complete);
-  } else {
-    actions.classList.add("single");
+    card.append(complete);
   }
-  card.append(actions);
   return card;
 }
 

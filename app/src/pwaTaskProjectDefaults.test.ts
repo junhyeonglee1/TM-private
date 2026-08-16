@@ -33,6 +33,16 @@ describe("모바일 PWA Task 프로젝트 기본값", () => {
   });
 
   it("변경된 모바일 shell을 즉시 갱신하도록 캐시 버전을 올린다", () => {
-    expect(serviceWorker).toContain('const CACHE_NAME = "tm-mobile-shell-v16-expense-classification-v1"');
+    expect(serviceWorker).toContain('const CACHE_NAME = "tm-mobile-shell-v16-simple-ui-v1"');
+  });
+
+  it("모바일 첫 화면은 한 줄 Task 목록이고 프로젝트 관리는 접어서 제공한다", () => {
+    expect(shell).toContain('<button data-tab="tasks" aria-current="page">할 일</button>');
+    expect(shell).toContain('<section id="tab-tasks" class="tab-panel panel">');
+    expect(shell).toContain('<details class="project-browser project-browser--collapsed">');
+    expect(app).toContain('activeTab: "tasks"');
+    expect(app).toContain('void loadTaskWorkspace();');
+    expect(app).toContain('const card = text("article", "", "item-card task-card")');
+    expect(app).toContain('const open = text("button", "", "task-card-main")');
   });
 });

@@ -74,14 +74,14 @@ export function TaskCard({
 
   return (
     <article className={`task-card ${compact ? "task-card--compact" : ""}`}>
-      <button className="task-card__body" onClick={() => onOpen(task)} type="button">
+      <button aria-label={`${task.title} 상세 열기`} className="task-card__body" onClick={() => onOpen(task)} type="button">
         <span className={`status-dot status-dot--${task.status}`} aria-hidden="true" />
         <span className="task-card__content">
           <span className="task-card__title">{task.title}</span>
           <span className="task-card__meta">
-            {task.projectName && <span>{task.projectName}</span>}
+            {task.projectName && <span className="task-card__project">{task.projectName}</span>}
             {task.dueDate && (
-              <span className={task.priority === "high" ? "meta-danger" : ""}>
+              <span className={`task-card__due ${task.priority === "high" ? "meta-danger" : ""}`}>
                 <Icon name="calendar" size={13} /> {task.dueDate.slice(5).replace("-", ".")}
               </span>
             )}
@@ -91,25 +91,18 @@ export function TaskCard({
               </span>
             )}
             {task.checklist.length > 0 && (
-              <span>
+              <span className="task-card__checklist">
                 <Icon name="check" size={13} /> {checked}/{task.checklist.length}
               </span>
             )}
           </span>
-          {!compact && task.tags.length > 0 && (
-            <span className="tag-row">
-              {task.tags.map((tag) => (
-                <span className="tag" key={tag}>#{tag}</span>
-              ))}
-            </span>
-          )}
         </span>
         <span className={`status-label status-label--${task.status}`}>{statusLabels[task.status]}</span>
         <Icon className="task-card__chevron" name="chevron" size={16} />
       </button>
 
       {(onPlan || canComplete || (dayEntryId && onResolve)) && (
-        <div className="task-card__actions" aria-label={`${task.title} 작업`}>
+        <div className="task-card__actions" aria-label={`${task.title} 작업`} role="group">
           {onPlan && (
             <button className="text-button" onClick={() => onPlan(task)} type="button">
               오늘 계획

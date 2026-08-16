@@ -65,6 +65,83 @@ const friendlyDate = (date: string): string =>
     timeZone: "Asia/Seoul",
   }).format(new Date(`${date}T12:00:00+09:00`));
 
+interface TodayTaskSectionsProps {
+  view: TodaySnapshot;
+  onOpen: (task: Task) => void;
+  onComplete: (task: Task) => Promise<void>;
+  onResolve: (entryId: string, status: Exclude<DayEntryStatus, "planned">) => void;
+}
+
+function TodayTaskSections({ view, onOpen, onComplete, onResolve }: TodayTaskSectionsProps) {
+  return (
+    <>
+      {view.yesterdayIncomplete.length > 0 && (
+        <section className="panel panel--attention" aria-labelledby="yesterday-heading">
+          <div className="panel__header">
+            <div>
+              <span className="section-kicker section-kicker--attention"><Icon name="history" size={14} /> 선택 필요</span>
+              <h2 id="yesterday-heading">어제 미완료</h2>
+              <p>이월하면 어제 기록은 확정되고 오늘 계획이 새로 만들어집니다.</p>
+            </div>
+            <span className="count-pill count-pill--attention">{view.yesterdayIncomplete.length}</span>
+          </div>
+          <div className="task-list">
+            {view.yesterdayIncomplete.map((entry) => (
+              <TaskCard allowDefer dayEntryId={entry.id} key={entry.id} onOpen={onOpen} onResolve={onResolve} task={entry.task} />
+            ))}
+          </div>
+        </section>
+      )}
+
+      <div className="today-grid">
+        <section className="panel" aria-labelledby="planned-heading">
+          <div className="panel__header panel__header--compact">
+            <div>
+              <span className="section-kicker"><Icon name="today" size={14} /> 계획</span>
+              <h2 id="planned-heading">오늘 계획</h2>
+            </div>
+            <span className="count-pill">{view.planned.length}</span>
+          </div>
+          <div className="task-list">
+            {view.planned.map((entry) => (
+              <TaskCard compact dayEntryId={entry.id} key={entry.id} onOpen={onOpen} onResolve={onResolve} task={entry.task} />
+            ))}
+            {view.planned.length === 0 && <EmptyState icon="today" title="오늘 계획이 없습니다" description="프로젝트에서 오늘 할 일을 선택하세요." />}
+          </div>
+        </section>
+
+        <section className="panel panel--accent" aria-labelledby="progress-heading">
+          <div className="panel__header panel__header--compact">
+            <div>
+              <span className="section-kicker section-kicker--accent"><Icon name="play" size={14} /> 집중</span>
+              <h2 id="progress-heading">진행 중</h2>
+            </div>
+            <span className="count-pill count-pill--accent">{view.inProgress.length}</span>
+          </div>
+          <div className="task-list">
+            {view.inProgress.map((task) => <TaskCard compact key={task.id} onComplete={onComplete} onOpen={onOpen} task={task} />)}
+            {view.inProgress.length === 0 && <EmptyState icon="play" title="진행 중인 Task가 없습니다" description="하나를 골라 집중 세션을 시작해 보세요." />}
+          </div>
+        </section>
+      </div>
+
+      <section className="panel panel--completed today-completed" aria-labelledby="completed-heading">
+        <div className="panel__header panel__header--compact">
+          <div>
+            <span className="section-kicker section-kicker--success"><Icon name="check" size={14} /> 성과</span>
+            <h2 id="completed-heading">오늘 완료</h2>
+          </div>
+          <span className="count-pill count-pill--success">{view.completed.length}</span>
+        </div>
+        <div className="task-list task-list--completed">
+          {view.completed.map((entry) => <TaskCard compact key={entry.id} onOpen={onOpen} task={entry.task} />)}
+          {view.completed.length === 0 && <EmptyState icon="check" title="아직 완료 기록이 없습니다" description="작은 일부터 하나씩 마쳐 보세요." />}
+        </div>
+      </section>
+    </>
+  );
+}
+
 export function TodayPage({
   today,
   view,
@@ -85,7 +162,7 @@ export function TodayPage({
   const total = view.planned.length + view.inProgress.length + view.completed.length;
   const progress = total ? Math.round((view.completed.length / total) * 100) : 0;
   return (
-    <div className="page-stack">
+    <div className="page-stack page-stack--today">
       <header className="page-header page-header--today">
         <div>
           <span className="eyebrow">{friendlyDate(today)}</span>
@@ -99,6 +176,8 @@ export function TodayPage({
           <div><strong>{view.completed.length}</strong><span> / {total} 완료</span></div>
         </div>
       </header>
+
+      <TodayTaskSections onComplete={onComplete} onOpen={onOpen} onResolve={onResolve} view={view} />
 
       {expenseDueCards}
 
@@ -204,69 +283,6 @@ export function TodayPage({
         screen={stockScreen}
       />
 
-      {view.yesterdayIncomplete.length > 0 && (
-        <section className="panel panel--attention" aria-labelledby="yesterday-heading">
-          <div className="panel__header">
-            <div>
-              <span className="section-kicker section-kicker--attention"><Icon name="history" size={14} /> 선택 필요</span>
-              <h2 id="yesterday-heading">어제 미완료</h2>
-              <p>이월하면 어제 기록은 확정되고 오늘 계획이 새로 만들어집니다.</p>
-            </div>
-            <span className="count-pill count-pill--attention">{view.yesterdayIncomplete.length}</span>
-          </div>
-          <div className="task-list">
-            {view.yesterdayIncomplete.map((entry) => (
-              <TaskCard allowDefer dayEntryId={entry.id} key={entry.id} onOpen={onOpen} onResolve={onResolve} task={entry.task} />
-            ))}
-          </div>
-        </section>
-      )}
-
-      <div className="today-grid">
-        <section className="panel" aria-labelledby="planned-heading">
-          <div className="panel__header panel__header--compact">
-            <div>
-              <span className="section-kicker"><Icon name="today" size={14} /> 계획</span>
-              <h2 id="planned-heading">오늘 계획</h2>
-            </div>
-            <span className="count-pill">{view.planned.length}</span>
-          </div>
-          <div className="task-list">
-            {view.planned.map((entry) => (
-              <TaskCard compact dayEntryId={entry.id} key={entry.id} onOpen={onOpen} onResolve={onResolve} task={entry.task} />
-            ))}
-            {view.planned.length === 0 && <EmptyState icon="today" title="오늘 계획이 없습니다" description="프로젝트에서 오늘 할 일을 선택하세요." />}
-          </div>
-        </section>
-
-        <section className="panel panel--accent" aria-labelledby="progress-heading">
-          <div className="panel__header panel__header--compact">
-            <div>
-              <span className="section-kicker section-kicker--accent"><Icon name="play" size={14} /> 집중</span>
-              <h2 id="progress-heading">진행 중</h2>
-            </div>
-            <span className="count-pill count-pill--accent">{view.inProgress.length}</span>
-          </div>
-          <div className="task-list">
-            {view.inProgress.map((task) => <TaskCard compact key={task.id} onComplete={onComplete} onOpen={onOpen} task={task} />)}
-            {view.inProgress.length === 0 && <EmptyState icon="play" title="진행 중인 Task가 없습니다" description="하나를 골라 집중 세션을 시작해 보세요." />}
-          </div>
-        </section>
-      </div>
-
-      <section className="panel panel--completed" aria-labelledby="completed-heading">
-        <div className="panel__header panel__header--compact">
-          <div>
-            <span className="section-kicker section-kicker--success"><Icon name="check" size={14} /> 성과</span>
-            <h2 id="completed-heading">오늘 완료</h2>
-          </div>
-          <span className="count-pill count-pill--success">{view.completed.length}</span>
-        </div>
-        <div className="task-list task-list--completed">
-          {view.completed.map((entry) => <TaskCard compact key={entry.id} onOpen={onOpen} task={entry.task} />)}
-          {view.completed.length === 0 && <EmptyState icon="check" title="아직 완료 기록이 없습니다" description="작은 일부터 하나씩 마쳐 보세요." />}
-        </div>
-      </section>
     </div>
   );
 }

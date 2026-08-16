@@ -125,19 +125,14 @@ describe("TM 데스크톱 UI", () => {
     expect(await screen.findByText("도움 됨으로 평가함")).toBeInTheDocument();
   });
 
-  it("Inbox는 기능 없는 기획 대기 화면으로 유지한다", async () => {
-    const user = userEvent.setup();
+  it("처음 쓰는 사람에게 기능 없는 Inbox 대신 핵심 메뉴를 먼저 보여준다", async () => {
     renderApp();
     await screen.findByRole("heading", { name: "오늘", level: 1 });
 
-    await user.click(screen.getAllByRole("button", { name: /Inbox/ })[0]);
-    expect(await screen.findByRole("heading", { name: "Inbox", level: 1 })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Inbox는 잠시 비워 두었습니다" })).toBeInTheDocument();
-    expect(screen.getByText(/즉흥 수집과 분류 기능은 제거했습니다/)).toBeInTheDocument();
-    expect(screen.queryByLabelText("빠른 Task 제목")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("빠른 Task 프로젝트")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("빠른 Task 우선순위")).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "정리 완료" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Inbox/ })).not.toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "오늘" }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("button", { name: "캘린더" }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("button", { name: "프로젝트" }).length).toBeGreaterThan(0);
   });
 
   it("개인 캘린더에 매월 말일 납부 일정을 추가한다", async () => {
@@ -275,14 +270,14 @@ describe("TM 데스크톱 UI", () => {
     renderApp();
     await screen.findByRole("heading", { name: "오늘", level: 1 });
 
-    await user.click(screen.getByRole("button", { name: "WorkLog" }));
+    await user.click(screen.getByRole("button", { name: "작업 기록" }));
     const logHeading = await screen.findByRole("heading", { name: "이력 불변성 검토" });
     const logCard = logHeading.closest("article");
     expect(logCard).not.toBeNull();
     await user.click(within(logCard as HTMLElement).getByRole("button", { name: "이력 불변성 검토 휴지통으로 이동" }));
     await waitFor(() => expect(screen.queryByRole("heading", { name: "이력 불변성 검토" })).not.toBeInTheDocument());
 
-    await user.click(screen.getByRole("button", { name: "Note" }));
+    await user.click(screen.getByRole("button", { name: "메모" }));
     const noteHeading = await screen.findByRole("heading", { name: "SQLite WAL과 busy timeout" });
     const noteCard = noteHeading.closest("article");
     expect(noteCard).not.toBeNull();
@@ -295,7 +290,7 @@ describe("TM 데스크톱 UI", () => {
     const { api } = renderApp();
     await screen.findByRole("heading", { name: "오늘", level: 1 });
 
-    await user.click(screen.getByRole("button", { name: /개선 요청함/ }));
+    await user.click(screen.getByRole("button", { name: /개선 요청/ }));
     expect(await screen.findByRole("heading", { name: "개선 요청함", level: 1 })).toBeInTheDocument();
     expect(
       screen.getByText("TM 승인 요청 처리해줘. app/docs/prompts/change-request-processing.md를 따라줘."),
@@ -342,7 +337,7 @@ describe("TM 데스크톱 UI", () => {
     renderApp();
     await screen.findByRole("heading", { name: "오늘", level: 1 });
 
-    await user.click(screen.getByRole("button", { name: /개선 요청함/ }));
+    await user.click(screen.getByRole("button", { name: /개선 요청/ }));
     await user.click(screen.getByRole("button", { name: "새 요청" }));
 
     const title = screen.getByLabelText("개선 요청 제목");
@@ -367,7 +362,7 @@ describe("TM 데스크톱 UI", () => {
     const user = userEvent.setup();
     const { api } = renderApp();
     await screen.findByRole("heading", { name: "오늘", level: 1 });
-    await user.click(screen.getByRole("button", { name: /개선 요청함/ }));
+    await user.click(screen.getByRole("button", { name: /개선 요청/ }));
 
     const failedHeading = await screen.findByRole("heading", {
       name: "히스토리 필터 응답 속도 개선",
@@ -416,7 +411,7 @@ describe("TM 데스크톱 UI", () => {
     const user = userEvent.setup();
     renderApp();
     await screen.findByRole("heading", { name: "오늘", level: 1 });
-    await user.click(screen.getByRole("button", { name: /개선 요청함/ }));
+    await user.click(screen.getByRole("button", { name: /개선 요청/ }));
     await user.click(screen.getByRole("button", { name: /완료 · 취소/ }));
 
     expect(await screen.findByText("백업 시각과 트리거를 한눈에 확인하도록 배지를 정리했습니다.")).toBeInTheDocument();
@@ -496,7 +491,7 @@ describe("TM 데스크톱 UI", () => {
     renderApp();
     await screen.findByRole("heading", { name: "오늘", level: 1 });
 
-    await user.click(screen.getByRole("button", { name: /개선 요청함/ }));
+    await user.click(screen.getByRole("button", { name: /개선 요청/ }));
 
     expect(focus).toHaveBeenLastCalledWith({ preventScroll: true });
     focus.mockRestore();
