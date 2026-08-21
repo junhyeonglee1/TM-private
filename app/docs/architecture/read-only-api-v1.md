@@ -54,7 +54,7 @@ collection 응답의 공통 형태:
 
 | DTO | 반환 필드 |
 |---|---|
-| Project | `id`, `name`, `description`, `color`, `sortOrder`, `createdAt`, `updatedAt`, `archivedAt` |
+| Project | `id`, `name`, `description`, `color`, `systemKey`, `sortOrder`, `createdAt`, `updatedAt`, `archivedAt` |
 | Task | `id`, `projectId`, `title`, `description`, `status`, `priority`, `dueDate`, `completedAt`, `createdAt`, `updatedAt`, `version` |
 | Checklist | `id`, `taskId`, `body`, `isDone`, `sortOrder`, `createdAt`, `updatedAt`, `completedAt`, `version` |
 | Tag | `id`, `name`, `color`, `createdAt` |
@@ -63,6 +63,8 @@ collection 응답의 공통 형태:
 | Note | `id`, `noteType`, `title`, `body`, `sourceWorklogId`, `noteDate`, `createdAt`, `updatedAt`, `version` |
 
 내부 Rust model을 그대로 serialize하지 않고 위 DTO로 복사한다. 따라서 model에 새 필드가 생겨도 명시적으로 DTO와 Schema를 변경하기 전에는 외부 API에 노출되지 않는다.
+
+`systemKey`는 일반 프로젝트에서 `null`이고 schema 14의 기본 `기타` 프로젝트에서만 `uncategorized`다. 프로젝트 목록은 이 시스템 프로젝트를 첫 페이지에 포함한다. Task의 `projectId` 입력·Schema는 구버전 호환을 위해 nullable이지만, 저장 시 생략하거나 `null`이면 실제 `기타` ID로 정규화되므로 현재 schema 14 read 응답의 Task는 항상 프로젝트를 가진다. schema 14 이전 append-only idempotency·assistant 원장에 보존된 역사 응답은 이 read 계약의 현재 row가 아니다.
 
 ## 노출하지 않는 데이터
 

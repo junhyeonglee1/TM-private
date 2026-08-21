@@ -6,6 +6,30 @@
 
 ### Added
 
+- schema 15 지출 원장, KB 카드·계좌 및 카카오페이 XLS/XLSX Windows 가져오기, 중복·이체·정산 판정과 사용자 검토 큐를 추가했다.
+- Windows·모바일에 월간 지출 요약, 거래 재분류, 정기지출 CRUD·납부 확인, 캘린더 가상 발생 건과 Today 납부 카드를 추가했다.
+- 상호·상대방·메모 암호화, blind index, 원본·비밀번호 비저장, 읽기 전용 production 검증과 backup·복원 의미 검증을 추가했다.
+- 결정론적 무료 리포트를 기본으로 하고 사용자가 누른 경우에만 집계 fact를 `gpt-5.4-nano-2026-03-17`에 전달하는 월 8회·USD 1 hard stop AI 해설을 추가했다.
+- schema 14에서 기존 활성 `기타` 프로젝트를 시스템 기본 프로젝트로 지정하고, 프로젝트가 없던 Task를 모두 그 프로젝트로 이관했다.
+- Windows·모바일·승인된 AI 경로에서 프로젝트를 생략하거나 비우면 실제 `기타` 프로젝트로 저장되도록 중앙 저장 규칙과 DB 불변 조건을 추가했다.
+- 모바일 `할 일` 화면에 프로젝트 목록·생성, Task 생성·상세 편집·상태 변경·빠른 완료, 프로젝트·상태 필터와 페이지 추가 조회를 추가했다.
+- `project.create`를 기존 controlled mutation의 CSRF·confirmation·idempotency·감사 원장에 연결하고, 등록 기기에서만 `POST /api/v1/projects`를 사용할 수 있게 했다.
+- schema 13에 S&P 500 universe snapshot, split-adjusted 일봉 session, 5·21거래일 정량 screen 결과와 선택적 AI 요약 이력을 추가했다.
+- 무료 Alpaca Basic·DataHub 자료만 사용하고 기존 Railway service를 재사용하는 비용 우선 주식 screen을 Windows·모바일에 추가했다.
+- 주식 AI는 pinned `gpt-5.4-nano-2026-03-17`, 요청당 USD 0.01 reservation과 월 USD 2 기능별 내부 원장 한도에서 신규 호출을 차단하고, 모델에는 최대 40개 ticker·수익률만 전달한다.
+- 정량 숫자와 사용자 문구는 서버가 결정적으로 생성하고 raw OHLC·회사명·Task·Calendar·관심 종목은 OpenAI에 전달하지 않으며, 기능 gate 세 개는 최초 배포에서 모두 꺼진다.
+- schema 11 기반 개인 캘린더와 Windows·모바일 일정 추가·편집·삭제 화면을 추가했다.
+- 개인 일정과 납부일을 일회성, 매월 특정일, 매월 초일, 매월 말일로 반복 등록하고 선택적 종료일·시간·메모를 저장할 수 있다.
+- 매월 31일은 31일이 없는 달을 건너뛰고 매월 말일은 윤년을 포함한 실제 월말로 계산하며, optimistic version과 soft delete로 동시 수정을 보호한다.
+- STEP 17 첫 실제 비서 기능으로 오늘의 Task 우선순위·이유·다음 행동을 제안하는 read-only Structured Outputs API와 Windows·모바일 UI를 추가했다.
+- Task 최소 fact 최대 20개, 허위 반환 ID 재검증, 하루 4회, 요청당 USD 0.05·800 output token, 자동 재시도 없음과 `TM_TASK_REPORT_ENABLED` 기능 kill switch를 추가했다.
+- schema 10에 Task 리포트 실행 token·비용·latency·실패 기록과 보고서당 1회 append-only `도움 됨/도움 안 됨` 평가를 추가하고 backup restore rewind를 차단했다.
+
+- Railway `cloud-authenticated` profile에 `gpt-5.6-terra` Responses API 기반 read-only AI 오케스트레이터와 인증·명시적 과금 확인 route를 추가했다.
+- Project·Task·Checklist·Note·Session·Worklog만 최소 필드로 조회하는 strict tool allowlist, prompt injection 격리, 6회 tool·60초·2,000 output token·USD 0.25 요청 상한을 추가했다.
+- Windows Credential Locker의 운영 token으로 AI 상태·안전 상한·과금 확인·missing-key 차단을 검증하는 STEP 11 비과금 production 검증 스크립트를 추가했다.
+- OpenAI API key를 Railway stdin으로만 전달하는 보안 입력 스크립트와 probe·assistant 비용·도구 allowlist·업무 데이터 불변성을 확인하는 STEP 11 production acceptance 스크립트를 추가했다.
+- STEP 11 production에서 `gpt-5.6-terra` probe와 read-only assistant 실호출을 통과하고 OpenAI 월 USD 10 email alert·USD 20 hard limit을 설정했다.
 - localhost 전용 `tm-server` 뼈대와 liveness/readiness, 구조화 오류, request ID를 추가했다.
 - 서버 실행 시 명시적인 절대 `TM_SERVER_HOME`을 요구해 실제 사용자 DB를 실수로 여는 경계를 추가했다.
 - 서버 환경변수에만 API 키를 보관하는 OpenAI Responses API 연결 경계와 비과금 상태 확인·명시적 최소 probe를 추가했다.
@@ -24,13 +48,31 @@
 - domain 변경, 중복 응답, actor·request ID·before/after를 한 transaction에 기록하는 append-only mutation 감사·idempotency ledger를 추가했다.
 - 통제된 write API v1 계약 문서와 JSON Schema를 추가했다.
 - 원문 token을 저장하지 않고 production write API의 인증·precondition·금지 동작과 데이터 불변을 확인하는 STEP 8 PowerShell 검증 도구를 추가했다.
+- schema 5 append-only OpenAI token·비용 원장과 요청 전 USD 20 월 hard stop을 추가했다.
+- SQLite 일관 snapshot을 client-side 암호화해 Railway Bucket으로 전송하고 일 7·주 4·월 12 보존·전체 pack 무결성 검사를 수행하는 작업을 추가했다.
+- 활성 DB를 건드리지 않고 최신 외부 backup의 checksum·schema·SQLite 무결성을 검증하는 restore drill을 추가했다.
+- 인증된 운영 상태 API와 request ID·route family·status·latency만 남기는 Railway JSON 로그를 추가했다.
+- production schema 5와 STEP 11 전 AI route 격리를 과금·mutation 없이 확인하고, AI route 활성화 후에는 USD 10/20 예산 경계도 확인하는 STEP 9 PowerShell 검증 도구를 추가했다.
+- row 원문을 노출하지 않고 현재 DB manifest, 일관 snapshot dry-run, 후보 snapshot 검사를 수행하는 `tm-cli migration` 명령과 STEP 10 검증 스크립트를 추가했다.
+- Windows Credential Locker와 HTTPS desktop command bridge를 사용하는 명시적 cloud mode를 추가했다.
+- schema 5 snapshot을 maintenance mode에서만 검증·import하고 실패 시 자동 rollback하는 STEP 10 cutover 경계를 추가했다.
+
+### Fixed
+
+- 프로젝트가 없는 기존 Task가 모바일에서 `전체 프로젝트`를 선택해야만 보이던 문제를 수정했다.
+- Windows와 모바일 TradingView iframe이 자기 출처에서 초기화되지 못해 흰 화면으로 남던 sandbox 회귀를 수정하고, 모바일 app shell 캐시를 갱신했다.
 
 ### Changed
+
+- schema 10 배포와 암호화 remote backup 지원 상한을 일치시키고, DB 현재 schema와 backup guard가 어긋나면 CI 정적 검사가 실패하도록 강화했다.
+- STEP 17 production verifier가 `/readyz`의 실제 계약과 ops schema·backup 상태를 분리 검증하고 Credential Locker 객체를 오류 없이 정리하도록 수정했다.
 
 - Railway Volume 서비스가 replica 구성으로 해석되지 않도록 Config as Code의 `multiRegionConfig`를 `null`로 명시했다.
 - SQLite schema 4에서 Task·Note·Checklist에 optimistic concurrency용 정수 `version`을 추가하고 read DTO에도 노출했다.
 - 현재 mutation ledger와 일치하지 않는 backup 복원을 거부해 감사·idempotency 이력의 rewind를 차단했다.
+- 현재 AI 비용 ledger와 일치하지 않는 backup 복원을 거부해 비용 이력의 rewind를 차단했다.
 - Windows PowerShell 5.1이 한국어 검증 문구와 기본 결과 경로를 올바르게 처리하도록 production 검증 스크립트를 UTF-8 BOM 형식과 본문 경로 계산 방식으로 고정했다.
+- cloud client 설정이 실제 TM home의 `data\cloud-client.json`을 사용하도록 수정하고, 토큰 형식·401 재입력과 운영 snapshot·backup·import route 격리를 저장 전에 검증하도록 강화했다.
 
 ### Verified
 
@@ -44,6 +86,18 @@
 - Railway production에서 인증된 tasks 조회 `200`, ETag 재검증 `304`, mutation 요청 `405 METHOD_NOT_ALLOWED`, 빈 cloud DB 유지를 확인했다.
 - 합성 DB에서 mutation 중복 제출 1회 실행, stale version 충돌, 실패 rollback, append-only 감사, strict JSON·입력 상한·금지 method를 확인했다.
 - Railway production에 schema 4 controlled write API를 배포하고 인증 `200`, precondition `428`, 누락 resource `404`, 삭제 금지 `405`, Task·Note 개수와 ETag 불변을 비파괴 방식으로 확인했다.
+- Railway staging schema 5에서 Task mutation·idempotency replay·stale version conflict를 확인하고, 암호화 Bucket snapshot을 빈 위치에 복원해 checksum·schema·SQLite 무결성을 검증했다.
+- Railway Hobby에서는 native Volume backup과 CPU·RAM·disk·network monitor가 Pro 전용임을 dashboard와 API 권한 거부로 확인했다. deployment failure·crash·OOM·usage 알림은 email과 in-app으로 활성화되어 있다.
+- staging에서 검증한 STEP 9 source를 Railway production deployment `4a0bd0d7-6a3d-4104-9eec-acb16bb78b7c`로 승격했다.
+- production schema 5 확인 후 encrypted Bucket backup을 활성화하고 첫 snapshot `ecb2b965` 생성을 확인했다.
+- production bearer token을 회전하고 새 token으로 인증·schema 5·원격 backup 성공·STEP 11 전 AI route `404` 격리를 재검증했다.
+- production 암호화 backup을 `/tmp`에 복원해 checksum·schema 5·SQLite 무결성·foreign key 검사를 통과했고 활성 DB가 바뀌지 않음을 확인했다.
+- production restore drill용 일회용 Railway SSH key와 모든 로컬 key 파일을 폐기하고, 검증 완료 후 staging deployment를 중지하면서 Volume은 보존했다.
+- STEP 10 사전 inventory에서 local schema 3 DB의 integrity와 foreign key가 정상이고 Project 2·Task 2·Task event 5, 첨부파일 0개임을 원문 비노출 방식으로 확인했다.
+- GitHub Actions Windows run `29812300709`에서 frontend와 Rust workspace test·clippy·release build를 통과했고, 후속 성공 run `29815250852`에서 x64 `tm.exe`·`tm-cli.exe` artifact를 내려받아 SHA-256을 재검증했다.
+- production import의 logical SHA-256 `e66d9e33b3dc8fa22551a1914e9dcbd7ac3ac657a77355e37d170da9b4a758ba`가 source와 일치하고 encrypted remote backup이 성공했음을 확인했다.
+- 정상 router 복귀 후 인증된 desktop snapshot에서 Project 2개·Task 2개를 확인하고 import route `404`, 최종 `tm-desktop/0.1.5` snapshot 요청 `200`을 확인했다.
+- cloud를 단일 기준 원본으로 전환하고 로컬 DB·schema 3 backup·schema 5 snapshot을 2026-10-19까지 read-only archive로 고정했다.
 
 ## [0.1.5]
 

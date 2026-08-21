@@ -1,7 +1,277 @@
 import { createApi, type CommandTransport } from "./api";
 import { createMemoryTransport } from "./mock-transport";
+import type { AppSnapshot } from "../types";
+
+const archiveMockProject = (
+  transport: ReturnType<typeof createMemoryTransport>,
+  projectId: string,
+) => {
+  const snapshot = Reflect.get(transport, "snapshot") as AppSnapshot;
+  const project = snapshot.projects.find((candidate) => candidate.id === projectId);
+  if (!project) throw new Error("보관할 mock 프로젝트 fixture가 없습니다.");
+  project.archived = true;
+};
 
 describe("Tauri invoke payload 계약", () => {
+  it("메일 mutation은 응답 유실에는 같은 키를 쓰고 같은 길이의 새 비밀번호에는 새 키를 쓴다", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    let fail = true;
+    const transport: CommandTransport = {
+      async invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
+        expect(command).toBe("connect_naver_mail");
+        calls.push(args);
+        if (fail) throw new Error("합성 응답 유실");
+        return {} as T;
+      },
+    };
+    const api = createApi(transport);
+    const first = { email: "owner@naver.com", appPassword: "abcdefgh" };
+
+    await expect(api.connectNaverMail(first)).rejects.toThrow("합성 응답 유실");
+    fail = false;
+    await api.connectNaverMail(first);
+    expect(calls[0].idempotencyKey).toMatch(/^desktop-mail:/);
+    expect(calls[1].idempotencyKey).toBe(calls[0].idempotencyKey);
+
+    fail = true;
+    await expect(api.connectNaverMail(first)).rejects.toThrow("합성 응답 유실");
+    const failedKey = calls.at(-1)?.idempotencyKey;
+    fail = false;
+    await api.connectNaverMail({ ...first, appPassword: "ijklmnop" });
+    expect(calls.at(-1)?.idempotencyKey).not.toBe(failedKey);
+  });
+
+  it("AI 자동 분류는 월과 안정적인 멱등성 키를 전용 command로 전달한다", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    let fail = true;
+    const transport: CommandTransport = {
+      async invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
+        expect(command).toBe("classify_expense_transactions");
+        calls.push(args);
+        if (fail) throw new Error("합성 응답 유실");
+        return {
+          runId: "classification-run-1",
+          targetMonth: "2026-08",
+          status: "applied",
+        } as T;
+      },
+    };
+    const api = createApi(transport);
+
+    await expect(api.classifyExpenseTransactions("2026-08")).rejects.toThrow("합성 응답 유실");
+    fail = false;
+    await api.classifyExpenseTransactions("2026-08");
+
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toMatchObject({ month: "2026-08" });
+    expect(calls[0].idempotencyKey).toMatch(/^desktop-expense:/);
+    expect(calls[1].idempotencyKey).toBe(calls[0].idempotencyKey);
+  });
+
+  it("AI classification terminal responses discard the pending idempotency key", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    let terminal = true;
+    const transport: CommandTransport = {
+      async invoke<T>(_command: string, args: Record<string, unknown> = {}): Promise<T> {
+        calls.push(args);
+        if (terminal) {
+          throw "TM run ended [TM_ERROR_CODE:EXPENSE_CLASSIFICATION_LEASE_EXPIRED]";
+        }
+        return {} as T;
+      },
+    };
+    const api = createApi(transport);
+    await expect(api.classifyExpenseTransactions("2026-08")).rejects.toBe(
+      "TM run ended [TM_ERROR_CODE:EXPENSE_CLASSIFICATION_LEASE_EXPIRED]",
+    );
+    const terminalKey = calls[0].idempotencyKey;
+    terminal = false;
+    await api.classifyExpenseTransactions("2026-08");
+    expect(calls[1].idempotencyKey).not.toBe(terminalKey);
+  });
+
+  it("지출 mutation은 응답 유실 재시도에 같은 멱등성 키를 쓰고 성공·명시 취소 뒤 교체한다", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    let fail = true;
+    const transport: CommandTransport = {
+      async invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
+        if (command !== "generate_expense_report") return undefined as T;
+        calls.push(args);
+        if (fail) throw new Error("합성 응답 유실");
+        return {} as T;
+      },
+    };
+    const api = createApi(transport);
+
+    await expect(api.generateExpenseReport("2026-08")).rejects.toThrow("합성 응답 유실");
+    fail = false;
+    await api.generateExpenseReport("2026-08");
+    expect(calls[0].idempotencyKey).toBe(calls[1].idempotencyKey);
+
+    fail = true;
+    await expect(api.generateExpenseReport("2026-08")).rejects.toThrow("합성 응답 유실");
+    const failedKey = calls.at(-1)?.idempotencyKey;
+    api.discardExpenseMutation("generate_expense_report", "2026-08");
+    fail = false;
+    await api.generateExpenseReport("2026-08");
+    expect(calls.at(-1)?.idempotencyKey).not.toBe(failedKey);
+  });
+
+  it("출처 CAS와 거래 override clear 계약을 Tauri camelCase 인자로 전달한다", async () => {
+    const calls: Array<{ command: string; args?: Record<string, unknown> }> = [];
+    const transport: CommandTransport = {
+      async invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+        calls.push({ command, args });
+        return {} as T;
+      },
+    };
+    const api = createApi(transport);
+    await api.updateExpenseSource("source-1", {
+      requiredForCompleteReport: true,
+      isActive: false,
+      expectedVersion: 3,
+    });
+    await api.overrideExpenseTransaction("event-1", {
+      kind: "purchase",
+      category: "food",
+      duplicateOfEventId: null,
+      relatedEventId: null,
+      personalAmountMinor: null,
+      clearPersonalAmount: true,
+      clearRelatedEvent: false,
+      createRule: false,
+      expectedVersion: 4,
+    });
+
+    expect(calls[0]).toMatchObject({
+      command: "update_expense_source",
+      args: { sourceId: "source-1", input: { expectedVersion: 3 } },
+    });
+    expect(calls[1]).toMatchObject({
+      command: "override_expense_transaction",
+      args: {
+        eventId: "event-1",
+        input: { clearPersonalAmount: true, clearRelatedEvent: false, expectedVersion: 4 },
+      },
+    });
+    expect(calls[0].args?.idempotencyKey).toMatch(/^desktop-expense:/);
+    expect(calls[1].args?.idempotencyKey).toMatch(/^desktop-expense:/);
+  });
+
+  it("mock snapshot과 null·undefined 프로젝트 Task를 시스템 기타 프로젝트로 정규화한다", async () => {
+    const api = createApi(createMemoryTransport());
+    const initial = await api.getSnapshot();
+    const uncategorized = initial.projects.find(
+      (project) => project.systemKey === "uncategorized",
+    );
+    expect(uncategorized).toMatchObject({ name: "기타", archived: false });
+
+    await api.createTask({ title: "분류 전 Task", projectId: null, status: "todo" });
+    let snapshot = await api.getSnapshot();
+    expect(snapshot.tasks.find((task) => task.title === "분류 전 Task")).toMatchObject({
+      projectId: uncategorized?.id,
+      projectName: "기타",
+    });
+    await api.createTask({ title: "프로젝트 생략 Task", status: "todo" });
+    snapshot = await api.getSnapshot();
+    expect(snapshot.tasks.find((task) => task.title === "프로젝트 생략 Task")).toMatchObject({
+      projectId: uncategorized?.id,
+      projectName: "기타",
+    });
+
+    const existing = snapshot.tasks.find((task) => task.id === "task-schema");
+    if (!existing) throw new Error("mock Task fixture가 없습니다.");
+    await api.updateTask({
+      taskId: existing.id,
+      title: existing.title,
+      description: existing.description,
+      status: existing.status,
+      priority: existing.priority,
+      dueDate: existing.dueDate,
+      projectId: null,
+      tags: existing.tags,
+      checklist: existing.checklist,
+    });
+    snapshot = await api.getSnapshot();
+    expect(snapshot.tasks.find((task) => task.id === existing.id)).toMatchObject({
+      projectId: uncategorized?.id,
+      projectName: "기타",
+    });
+  });
+
+  it("mock Task 생성은 명시된 프로젝트가 없거나 비활성이면 거부한다", async () => {
+    const transport = createMemoryTransport();
+    archiveMockProject(transport, "project-personal");
+    const api = createApi(transport);
+    const before = await api.getSnapshot();
+
+    await expect(api.createTask({
+      title: "존재하지 않는 프로젝트 Task",
+      projectId: "project-missing",
+      status: "todo",
+    })).rejects.toThrow("프로젝트를 찾지 못했습니다");
+    await expect(api.createTask({
+      title: "보관 프로젝트 Task",
+      projectId: "project-personal",
+      status: "todo",
+    })).rejects.toThrow("보관된 프로젝트에는 Task를 배정할 수 없습니다");
+
+    expect((await api.getSnapshot()).tasks).toHaveLength(before.tasks.length);
+  });
+
+  it("mock Task 변경은 명시된 프로젝트가 없거나 비활성이면 원본을 보존한다", async () => {
+    const transport = createMemoryTransport();
+    archiveMockProject(transport, "project-personal");
+    const api = createApi(transport);
+    const existing = (await api.getSnapshot()).tasks.find((task) => task.id === "task-schema");
+    if (!existing) throw new Error("mock Task fixture가 없습니다.");
+    const update = (projectId: string) => api.updateTask({
+      taskId: existing.id,
+      title: "저장되면 안 되는 제목",
+      description: existing.description,
+      status: existing.status,
+      priority: existing.priority,
+      dueDate: existing.dueDate,
+      projectId,
+      tags: existing.tags,
+      checklist: existing.checklist,
+    });
+
+    await expect(update("project-missing")).rejects.toThrow("프로젝트를 찾지 못했습니다");
+    await expect(update("project-personal")).rejects.toThrow(
+      "보관된 프로젝트에는 Task를 배정할 수 없습니다",
+    );
+
+    expect((await api.getSnapshot()).tasks.find((task) => task.id === existing.id)).toEqual(existing);
+  });
+
+  it("이미 보관된 프로젝트에 속한 mock Task는 소속을 유지한 편집을 허용한다", async () => {
+    const transport = createMemoryTransport();
+    archiveMockProject(transport, "project-personal");
+    const api = createApi(transport);
+    const existing = (await api.getSnapshot()).tasks.find(
+      (task) => task.projectId === "project-personal",
+    );
+    if (!existing) throw new Error("보관 프로젝트의 기존 mock Task fixture가 없습니다.");
+
+    await api.updateTask({
+      taskId: existing.id,
+      title: "보관 프로젝트 소속 유지 편집",
+      description: existing.description,
+      status: existing.status,
+      priority: existing.priority,
+      dueDate: existing.dueDate,
+      projectId: existing.projectId,
+      tags: existing.tags,
+      checklist: existing.checklist,
+    });
+
+    expect((await api.getSnapshot()).tasks.find((task) => task.id === existing.id)).toMatchObject({
+      title: "보관 프로젝트 소속 유지 편집",
+      projectId: "project-personal",
+    });
+  });
+
   it("생성된 프로젝트 ID를 반환하고 Task 상태를 그대로 전달한다", async () => {
     const calls: Array<{ command: string; args?: Record<string, unknown> }> = [];
     const transport: CommandTransport = {
@@ -12,6 +282,7 @@ describe("Tauri invoke payload 계약", () => {
     };
     const api = createApi(transport);
 
+    await api.getCostStatus();
     await expect(api.createProject("새 프로젝트")).resolves.toBe("project-new");
     await api.createTask({ title: "프로젝트 Task", projectId: "project-new", status: "todo" });
 
@@ -19,6 +290,7 @@ describe("Tauri invoke payload 계약", () => {
       command: "create_task",
       args: { input: { title: "프로젝트 Task", projectId: "project-new", status: "todo" } },
     });
+    expect(calls[0]).toEqual({ command: "get_cost_status", args: undefined });
   });
 
   it("WorkLog 승격 유형을 noteType camelCase 인자로 보낸다", async () => {

@@ -72,11 +72,11 @@ API 키와 비밀번호는 채팅, Git, 소스 파일 또는 일반 로그에 �
 | 6 | 데이터 기준 원본과 migration 안전 설계 | 완료 |
 | 7 | 인증된 read-only TM 데이터 API | 완료 |
 | 8 | 통제된 write API와 감사 기록 | 완료 |
-| 9 | 백업·복구·모니터링·비용 안전장치 | 대기 |
-| 10 | 데스크톱 cloud mode와 일회성 cutover | 대기 |
-| 11 | Cloud OpenAI와 read-only 오케스트레이터 | 대기 |
-| 12 | 실행 승인·취소·도구 정책 | 대기 |
-| 13 | 장기 기억·검색·컨텍스트 예산 | 대기 |
+| 9 | 백업·복구·모니터링·비용 안전장치 | 완료 |
+| 10 | 데스크톱 cloud mode와 일회성 cutover | 완료 |
+| 11 | Cloud OpenAI와 read-only 오케스트레이터 | 완료 |
+| 12 | 실행 승인·취소·도구 정책 | 완료 |
+| 13 | 장기 기억·검색·컨텍스트 예산 | 완료 |
 | 14 | 스케줄러·작업 큐·정기 실행 기반 | 대기 |
 | 15 | 모바일·원격 클라이언트와 기기 인증 | 대기 |
 | 16 | 보안 강화·사고 대응·운영 준비 | 대기 |
@@ -417,7 +417,7 @@ Production 검증 기록:
 
 ## STEP 9 — 백업·복구·모니터링·비용 안전장치
 
-상태: 대기
+상태: 완료
 
 Codex 권장 기본안:
 
@@ -427,29 +427,35 @@ Codex 권장 기본안:
 
 사용자 결정 게이트:
 
-- [ ] 외부 backup 저장소와 필요한 결제 승인
-- [ ] backup 보존 기간과 허용 가능한 데이터 손실 시간 승인
-- [ ] Railway·OpenAI 월 비용 경고선과 hard stop 기준 승인
+- [x] 외부 backup 저장소와 필요한 결제 승인
+- [x] backup 보존 기간과 허용 가능한 데이터 손실 시간 승인
+- [x] Railway·OpenAI 월 비용 경고선과 hard stop 기준 승인
 
 Codex TODO:
 
-- [ ] 일관된 SQLite backup과 외부 암호화 저장 구현
-- [ ] 일·주·월 retention과 자동 무결성 검사 구현
-- [ ] 빈 환경에서 backup restore 훈련과 checksum 검증
-- [ ] staging environment와 배포 승격 절차를 구축하고 성공 mutation·idempotency·충돌 smoke test 수행
-- [ ] API latency·오류율·rate limit·Volume 사용량 관측
-- [ ] OpenAI 요청별 token·비용 기록 schema와 예산 차단 장치 준비
-- [ ] 로그 redaction과 request ID 기반 추적 검증
-- [ ] 장애·비용 초과 알림 경로 구성
+- [x] 일관된 SQLite backup과 외부 암호화 저장 구현
+- [x] 일·주·월 retention과 자동 무결성 검사 구현
+- [x] 빈 환경에서 backup restore 훈련과 checksum 검증
+- [x] staging environment와 배포 승격 절차를 구축하고 성공 mutation·idempotency·충돌 smoke test 수행
+- [x] API latency·오류율·rate limit·Volume 사용량 관측 기반 구현
+- [x] OpenAI 요청별 token·비용 기록 schema와 예산 차단 장치 준비
+- [x] 로그 redaction과 request ID 기반 추적 검증
+- [x] Railway deployment failure·crash·OOM·usage email/in-app 알림 경로 확인
+- [x] Railway CPU·RAM·disk·network monitor는 Hobby에서 사용할 수 없어 Pro 승격 전까지 보류
+- [x] OpenAI platform USD 10 monthly budget email alert는 결제수단 등록과 함께 STEP 11에서 설정하도록 이관
+- [x] production schema 5 read-only 검증 후 첫 암호화 backup 생성 및 상태 확인
+- [x] production 암호화 backup restore drill 수행
 
 완료 게이트:
 
 - Volume이나 배포 환경이 사라져도 검증된 backup으로 복구할 수 있다.
 - 비용과 장애를 감지하고 설정한 기준에서 알림 또는 중단할 수 있다.
 
+확정 정책과 복구 절차: [STEP 9 백업·복구·모니터링·비용 안전장치](step9-backup-monitoring-cost.md)
+
 ## STEP 10 — 데스크톱 cloud mode와 일회성 cutover
 
-상태: 대기
+상태: 완료
 
 Codex 권장 기본안:
 
@@ -460,29 +466,33 @@ Codex 권장 기본안:
 
 사용자 결정 게이트:
 
-- [ ] 실제 TM 데이터를 Railway로 복사하는 것 승인
-- [ ] cloud DB를 새 기준 원본으로 전환하는 것 승인
-- [ ] cutover 시간과 허용 가능한 일시 중단 시간 승인
-- [ ] cloud에서 제외할 민감 데이터가 있는지 확정
+- [x] 실제 TM 데이터를 Railway로 복사하는 것 승인
+- [x] cloud DB를 새 기준 원본으로 전환하는 것 승인
+- [x] 최대 30분 cutover 중단 시간 승인
+- [x] 제외 데이터 없이 전체 이전 승인
 
 Codex TODO:
 
-- [ ] 인증된 HTTPS desktop client와 오류 contract 구현
-- [ ] 인증 토큰을 OS 보안 저장소에 보관하고 로그·UI 노출 차단
-- [ ] local/cloud mode 전환 UI와 잘못된 동시 실행 차단
-- [ ] 최종 local backup·무결성 검사·write freeze 수행
-- [ ] migration manifest로 cloud import와 row/checksum 비교
-- [ ] 기존 TM 기능 전체를 cloud mode에서 회귀 검증
-- [ ] rollback 훈련 후 cloud 기준 전환과 local archive 생성
+- [x] 로컬 DB 원문 비노출 inventory와 read-only integrity·foreign key 사전검사
+- [x] `tm-cli migration` manifest·dry-run·inspect 명령의 Windows format·test·clippy 통과
+- [x] 인증된 HTTPS desktop client와 오류 contract 구현
+- [x] 인증 토큰을 OS 보안 저장소에 보관하고 로그·UI 노출 차단
+- [x] local/cloud mode 전환과 cloud mode local DB 격리
+- [x] 최종 local backup·무결성 검사·write freeze 수행
+- [x] migration manifest로 cloud import와 row/checksum 비교
+- [x] 기존 TM 기능을 cloud mode에서 회귀 검증
+- [x] rollback 훈련 후 cloud 기준 전환과 local archive 생성
 
 완료 게이트:
 
 - 현재 데스크톱 기능이 cloud 기준 DB에서 정상 동작한다.
 - local/cloud 양쪽에 서로 다른 최신 데이터가 생기지 않는다.
 
+완료 기록과 cutover 절차: [STEP 10 데스크톱 cloud mode와 일회성 cutover](step10-cloud-cutover.md)
+
 ## STEP 11 — Cloud OpenAI와 read-only 오케스트레이터
 
-상태: 대기
+상태: 완료 — 구현·CI·Railway 배포·최소 과금 운영 검증·비용 알림 설정 완료
 
 Codex 권장 기본안:
 
@@ -493,29 +503,33 @@ Codex 권장 기본안:
 
 사용자 결정 게이트:
 
-- [ ] OpenAI에 전달 가능한 데이터 범위 승인
-- [ ] 기본 model과 요청별·일별·월별 비용 상한 승인
-- [ ] 답변 스타일과 기본 리포트 길이 승인
-- [ ] Railway에 OpenAI API key 입력
+- [x] OpenAI에 전달 가능한 데이터 범위 승인
+- [x] 기본 model과 요청별·월별 비용 상한 승인
+- [x] 답변 스타일과 기본 리포트 길이 승인
+- [x] Railway에 OpenAI API key 입력
 
 Codex TODO:
 
-- [ ] cloud 전용 OpenAI client와 sealed secret 검증 경계 구현
-- [ ] 사용자 요청을 답변·조회·계획으로 구분하는 intent contract 구현
-- [ ] read-only tool schema와 결과 크기 제한 정의
-- [ ] 계획과 실행을 분리하고 실행 요청은 무조건 보류 상태로 반환
-- [ ] prompt version, model, token usage, 비용 추정, request ID 기록
-- [ ] 반복 tool call·무한 루프·timeout·예산 초과 차단
-- [ ] prompt injection과 tool output 오염에 대한 격리 테스트
-- [ ] production 최소 비용 end-to-end probe 수행
+- [x] cloud 전용 OpenAI client와 sealed secret 검증 경계 구현
+- [x] 모든 요청을 답변·조회·계획 범위로 제한하는 read-only intent contract 구현
+- [x] strict read-only tool schema와 필드·레코드·전체 결과 크기 제한 정의
+- [x] 계획과 실행을 분리하고 mutation 도구를 등록하지 않음
+- [x] prompt version, model, 합산 token usage, 비용 추정, request ID 기록
+- [x] 6회 tool call·무한 루프·60초 timeout·요청/월 예산 초과 차단
+- [x] prompt injection 지시와 allowlist 밖 tool output 오염 격리 테스트
+- [x] production 최소 비용 end-to-end probe 수행
 
 완료 게이트:
 
-- AI가 TM 데이터를 최소 범위로 읽고 설명할 수 있지만 어떤 데이터도 변경할 수 없다.
+- [x] AI가 TM 데이터를 최소 범위로 읽고 설명할 수 있지만 어떤 데이터도 변경할 수 없다.
+- [x] production probe와 assistant 질의의 합산 추정 비용 USD 0.008396, `list_tasks` 1회, 호출 전후 업무 데이터 hash 일치를 확인했다.
+- [x] OpenAI organization USD 10 email alert·USD 20 hard limit과 TM 내부 USD 10 warning·USD 20 hard stop을 적용했다.
+
+구현 계약과 운영 검증 절차: [STEP 11 read-only AI 오케스트레이터](../architecture/read-only-ai-orchestrator.md)
 
 ## STEP 12 — 실행 승인·취소·도구 정책
 
-상태: 대기
+상태: 완료 — schema 6 승인 ledger·API·오케스트레이터를 구현하고 Windows CI, Railway Linux Docker 검증, production 비과금 검증을 통과
 
 권장 권한 등급:
 
@@ -526,27 +540,31 @@ Codex TODO:
 
 사용자 결정 게이트:
 
-- [ ] 권한 등급과 각 동작의 배치 승인
-- [ ] 첫 실행 도구 1개와 승인 유효 시간 승인
-- [ ] 자동 실행을 허용할 read-only 범위 승인
+- [x] 권한 등급과 각 동작의 배치 승인
+- [x] 첫 실행 도구 `task.create`와 승인 유효 시간 10분 승인
+- [x] 기존 7개 read-only 도구 자동 실행 승인
 
 Codex TODO:
 
-- [ ] preview, 영향 범위, 비용, 되돌리기 가능 여부 표시
-- [ ] approval 요청·승인·거절·취소·만료 상태 machine 구현
-- [ ] 승인 revision과 실행 payload를 해시로 고정
-- [ ] 동일 승인·요청의 중복 실행 차단
-- [ ] 실행 전 권한과 최신 version 재검증
-- [ ] 결과·실패·부분 실행·rollback metadata 감사 기록
-- [ ] 첫 low-risk mutation tool을 end-to-end로 검증
+- [x] preview, 영향 범위, 비용, 되돌리기 가능 여부 표시
+- [x] approval 요청·승인·거절·취소·만료 상태 machine 구현
+- [x] 승인 revision과 실행 payload를 해시로 고정
+- [x] 동일 승인·요청의 중복 실행 차단
+- [x] 실행 전 권한과 최신 version 재검증
+- [x] 결과·실패·복구 metadata와 append-only 감사 기록
+- [x] 첫 low-risk mutation tool을 end-to-end로 검증
 
 완료 게이트:
 
-- AI가 중요한 작업을 사용자 모르게 실행하거나 승인 후 내용을 바꿀 수 없다.
+- [x] AI가 중요한 작업을 사용자 모르게 실행하거나 승인 후 내용을 바꿀 수 없다.
+- [x] 격리 임시 DB와 mock OpenAI로 제안 시 Task 0건, 별도 승인 후 Task 1건, 재시도·동시 요청 후에도 Task 1건, 승인 중 OpenAI 추가 호출 0회를 확인했다.
+- [x] Railway production 배포 `dc4646e5-23b8-4774-ae26-5430f4f262a6`에서 schema 6과 `step12-v1` 계약을 확인했다. 검증은 OpenAI 호출과 production mutation 없이 완료했다.
+
+구현 계약과 운영 검증 절차: [STEP 12 AI 실행 승인 경계](../architecture/assistant-action-approval.md), [STEP 12 실행 승인 운영 절차](step12-action-approval.md)
 
 ## STEP 13 — 장기 기억·검색·컨텍스트 예산
 
-상태: 대기
+상태: 완료 — schema 7 기억·출처·감사·FTS와 승인형 CRUD, 결정론적 요약, 컨텍스트 예산을 구현하고 Railway production 비과금 검증을 통과
 
 Codex 권장 기본안:
 
@@ -557,27 +575,33 @@ Codex 권장 기본안:
 
 사용자 결정 게이트:
 
-- [ ] 장기 기억으로 저장할 정보 범위 승인
-- [ ] 자동 저장과 명시적 저장 정책 승인
-- [ ] 보존 기간·삭제 정책과 OpenAI 전송 금지 정보 승인
+- [x] 장기 기억으로 저장할 정보 범위 승인: preference·goal·routine·constraint·reference·summary
+- [x] 자동 저장과 명시적 저장 정책 승인: 사용자 기억은 명시적 요청만 허용하고 생성·수정·삭제 모두 STEP 12 승인 적용
+- [x] 보존 기간·삭제 정책과 OpenAI 전송 금지 정보 승인: 사용자 기억은 삭제 시까지, 파생 요약은 일 90일·주 1년·월 3년, private·restricted와 비밀값은 OpenAI 전송 금지
 
 Codex TODO:
 
-- [ ] memory source, provenance, sensitivity, retention schema 구현
-- [ ] 구조화 filter와 FTS 기반 retrieval 구현
-- [ ] 일·주·월 요약 계층과 재생성 규칙 구현
-- [ ] 요청 종류별 context·token 상한과 truncation 정책 적용
-- [ ] 기억 조회·수정·삭제와 감사 이벤트 구현
-- [ ] 삭제된 원본의 파생 기억 정리와 retention job 구현
-- [ ] 장기 데이터 규모와 비용 회귀 테스트
+- [x] memory source, provenance, sensitivity, retention schema 구현
+- [x] 구조화 filter와 FTS 기반 retrieval 구현
+- [x] 일·주·월 요약 계층과 재생성 규칙 구현
+- [x] 요청 종류별 context·token 상한과 truncation 정책 적용
+- [x] 기억 조회·수정·삭제와 감사 이벤트 구현
+- [x] 삭제된 원본의 파생 기억 정리와 retention job 구현
+- [x] 장기 데이터 규모와 비용 회귀 테스트
 
 완료 게이트:
 
-- 데이터가 늘어도 관련 정보만 제한된 비용으로 사용하고 기억의 출처·수정·삭제를 추적할 수 있다.
+- [x] 250개 기억 회귀 테스트에서 일반 요청은 최대 6개·2,048 bytes, 절대 상한은 12개·6,144 bytes로 제한되고 외부 vector service를 사용하지 않았다.
+- [x] 명시적 기억의 승인 전 무변경, 승인 후 1회 실행, revision 충돌, append-only 출처·수정·삭제 이벤트를 확인했다.
+- [x] private·restricted와 비밀값의 OpenAI 전달을 차단하고 삭제된 원본의 파생 기억 정리와 일·주·월 retention을 확인했다.
+- [x] GitHub Actions Windows CI #13에서 fail-fast workspace test·clippy와 `tm.exe`·`tm-cli.exe` release artifact 생성을 통과했다.
+- [x] 최종 Railway production 배포 `90f1de9e-6aed-4180-8cc3-753c73f5bce5`에서 schema 7, `step13-v1`, SQLite FTS5, 자동 저장 비활성화, 승인 필수, 컨텍스트 상한과 schema 7 암호화 remote backup을 확인했다. 검증은 OpenAI 호출과 production 기억 mutation 없이 완료했다.
+
+구현 계약과 운영 검증 절차: [STEP 13 장기 기억·검색·컨텍스트 예산](../architecture/assistant-memory-context.md), [STEP 13 기억·검색 운영 절차](step13-memory-context.md)
 
 ## STEP 14 — 스케줄러·작업 큐·정기 실행 기반
 
-상태: 대기
+상태: 완료 — schema 8 durable scheduler·재시도·모니터링·복원 보호를 구현하고 Railway production 무과금 실행·재시작·암호화 백업 검증을 통과
 
 Codex 권장 기본안:
 
@@ -588,50 +612,66 @@ Codex 권장 기본안:
 
 사용자 결정 게이트:
 
-- [ ] 기본 실행 빈도와 방해 금지 시간 승인
-- [ ] 실패 재시도·dead-letter·사용자 알림 기준 승인
-- [ ] 서버 재시작 후 놓친 작업 처리 방식 승인
+- [x] 기본 실행 빈도와 방해 금지 시간 승인
+- [x] 실패 재시도·dead-letter·사용자 알림 기준 승인
+- [x] 서버 재시작 후 놓친 작업 처리 방식 승인
 
 Codex TODO:
 
-- [ ] durable job·attempt·lease schema 구현
-- [ ] 중복 claim 방지와 lease 만료 복구 구현
-- [ ] exponential backoff와 dead-letter 상태 구현
-- [ ] UTC/KST·DST 경계와 missed-run 정책 테스트
-- [ ] 배포·재시작·장애 상황의 exactly-once effect 검증
-- [ ] queue depth·실패율·지연 모니터링 연결
-- [ ] 무과금 내부 정기 작업을 production에서 검증
+- [x] durable job·attempt·lease schema 구현
+- [x] 중복 claim 방지와 lease 만료 복구 구현
+- [x] exponential backoff와 dead-letter 상태 구현
+- [x] UTC/KST·DST 경계와 missed-run 정책 테스트
+- [x] 로컬 재시작·중복·lease 만료·복원 상황의 exactly-once effect 검증
+- [x] queue depth·실패율·지연 모니터링 연결
+- [x] 무과금 내부 정기 작업을 production에서 검증
 
 완료 게이트:
 
-- 서버 재시작과 중복 실행 상황에서도 정기 작업의 효과가 한 번만 안전하게 반영된다.
+- [x] 로컬 통합 테스트에서 중복 cycle·프로세스 재시작·lease 만료·5회 재시도·dead-letter·3일 missed-run coalescing·오래된 backup 복원 뒤 effect exactly-once를 확인했다.
+- [x] GitHub Actions Windows run `29848846995`와 schema 8 backup 호환 수정 run `29851166622`에서 frontend·workspace test·clippy·Windows release artifact 빌드를 통과했다.
+- [x] Railway production 배포 `d0280abe-6195-4110-9411-ddc61f62f8e4`에서 schema 8, scheduler healthy, enabled job 2개, queue·retry·dead-letter 0건, schema 8 암호화 remote backup과 SQLite integrity `ok`를 확인했다.
+- [x] 같은 image 재시작 배포 `13e0b1a0-8043-476a-ab84-3ff3074e16e3` 뒤 effect count가 `7 → 7`, 마지막 성공 시각이 동일하게 유지되어 이미 처리한 occurrence가 재실행되지 않음을 확인했다.
+- [x] production 검증은 OpenAI 호출과 Task·Note·Memory 등 business-data mutation 없이 완료했다.
+
+구현 계약과 운영 검증 절차: [STEP 14 durable scheduler 운영 절차](step14-durable-scheduler.md)
 
 ## STEP 15 — 모바일·원격 클라이언트와 기기 인증
 
-상태: 대기
+상태: 완료 — 2026-07-22 production 배포·검증 완료
 
 Codex 권장 기본안:
 
-- 첫 원격 클라이언트는 설치 부담이 낮은 PWA로 시작한다.
-- 하나의 공용 장기 토큰 대신 기기별 토큰 해시·만료·폐기 기록으로 확장한다.
-- 초기 PWA는 온라인 전용으로 두고 offline mutation은 보류한다.
-- CORS는 배포된 PWA origin 하나만 정확히 허용한다.
+- 첫 원격 클라이언트는 기존 Railway `tm-server`와 같은 origin에서 제공하는 설치형 PWA로 시작한다. 별도 서비스·도메인·고정비는 추가하지 않는다.
+- 모바일은 이름과 6자리 코드를 만들고 Windows TM의 기기 관리 화면에서 관리자가 코드를 대조해 승인한다. 페어링은 10분, 등록 기기 인증은 90일이다.
+- 장기 기기 인증 원문은 `HttpOnly + Secure + SameSite=Strict` 쿠키에만 두고 DB에는 SHA-256 해시만 저장한다. 기존 bearer token은 기기 승인·폐기용 primary admin credential로만 유지한다.
+- 초기 PWA는 온라인 전용이다. app shell만 오프라인 캐시하고 TM 데이터·AI 응답·mutation은 캐시하지 않는다. 안전한 GET만 네트워크 실패 시 한 번 재시도하고 POST/PATCH·AI·승인은 자동 재전송하지 않는다.
+- 다른 origin에는 CORS 응답을 제공하지 않고 기기 mutation은 exact HTTPS origin과 CSRF token을 함께 검증한다.
+- STEP 15 알림은 PWA 내부 상태 표시만 사용하며 push·SMS·email은 STEP 16 이후로 보류한다.
 
 사용자 결정 게이트:
 
-- [ ] PWA, native mobile 또는 다른 hardware client 선택
-- [ ] 기기 등록 승인 방식과 분실 기기 폐기 방식 승인
-- [ ] 알림 채널과 offline 사용 범위 승인
+- [x] 동일 Railway origin의 설치형 PWA 선택
+- [x] 모바일 6자리 코드 + Windows TM 승인, 기기별 즉시 폐기와 전체 폐기 승인
+- [x] app-shell-only offline과 in-app 상태만 승인; 외부 알림 채널 보류
 
 Codex TODO:
 
-- [ ] 기기 등록·목록·폐기·만료 API와 감사 기록 구현
-- [ ] OS/browser 보안 저장소에 token을 저장하고 UI·로그 노출 차단
-- [ ] exact-origin CORS와 CSRF·replay 경계 검증
-- [ ] 네트워크 끊김·재시도·중복 제출 처리
-- [ ] 작은 화면용 최소 비서 UI 구현
-- [ ] 원격 기기 폐기와 token rotation end-to-end 훈련
-- [ ] 로컬 PC가 꺼진 상태에서 cloud 접근 검증
+- [x] schema 9 기기 등록·목록·개별/전체 폐기·만료 API와 append-only 감사 기록 구현
+- [x] HttpOnly browser cookie에 token 원문을 저장하고 DB·UI·로그에는 원문을 노출하지 않도록 구현
+- [x] no-CORS same-origin, exact HTTPS Origin, CSRF, 일회성 페어링·중복 완료 차단 경계 구현
+- [x] app shell만 캐시하고 safe GET 외 자동 재시도·중복 mutation 제출을 금지
+- [x] 작은 화면용 AI 비서·Task·Note·승인·현재 기기 UI와 Windows 기기 관리 UI 구현
+- [x] 로컬 통합 테스트에서 페어링·scope·CSRF·즉시 폐기·복원 후 비부활 검증
+- [x] 로컬 `tm-server` 없이 Railway HTTPS origin에서 PWA·기기 인증·폐기·backup 검증
+
+완료 기록:
+
+- GitHub Actions run `29893865763`: frontend, 전체 Rust workspace, Clippy, Windows `tm.exe`·`tm-cli.exe` build 통과
+- Railway production deployment `07d84e55-e0ce-41f1-b2fc-516238a527bf`: health check 통과, schema 9 적용
+- production 검증: PWA shell·CSP·no-CORS, 6자리 페어링, Secure cookie, device scope, CSRF, 개별 폐기 직후 401 통과
+- schema 9 원격 backup `succeeded`, integrity check `ok`; 검증 중 OpenAI 호출과 Task·Note business mutation 없음
+- 390×844 mobile viewport에서 가로 overflow와 browser console error 없음
 
 완료 게이트:
 
@@ -639,23 +679,39 @@ Codex TODO:
 
 ## STEP 16 — 보안 강화·사고 대응·운영 준비
 
-상태: 대기
+상태: 완료
 
 사용자 결정 게이트:
 
-- [ ] 장애·침해·비용 초과 알림 수신 채널 승인
-- [ ] 허용 가능한 복구 시간과 서비스 중단 기준 승인
+- [x] 장애·침해·비용 초과 알림 수신 채널 승인
+- [x] 허용 가능한 복구 시간과 서비스 중단 기준 승인
 
 Codex TODO:
 
-- [ ] 최신 위협 model과 데이터 흐름 검토
-- [ ] 의존성 취약점·컨테이너 이미지·secret scan 자동화
-- [ ] TLS·header·rate limit·입력 제한·권한 우회 재검증
-- [ ] API key·인증 token·기기 token 회전 훈련
-- [ ] CSRF·replay·중복 실행·prompt injection 공격 테스트
-- [ ] backup restore와 production rollback 모의훈련
-- [ ] 사고 시 domain 차단·secret 폐기·복구 runbook 작성
-- [ ] 운영 dashboard, SLO, 비용 ceiling, 배포 checklist 확정
+- [x] 최신 위협 model과 데이터 흐름 검토
+- [x] 의존성 취약점·컨테이너 이미지·secret scan 자동화
+- [x] TLS·header·rate limit·입력 제한·권한 우회 재검증
+- [x] API key·인증 token·기기 token 회전 훈련
+- [x] CSRF·replay·중복 실행·prompt injection 공격 테스트
+- [x] backup restore와 production rollback 모의훈련
+- [x] 사고 시 domain 차단·secret 폐기·복구 runbook 작성
+- [x] 운영 dashboard, SLO, 비용 ceiling, 배포 checklist 확정
+
+확정 운영 기준:
+
+- Railway·OpenAI email/provider in-app와 TM 내부 운영 상태판을 사용한다.
+- RPO 24시간, RTO 2시간, 잘못된 배포 rollback 15분을 목표로 한다.
+- Railway $10 경고/$30 hard limit, OpenAI $10 email 경고/TM $20 hard stop을 적용한다.
+- 침해 의심 시 가용성보다 차단과 데이터 보존을 우선한다.
+
+검증 결과:
+
+- GitHub Actions Windows build `29903708320`과 STEP 16 security `29903711604` 통과: frontend/Rust test·Clippy, RustSec vulnerability 0, Trivy filesystem/image high·critical 0, secret/workflow policy scan 통과
+- production rollback `17a670b6-524a-44bc-8553-5f8fb013bae4`과 현재 source 재승격 `702b3853-4b03-4610-8ae3-0fc005d8821d`이 15분 목표 안에 완료됨
+- 최신 backup을 격리된 `/tmp`에 복원해 schema 9, SHA-256 `6844b4681ba36c4af43ac066ab91adb26b9c16aa48d410924b8ef400972abe8c`, integrity/foreign key 검증 통과; 활성 Volume은 변경하지 않음
+- production `read-only + AI off` 배포 `8e417f95-4d8b-49c8-905b-571ac7560cd3`에서 mutation이 `INCIDENT_READ_ONLY`로 차단되고, `normal + AI on` 복구 배포 `d7e1375c-b77a-4052-ad66-b10d2f8a54d5`에서 `healthy`로 복귀함
+- primary token 실제 회전, 임시 기기 등록·scope 검증·폐기, 임시 Railway SSH key 등록·MFA 폐기·로컬 key 삭제를 완료함. OpenAI key는 새 원문을 노출하지 않는 restricted-key 회전 절차와 보안 입력 경로를 runbook으로 훈련했으며 실제 침해가 없어 기존 key를 유지함
+- 최종 production 검증은 schema 9, backup `succeeded`/integrity `ok`, scheduler dead letter 0, 보안 header·인증·request limit·비용 ceiling을 통과했고 OpenAI 호출과 Task·Note mutation은 0건임
 
 완료 게이트:
 
@@ -663,7 +719,7 @@ Codex TODO:
 
 ## STEP 17 — 첫 실제 AI 비서 기능
 
-상태: 대기
+상태: 완료
 
 첫 기능 후보:
 
@@ -674,22 +730,42 @@ Codex TODO:
 
 사용자 결정 게이트:
 
-- [ ] 첫 기능 1개와 성공 기준 승인
-- [ ] 허용 비용·실행 빈도·자동화 수준 승인
-- [ ] 사용할 실제 데이터 범위와 알림 채널 승인
+- [x] 첫 기능은 `오늘의 Task AI 리포트`, 성공 기준은 1~3개 실제 후보 우선순위·구체적 다음 행동·허위 ID 0건으로 승인
+- [x] 수동 호출, 하루 4회, 1회 USD 0.05·800 output token, 자동 재시도 없음으로 승인
+- [x] Task ID·제목·프로젝트 이름·상태·우선순위·마감일·선정 category만 사용하고 Windows `오늘` 화면과 모바일 PWA에 표시하기로 승인
 
 Codex TODO:
 
-- [ ] 기존 API·오케스트레이터·승인·스케줄러만 이용해 최소 기능 구현
-- [ ] 기능 전용 권한·prompt·tool·비용 상한 정의
-- [ ] staging 검증 후 production 점진 활성화
-- [ ] 실제 품질·비용·실패·사용 편의성 측정
-- [ ] rollback과 기능 kill switch 검증
-- [ ] 측정 결과에 따라 다음 기능 추가 여부 보고
+- [x] 기존 OpenAI client·인증·비용 원장과 side-effect 없는 digest fact 조회를 이용해 최소 기능 구현
+- [x] 전용 read-only prompt·Structured Outputs·후보 ID 재검증·하루/요청별 비용 상한·feature kill switch 정의
+- [x] CI와 기능 비활성 production 배포를 통과한 뒤 production 점진 활성화
+- [x] 실제 품질·비용·실패·사용 편의성 1차 측정
+- [x] 기능 kill switch 차단·복구 검증
+- [x] 측정 결과에 따라 다음 기능 추가 여부 보고
 
 완료 게이트:
 
 - 시스템 기반을 유지한 채 실제 비서 기능 하나가 안전하게 운영되고 품질·비용·편의성을 측정할 수 있다.
+
+구현 메모:
+
+- schema 10에 `task_report_runs`와 append-only `task_report_feedback`을 추가했으며 backup restore가 이 기록을 되감지 못한다.
+- production cloud에서는 `TM_TASK_REPORT_ENABLED` 기본값이 false다. schema 10을 먼저 배포·검증한 뒤 별도 배포로 켠다.
+- Windows와 PWA는 동일한 결과·token·추정 비용·latency를 표시하고 보고서당 한 번 `도움 됨/도움 안 됨`을 기록한다.
+- 자동 일정 알림, 정기 지출, 운동, 주식은 이번 기능에 포함하지 않고 별도 selector·prompt·endpoint로 확장한다.
+
+검증 결과:
+
+- 최종 GitHub Actions Windows build `29920549337`과 STEP 16 security `29920553236`이 frontend, 전체 Rust test·Clippy, Windows 실행 파일, RustSec, Trivy filesystem/image high·critical 0건과 secret/workflow policy를 통과했다.
+- 기능 비활성 schema 10 배포에서 POST가 OpenAI 호출 전에 `503`으로 차단되는 kill switch를 확인했다. 배포 중 remote backup guard의 schema 9 상한을 발견해 schema 10으로 고치고 현재 DB 버전과 자동 대조하는 정적 검사를 추가했다.
+- 최종 source 배포 `d119bfcf-0c41-4ce9-a29f-05bfce502481`에서 schema 10 암호화 remote backup `succeeded`·integrity `ok`를 확인한 뒤 활성화 배포 `210ad081-7722-4cfe-85c6-85ca1cb900cc`을 완료했다.
+- production 실행 `019f89ef-e6d1-7982-b0e9-cc0a103904dc`은 실제 후보 1건 중 같은 Task ID 1건만 제안했다. 허위 ID·불필요한 경고·Task/Note mutation은 0건이었다.
+- 실제 1회는 input 357, output 128, 총 485 token, 추정 USD 0.002813, latency 3.394초였다. 2026-07 월 내부 비용 ledger는 누적 USD 0.011209, USD 20 hard stop 미도달이다.
+- production 모바일 PWA는 HTTP 200과 Task report UI를 반환했고 활성 배포 error-level 로그는 0건이다. Windows artifact를 SHA-256 검증 후 `dist/release`에 적용하고 이전 실행 파일을 별도 보존했다.
+
+다음 기능 판단:
+
+- 안전성·비용·응답 형식은 첫 운영 게이트를 통과했다. 다만 품질 표본은 1건이고 사용자 평가는 아직 없으므로 일정·정기 지출·운동·주식 기능 추가는 최소 1~2주 `도움 됨/도움 안 됨` 기록을 모은 뒤 우선순위를 정한다.
 
 ## 단계 진행 규칙
 

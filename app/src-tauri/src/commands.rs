@@ -3,20 +3,22 @@ use std::{
     str::FromStr,
 };
 
-use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, SecondsFormat, Utc};
 use chrono_tz::Asia::Seoul;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tauri::State;
 use tm_core::{
-    ChangeRequest, ChangeRequestKind, ChecklistMutationInput,
-    CreateChangeRequestInput as CoreCreateChangeRequestInput, CreateNoteAggregateInput,
-    CreateNoteInput, CreateProjectInput, CreateTaskAggregateInput, CreateTaskInput,
-    CreateWorkLogInput, EndSessionInput, EntityLink, EntityType, LinkTargetType, Note,
-    NoteLinksInput, NoteType, SearchHit, SessionStatus, StartSessionInput, Task, TaskDayEntry,
-    TaskDayStatus, TaskPatch, TaskStatus, TmCore, TrashEntityType,
+    CalendarEvent, ChangeRequest, ChangeRequestKind, ChecklistMutationInput,
+    CreateCalendarEventInput, CreateChangeRequestInput as CoreCreateChangeRequestInput,
+    CreateNoteAggregateInput, CreateNoteInput, CreateProjectInput, CreateTaskAggregateInput,
+    CreateTaskInput, CreateWorkLogInput, EndSessionInput, EntityLink, EntityType,
+    LatestStockScreen, LinkTargetType, ListStockScreenResultsInput, Note, NoteLinksInput, NoteType,
+    SearchHit, SessionStatus, StartSessionInput, StockScreenBandFilter, StockScreenDirection,
+    StockScreenHorizon, StockScreenResultPage, StockWatchlistItem, Task, TaskDayEntry,
+    TaskDayStatus, TaskPatch, TaskStatus, TmCore, TrashEntityType, UpdateCalendarEventInput,
     UpdateChangeRequestInput as CoreUpdateChangeRequestInput, UpdateTaskAggregateInput,
-    WorkSession,
+    UpsertStockWatchlistItemInput, WorkSession,
 };
 
 use crate::AppState;
@@ -222,6 +224,113 @@ pub(crate) fn create_project(
             color: None,
         })
         .map(|project| project.id)
+        .map_err(command_error)
+}
+
+#[tauri::command]
+pub(crate) fn get_calendar_month(
+    month: String,
+    state: State<'_, AppState>,
+) -> CommandResult<Value> {
+    let month = parse_month(&month)?;
+    let calendar = state
+        .core
+        .calendar_month(month.year(), month.month())
+        .map_err(command_error)?;
+    crate::expense_commands::calendar_month_value(&state, calendar)
+}
+
+#[tauri::command]
+pub(crate) fn create_calendar_event(
+    input: CreateCalendarEventInput,
+    state: State<'_, AppState>,
+) -> CommandResult<CalendarEvent> {
+    state
+        .core
+        .create_calendar_event(input)
+        .map_err(command_error)
+}
+
+#[tauri::command]
+pub(crate) fn update_calendar_event(
+    event_id: String,
+    input: UpdateCalendarEventInput,
+    state: State<'_, AppState>,
+) -> CommandResult<CalendarEvent> {
+    state
+        .core
+        .update_calendar_event(&event_id, input)
+        .map_err(command_error)
+}
+
+#[tauri::command]
+pub(crate) fn delete_calendar_event(
+    event_id: String,
+    expected_version: u64,
+    state: State<'_, AppState>,
+) -> CommandResult<()> {
+    state
+        .core
+        .delete_calendar_event(&event_id, expected_version)
+        .map_err(command_error)
+}
+
+#[tauri::command]
+pub(crate) fn get_stock_watchlist(
+    state: State<'_, AppState>,
+) -> CommandResult<Vec<StockWatchlistItem>> {
+    state.core.stock_watchlist().map_err(command_error)
+}
+
+#[tauri::command]
+pub(crate) fn upsert_stock_watchlist_item(
+    input: UpsertStockWatchlistItemInput,
+    state: State<'_, AppState>,
+) -> CommandResult<StockWatchlistItem> {
+    state
+        .core
+        .upsert_stock_watchlist_item(input)
+        .map_err(command_error)
+}
+
+#[tauri::command]
+pub(crate) fn delete_stock_watchlist_item(
+    symbol: String,
+    state: State<'_, AppState>,
+) -> CommandResult<()> {
+    state
+        .core
+        .delete_stock_watchlist_item(&symbol)
+        .map_err(command_error)
+}
+
+#[tauri::command]
+pub(crate) fn get_latest_stock_screen(
+    state: State<'_, AppState>,
+) -> CommandResult<LatestStockScreen> {
+    state.core.get_latest_stock_screen().map_err(command_error)
+}
+
+#[tauri::command]
+pub(crate) fn list_stock_screen_results(
+    run_id: String,
+    horizon: StockScreenHorizon,
+    direction: StockScreenDirection,
+    band: Option<StockScreenBandFilter>,
+    cursor: Option<String>,
+    limit: Option<u32>,
+    state: State<'_, AppState>,
+) -> CommandResult<StockScreenResultPage> {
+    state
+        .core
+        .list_stock_screen_results(ListStockScreenResultsInput {
+            run_id,
+            horizon,
+            direction,
+            band,
+            cursor,
+            limit,
+        })
         .map_err(command_error)
 }
 
@@ -622,6 +731,13 @@ fn parse_trash_type(value: &str) -> CommandResult<TrashEntityType> {
     }
 }
 
+fn parse_month(value: &str) -> CommandResult<NaiveDate> {
+    if value.len() != 7 {
+        return Err(format!("월 형식은 YYYY-MM이어야 합니다: {value}"));
+    }
+    NaiveDate::parse_from_str(&format!("{value}-01"), "%Y-%m-%d").map_err(command_error)
+}
+
 #[tauri::command]
 pub(crate) fn create_backup(state: State<'_, AppState>) -> CommandResult<()> {
     state
@@ -875,6 +991,7 @@ fn build_snapshot(core: &TmCore) -> tm_core::Result<Value> {
                 .collect();
             json!({
                 "id": project.id,
+                "systemKey": project.system_key,
                 "name": project.name,
                 "description": project.description,
                 "color": project.color.as_deref().unwrap_or("#7386ff"),
@@ -1136,6 +1253,13 @@ mod tests {
         let snapshot = build_snapshot(&core)?;
 
         assert_eq!(snapshot["projects"][0]["name"], "TM 구현");
+        assert!(
+            snapshot["projects"]
+                .as_array()
+                .is_some_and(|projects| projects.iter().any(|project| {
+                    project["systemKey"] == "uncategorized" && project["name"] == "기타"
+                }))
+        );
         assert_eq!(snapshot["tasks"][0]["priority"], "high");
         assert_eq!(snapshot["todayView"]["inProgress"][0]["id"], task.id);
         assert_eq!(snapshot["todayView"]["planned"][0]["taskId"], task.id);

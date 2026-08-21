@@ -27,6 +27,18 @@ fn temporary_root(prefix: &str) -> Result<TempDir> {
         .map_err(Into::into)
 }
 
+fn create_v1_database(path: &std::path::Path) -> Result<()> {
+    let connection = Connection::open(path)?;
+    connection.execute_batch(include_str!("../migrations/0001_initial.sql"))?;
+    connection.execute(
+        "INSERT INTO schema_migrations(version, name, applied_at)
+         VALUES (1, 'local-first-foundation', '2026-01-01T00:00:00.000Z')",
+        [],
+    )?;
+    connection.pragma_update(None, "user_version", 1_i64)?;
+    Ok(())
+}
+
 fn create_input(title: &str, priority: u8) -> CreateChangeRequestInput {
     CreateChangeRequestInput {
         kind: ChangeRequestKind::Feature,
@@ -87,7 +99,7 @@ fn file_sha256(path: &std::path::Path) -> Result<String> {
 #[test]
 fn current_schema_exports_queue_and_validates_required_content() -> Result<()> {
     let (_temporary, core) = fixture()?;
-    assert_eq!(core.health()?.schema_version, 4);
+    assert_eq!(core.health()?.schema_version, 17);
 
     let mut invalid = create_input("필수 검증", 1);
     invalid.description.clear();
@@ -113,18 +125,10 @@ fn opening_v1_database_creates_pre_migration_backup_and_applies_all_migrations()
     let temporary = temporary_root("tm-change-request-v1-")?;
     let data = temporary.path().join("data");
     std::fs::create_dir_all(&data)?;
-    let connection = Connection::open(data.join("tm.sqlite3"))?;
-    connection.execute_batch(include_str!("../migrations/0001_initial.sql"))?;
-    connection.execute(
-        "INSERT INTO schema_migrations(version, name, applied_at)
-         VALUES (1, 'local-first-foundation', '2026-01-01T00:00:00.000Z')",
-        [],
-    )?;
-    connection.pragma_update(None, "user_version", 1_i64)?;
-    drop(connection);
+    create_v1_database(&data.join("tm.sqlite3"))?;
 
     let core = TmCore::open(TmHome::new(temporary.path()))?;
-    assert_eq!(core.health()?.schema_version, 4);
+    assert_eq!(core.health()?.schema_version, 17);
     assert!(
         core.list_backups()?
             .iter()
@@ -155,7 +159,7 @@ fn opening_v2_database_creates_pre_migration_backup_and_applies_current_schema()
     drop(connection);
 
     let core = TmCore::open(TmHome::new(temporary.path()))?;
-    assert_eq!(core.health()?.schema_version, 4);
+    assert_eq!(core.health()?.schema_version, 17);
     let backups = core.list_backups()?;
     let pre_migration = backups
         .iter()
@@ -400,22 +404,9 @@ fn priority_order_and_cancellation_contract_are_enforced() -> Result<()> {
 
 #[test]
 fn restoring_v1_backup_migrates_and_preserves_non_rewindable_ledger() -> Result<()> {
-    let (_temporary, core) = fixture()?;
-    let backup = core.create_backup()?;
-    let backup_path = std::path::Path::new(&backup.path);
-    let v1 = Connection::open(backup_path)?;
-    v1.execute_batch(
-        "DROP TABLE mutation_audit_events;
-         DROP TABLE mutation_idempotency_records;
-         ALTER TABLE tasks DROP COLUMN version;
-         ALTER TABLE checklist_items DROP COLUMN version;
-         ALTER TABLE notes DROP COLUMN version;
-         DROP TABLE change_request_events;
-         DROP TABLE change_requests;
-         DELETE FROM schema_migrations WHERE version >= 2;
-         PRAGMA user_version = 1;",
-    )?;
-    drop(v1);
+    let (temporary, core) = fixture()?;
+    let backup_path = temporary.path().join("v1-restore.sqlite3");
+    create_v1_database(&backup_path)?;
 
     let claimed = core.create_change_request(create_input("보존 claimed", 3))?;
     core.approve_change_request(&claimed.id, 1, 0, "reviewer")?;
@@ -443,7 +434,7 @@ fn restoring_v1_backup_migrates_and_preserves_non_rewindable_ledger() -> Result<
     let protected_ids = [claimed.id, completed.id, failed.id, cancelled.id];
 
     core.restore_backup(backup_path)?;
-    assert_eq!(core.health()?.schema_version, 4);
+    assert_eq!(core.health()?.schema_version, 17);
     let restored = core.list_change_requests()?;
     for id in &protected_ids {
         assert!(restored.iter().any(|request| &request.id == id));

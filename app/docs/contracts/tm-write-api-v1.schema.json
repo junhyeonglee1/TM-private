@@ -3,6 +3,7 @@
   "$id": "https://tm.local/schemas/tm-write-api-v1.schema.json",
   "title": "TM controlled write API v1 bodies and responses",
   "anyOf": [
+    { "$ref": "#/$defs/ProjectCreateRequest" },
     { "$ref": "#/$defs/TaskCreateRequest" },
     { "$ref": "#/$defs/TaskUpdateRequest" },
     { "$ref": "#/$defs/NoteCreateRequest" },
@@ -16,6 +17,7 @@
     "NullableDate": { "type": ["string", "null"], "format": "date" },
     "Timestamp": { "type": "string", "format": "date-time" },
     "NullableTimestamp": { "type": ["string", "null"], "format": "date-time" },
+    "NullableString": { "type": ["string", "null"] },
     "NullableUuid": {
       "oneOf": [
         { "$ref": "#/$defs/Uuid" },
@@ -27,6 +29,21 @@
     },
     "NoteType": {
       "enum": ["concept", "howto", "decision", "reference", "daily"]
+    },
+    "ProjectCreateRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "description": { "type": "string", "maxLength": 20000 },
+        "color": {
+          "oneOf": [
+            { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" },
+            { "type": "null" }
+          ]
+        }
+      }
     },
     "TaskCreateRequest": {
       "type": "object",
@@ -108,6 +125,25 @@
         "version": { "type": "integer", "minimum": 1 }
       }
     },
+    "Project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "name", "description", "color", "systemKey", "sortOrder",
+        "createdAt", "updatedAt", "archivedAt"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/Uuid" },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "color": { "$ref": "#/$defs/NullableString" },
+        "systemKey": { "enum": ["uncategorized", null] },
+        "sortOrder": { "type": "integer" },
+        "createdAt": { "$ref": "#/$defs/Timestamp" },
+        "updatedAt": { "$ref": "#/$defs/Timestamp" },
+        "archivedAt": { "$ref": "#/$defs/NullableTimestamp" }
+      }
+    },
     "Note": {
       "type": "object",
       "additionalProperties": false,
@@ -154,14 +190,18 @@
       ],
       "properties": {
         "operation": {
-          "enum": ["task_create", "task_update", "note_create", "note_update", "checklist_set_done"]
+          "enum": [
+            "project_create", "task_create", "task_update", "note_create",
+            "note_update", "checklist_set_done"
+          ]
         },
-        "resourceType": { "enum": ["task", "note", "checklist"] },
+        "resourceType": { "enum": ["project", "task", "note", "checklist"] },
         "resourceId": { "$ref": "#/$defs/Uuid" },
         "version": { "type": "integer", "minimum": 1 },
         "replayed": { "type": "boolean" },
         "item": {
           "oneOf": [
+            { "$ref": "#/$defs/Project" },
             { "$ref": "#/$defs/Task" },
             { "$ref": "#/$defs/Note" },
             { "$ref": "#/$defs/ChecklistItem" }

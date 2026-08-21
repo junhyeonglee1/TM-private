@@ -78,7 +78,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "id", "name", "description", "color", "sortOrder",
+        "id", "name", "description", "color", "systemKey", "sortOrder",
         "createdAt", "updatedAt", "archivedAt"
       ],
       "properties": {
@@ -86,6 +86,7 @@
         "name": { "type": "string" },
         "description": { "type": "string" },
         "color": { "$ref": "#/$defs/NullableString" },
+        "systemKey": { "enum": ["uncategorized", null] },
         "sortOrder": { "type": "integer" },
         "createdAt": { "$ref": "#/$defs/Timestamp" },
         "updatedAt": { "$ref": "#/$defs/Timestamp" },

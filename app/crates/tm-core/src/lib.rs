@@ -1,22 +1,46 @@
 //! Local-first domain and persistence core shared by the TM desktop app and CLI.
 
+mod ai_budget;
+mod assistant_action;
 mod backup;
+mod calendar;
 mod change_request;
 mod core;
 mod database;
+mod desktop_api;
+mod device_auth;
 mod digest;
 mod error;
+mod expense;
 mod export;
 mod home;
+mod mail;
+mod memory;
 mod migration;
 mod model;
 mod mutation;
+mod scheduler;
+mod stock_screen;
+mod stock_watchlist;
+mod task_report;
 
+pub use ai_budget::{AiBudgetSettlementRecord, AiOperationBudgetStatus};
+pub use assistant_action::*;
 pub use backup::BackupArtifact;
+pub use calendar::*;
 pub use core::TmCore;
-pub use digest::{DigestDelivery, DigestFacts, DigestKind, DigestPreparation};
+pub use desktop_api::{DesktopCommand, execute_desktop_command};
+pub use device_auth::*;
+pub use digest::{DigestDelivery, DigestFacts, DigestKind, DigestPreparation, DigestTaskFact};
 pub use error::{Error, Result};
+pub use expense::*;
 pub use home::{DEFAULT_TM_HOME, TmHome};
+pub use mail::*;
+pub use memory::*;
 pub use migration::{MigrationDryRun, MigrationManifest, MigrationTableManifest};
 pub use model::*;
 pub use mutation::*;
+pub use scheduler::*;
+pub use stock_screen::*;
+pub use stock_watchlist::*;
+pub use task_report::{TaskReportCompletion, TaskReportRun, TaskReportStart};

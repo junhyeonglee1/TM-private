@@ -203,6 +203,7 @@ pub struct ChangeRequestClaim {
 #[serde(rename_all = "camelCase")]
 pub struct Project {
     pub id: String,
+    pub system_key: Option<String>,
     pub name: String,
     pub description: String,
     pub color: Option<String>,
@@ -404,6 +405,52 @@ pub struct BackupInfo {
     pub created_at: String,
     pub byte_size: u64,
     pub trigger: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupVerification {
+    pub sha256: String,
+    pub byte_size: u64,
+    pub schema_version: i64,
+    pub integrity_check: String,
+    pub schema_semantics_validated: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiBudgetPolicy {
+    pub warning_limit_microusd: u64,
+    pub hard_limit_microusd: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiBudgetStatus {
+    pub budget_month: String,
+    pub warning_limit_microusd: u64,
+    pub hard_limit_microusd: u64,
+    pub committed_microusd: u64,
+    pub remaining_microusd: u64,
+    pub warning_reached: bool,
+    pub hard_stop_reached: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiBudgetReservation {
+    pub request_id: String,
+    pub budget_month: String,
+    pub reserved_microusd: u64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiTokenUsage {
+    pub input_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

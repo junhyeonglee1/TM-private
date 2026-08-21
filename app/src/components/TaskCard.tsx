@@ -1,3 +1,5 @@
+import { useEffect, useId, useState } from "react";
+
 import type { DayEntryStatus, Task } from "../types";
 import { Icon } from "./Icon";
 
@@ -7,6 +9,7 @@ interface TaskCardProps {
   allowDefer?: boolean;
   dayEntryId?: string;
   onOpen: (task: Task) => void;
+  onComplete?: (task: Task) => void | Promise<void>;
   onPlan?: (task: Task) => void;
   onResolve?: (entryId: string, status: Exclude<DayEntryStatus, "planned">) => void;
 }
@@ -33,21 +36,52 @@ export function TaskCard({
   allowDefer = false,
   dayEntryId,
   onOpen,
+  onComplete,
   onPlan,
   onResolve,
 }: TaskCardProps) {
   const checked = task.checklist.filter((item) => item.checked).length;
+  const completionTitleId = useId();
+  const completionDescriptionId = useId();
+  const [confirmingCompletion, setConfirmingCompletion] = useState(false);
+  const [completing, setCompleting] = useState(false);
+  const canComplete = task.status !== "done"
+    && task.status !== "cancelled"
+    && Boolean(onComplete || (dayEntryId && onResolve));
+
+  useEffect(() => {
+    if (!confirmingCompletion) return undefined;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !completing) setConfirmingCompletion(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [completing, confirmingCompletion]);
+
+  const confirmCompletion = async () => {
+    setCompleting(true);
+    try {
+      if (dayEntryId && onResolve) {
+        onResolve(dayEntryId, "done");
+      } else if (onComplete) {
+        await onComplete(task);
+      }
+      setConfirmingCompletion(false);
+    } finally {
+      setCompleting(false);
+    }
+  };
 
   return (
     <article className={`task-card ${compact ? "task-card--compact" : ""}`}>
-      <button className="task-card__body" onClick={() => onOpen(task)} type="button">
+      <button aria-label={`${task.title} 상세 열기`} className="task-card__body" onClick={() => onOpen(task)} type="button">
         <span className={`status-dot status-dot--${task.status}`} aria-hidden="true" />
         <span className="task-card__content">
           <span className="task-card__title">{task.title}</span>
           <span className="task-card__meta">
-            {task.projectName && <span>{task.projectName}</span>}
+            {task.projectName && <span className="task-card__project">{task.projectName}</span>}
             {task.dueDate && (
-              <span className={task.priority === "high" ? "meta-danger" : ""}>
+              <span className={`task-card__due ${task.priority === "high" ? "meta-danger" : ""}`}>
                 <Icon name="calendar" size={13} /> {task.dueDate.slice(5).replace("-", ".")}
               </span>
             )}
@@ -57,25 +91,18 @@ export function TaskCard({
               </span>
             )}
             {task.checklist.length > 0 && (
-              <span>
+              <span className="task-card__checklist">
                 <Icon name="check" size={13} /> {checked}/{task.checklist.length}
               </span>
             )}
           </span>
-          {!compact && task.tags.length > 0 && (
-            <span className="tag-row">
-              {task.tags.map((tag) => (
-                <span className="tag" key={tag}>#{tag}</span>
-              ))}
-            </span>
-          )}
         </span>
         <span className={`status-label status-label--${task.status}`}>{statusLabels[task.status]}</span>
         <Icon className="task-card__chevron" name="chevron" size={16} />
       </button>
 
-      {(onPlan || (dayEntryId && onResolve)) && (
-        <div className="task-card__actions" aria-label={`${task.title} 작업`}>
+      {(onPlan || canComplete || (dayEntryId && onResolve)) && (
+        <div className="task-card__actions" aria-label={`${task.title} 작업`} role="group">
           {onPlan && (
             <button className="text-button" onClick={() => onPlan(task)} type="button">
               오늘 계획
@@ -86,7 +113,7 @@ export function TaskCard({
               <button
                 className="icon-button icon-button--success"
                 aria-label={`${task.title} 완료`}
-                onClick={() => onResolve(dayEntryId, "done")}
+                onClick={() => setConfirmingCompletion(true)}
                 title="완료"
                 type="button"
               >
@@ -112,6 +139,66 @@ export function TaskCard({
               </button>
             </>
           )}
+          {!dayEntryId && canComplete && (
+            <button
+              className="icon-button icon-button--success"
+              aria-label={`${task.title} 완료`}
+              onClick={() => setConfirmingCompletion(true)}
+              title="완료"
+              type="button"
+            >
+              <Icon name="check" size={16} />
+            </button>
+          )}
+        </div>
+      )}
+
+      {confirmingCompletion && (
+        <div
+          className="completion-confirm-backdrop"
+          onMouseDown={(event) => {
+            if (event.currentTarget === event.target && !completing) {
+              setConfirmingCompletion(false);
+            }
+          }}
+        >
+          <section
+            aria-describedby={completionDescriptionId}
+            aria-labelledby={completionTitleId}
+            aria-modal="true"
+            className="completion-confirm-dialog"
+            role="dialog"
+          >
+            <span className="completion-confirm-dialog__icon" aria-hidden="true">
+              <Icon name="check" size={22} />
+            </span>
+            <div>
+              <span className="eyebrow">상태 변경 확인</span>
+              <h2 id={completionTitleId}>Task를 완료할까요?</h2>
+              <p id={completionDescriptionId}>
+                <strong>{task.title}</strong>을 완료 상태로 변경합니다.
+              </p>
+            </div>
+            <footer>
+              <button
+                className="secondary-button"
+                disabled={completing}
+                onClick={() => setConfirmingCompletion(false)}
+                type="button"
+              >
+                취소
+              </button>
+              <button
+                autoFocus
+                className="primary-button"
+                disabled={completing}
+                onClick={() => { void confirmCompletion(); }}
+                type="button"
+              >
+                {completing ? "완료 처리 중…" : "완료 처리"}
+              </button>
+            </footer>
+          </section>
         </div>
       )}
     </article>

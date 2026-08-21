@@ -9,7 +9,7 @@ use tm_core::{
     CreateNoteInput, CreateProjectInput, CreateTaskAggregateInput, CreateTaskInput,
     DEFAULT_TM_HOME, DigestKind, EndSessionInput, EntityType, Error, LinkTargetType,
     NoteLinksInput, NoteType, Result, StartSessionInput, TaskDayStatus, TaskPatch, TaskStatus,
-    TmCore, TmHome, UpdateTaskAggregateInput,
+    TmCore, TmHome, TrashEntityType, UpdateTaskAggregateInput,
 };
 use uuid::Uuid;
 
@@ -43,19 +43,197 @@ fn initializes_schema_with_uuid_v7_utc_and_wal() -> Result<()> {
     let (temporary, core) = fixture()?;
     let health = core.health()?;
     assert!(health.ok);
-    assert_eq!(health.schema_version, 4);
+    assert_eq!(health.schema_version, 17);
     assert_eq!(health.journal_mode.to_ascii_lowercase(), "wal");
-    assert!(health.database_path.ends_with("data\\tm.sqlite3"));
+    assert!(
+        std::path::Path::new(&health.database_path)
+            .ends_with(std::path::Path::new("data").join("tm.sqlite3"))
+    );
 
     let initialized_at = core.database_initialized_at()?;
     let reopened = TmCore::open(TmHome::new(temporary.path()))?;
     assert_eq!(reopened.database_initialized_at()?, initialized_at);
 
+    let projects = core.list_projects(false)?;
+    let uncategorized = projects
+        .iter()
+        .find(|project| project.system_key.as_deref() == Some("uncategorized"))
+        .ok_or_else(|| Error::Invariant("uncategorized project missing".to_owned()))?;
+    assert_eq!(uncategorized.name, "기타");
+
     let task = core.create_task(task_input("UUIDv7 확인"))?;
     let parsed = Uuid::parse_str(&task.id)
         .map_err(|error| Error::Invariant(format!("invalid generated UUID: {error}")))?;
     assert_eq!(parsed.get_version_num(), 7);
+    assert_eq!(task.project_id.as_deref(), Some(uncategorized.id.as_str()));
     assert!(task.created_at.ends_with('Z'));
+    Ok(())
+}
+
+#[test]
+fn uncategorized_project_is_the_task_default_and_is_protected() -> Result<()> {
+    let (_temporary, core) = fixture()?;
+    let uncategorized = core
+        .list_projects(false)?
+        .into_iter()
+        .find(|project| project.system_key.as_deref() == Some("uncategorized"))
+        .ok_or_else(|| Error::Invariant("uncategorized project missing".to_owned()))?;
+
+    let task = core.create_task(task_input("default project"))?;
+    assert_eq!(task.project_id.as_deref(), Some(uncategorized.id.as_str()));
+
+    let custom = core.create_project(CreateProjectInput {
+        name: "Custom project".to_owned(),
+        description: String::new(),
+        color: None,
+    })?;
+    let mut custom_task_input = task_input("clear target");
+    custom_task_input.project_id = Some(custom.id.clone());
+    let custom_task = core.create_task(custom_task_input)?;
+    let cleared = core.update_task(
+        &custom_task.id,
+        TaskPatch {
+            clear_project: true,
+            ..TaskPatch::default()
+        },
+    )?;
+    assert_eq!(
+        cleared.project_id.as_deref(),
+        Some(uncategorized.id.as_str())
+    );
+
+    let session = core.start_session(StartSessionInput {
+        project_id: None,
+        goal: "default follow-up".to_owned(),
+        task_ids: Vec::new(),
+    })?;
+    let completion = core.end_session(
+        &session.id,
+        EndSessionInput {
+            result: "done".to_owned(),
+            blockers: String::new(),
+            next_action: "follow up".to_owned(),
+            create_followup_task: true,
+            followup_title: None,
+            followup_project_id: None,
+        },
+    )?;
+    assert_eq!(
+        completion
+            .followup_task
+            .as_ref()
+            .and_then(|followup| followup.project_id.as_deref()),
+        Some(uncategorized.id.as_str())
+    );
+
+    assert!(matches!(
+        core.create_project(CreateProjectInput {
+            name: "  기타  ".to_owned(),
+            description: String::new(),
+            color: None,
+        }),
+        Err(Error::InvalidInput(_))
+    ));
+    assert!(matches!(
+        core.move_to_trash(TrashEntityType::Project, &uncategorized.id),
+        Err(Error::Conflict(_))
+    ));
+
+    let raw = Connection::open(core.home().database_path())?;
+    assert!(
+        raw.execute(
+            "UPDATE projects SET name = 'renamed' WHERE id = ?1",
+            [&uncategorized.id],
+        )
+        .is_err()
+    );
+    assert!(
+        raw.execute(
+            "UPDATE projects SET archived_at = '2026-07-31T00:00:00Z' WHERE id = ?1",
+            [&uncategorized.id],
+        )
+        .is_err()
+    );
+    assert!(
+        raw.execute("DELETE FROM projects WHERE id = ?1", [&uncategorized.id])
+            .is_err()
+    );
+    assert!(
+        raw.execute(
+            "UPDATE tasks SET project_id = NULL WHERE id = ?1",
+            [&task.id],
+        )
+        .is_err()
+    );
+
+    let archived = core.create_project(CreateProjectInput {
+        name: "Archived target".to_owned(),
+        description: String::new(),
+        color: None,
+    })?;
+    let mut existing_archived_task_input = task_input("existing archived project task");
+    existing_archived_task_input.project_id = Some(archived.id.clone());
+    let existing_archived_task = core.create_task(existing_archived_task_input)?;
+    raw.execute(
+        "UPDATE projects SET archived_at = '2026-07-31T00:00:00Z' WHERE id = ?1",
+        [&archived.id],
+    )?;
+    let updated_archived_task = core.update_task(
+        &existing_archived_task.id,
+        TaskPatch {
+            title: Some("edited while project remains archived".to_owned()),
+            project_id: Some(archived.id.clone()),
+            ..TaskPatch::default()
+        },
+    )?;
+    assert_eq!(
+        updated_archived_task.project_id.as_deref(),
+        Some(archived.id.as_str())
+    );
+    assert!(matches!(
+        core.update_task(
+            &task.id,
+            TaskPatch {
+                project_id: Some(archived.id.clone()),
+                ..TaskPatch::default()
+            }
+        ),
+        Err(Error::Conflict(_))
+    ));
+    let mut archived_task = task_input("archived target task");
+    archived_task.project_id = Some(archived.id.clone());
+    assert!(matches!(
+        core.create_task(archived_task),
+        Err(Error::Conflict(_))
+    ));
+
+    let deleted = core.create_project(CreateProjectInput {
+        name: "Deleted target".to_owned(),
+        description: String::new(),
+        color: None,
+    })?;
+    let mut existing_deleted_task_input = task_input("existing deleted project task");
+    existing_deleted_task_input.project_id = Some(deleted.id.clone());
+    let existing_deleted_task = core.create_task(existing_deleted_task_input)?;
+    core.move_to_trash(TrashEntityType::Project, &deleted.id)?;
+    let updated_deleted_task = core.update_task(
+        &existing_deleted_task.id,
+        TaskPatch {
+            title: Some("edited while project remains deleted".to_owned()),
+            project_id: Some(deleted.id.clone()),
+            ..TaskPatch::default()
+        },
+    )?;
+    assert_eq!(
+        updated_deleted_task.project_id.as_deref(),
+        Some(deleted.id.as_str())
+    );
+    let mut deleted_task = task_input("deleted target task");
+    deleted_task.project_id = Some(deleted.id.clone());
+    assert!(matches!(
+        core.create_task(deleted_task),
+        Err(Error::Conflict(_))
+    ));
     Ok(())
 }
 

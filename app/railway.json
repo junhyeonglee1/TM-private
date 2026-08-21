@@ -6,7 +6,7 @@
   },
   "deploy": {
     "multiRegionConfig": null,
-    "healthcheckPath": "/readyz",
+    "healthcheckPath": "/deployment-readyz",
     "healthcheckTimeout": 300,
     "restartPolicyType": "ALWAYS",
     "restartPolicyMaxRetries": null,

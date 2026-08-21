@@ -6,12 +6,108 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     BackupArtifact, Error, Result, backup,
-    database::{Database, SCHEMA_VERSION, now_utc},
-    export::EXPORTED_TABLES,
+    database::{Database, SCHEMA_VERSION, now_utc, validate_schema_semantics},
 };
 
 const MANIFEST_FORMAT: &str = "tm-migration-manifest";
 const MANIFEST_FORMAT_VERSION: u32 = 1;
+
+/// Complete durability boundary used by backup validation and restore comparison.
+/// This is intentionally independent from the redacted user-export allowlist.
+pub(crate) const MANIFEST_TABLES: &[&str] = &[
+    "schema_migrations",
+    "projects",
+    "tasks",
+    "checklist_items",
+    "tags",
+    "task_tags",
+    "task_day_entries",
+    "task_events",
+    "work_sessions",
+    "session_tasks",
+    "worklogs",
+    "notes",
+    "calendar_events",
+    "stock_watchlist_items",
+    "stock_universe_snapshots",
+    "stock_universe_members",
+    "stock_market_data_batches",
+    "stock_market_sessions",
+    "stock_daily_bars",
+    "stock_screen_runs",
+    "stock_screen_results",
+    "stock_ai_reports",
+    "task_report_runs",
+    "task_report_feedback",
+    "entity_links",
+    "attachments",
+    "digest_deliveries",
+    "change_requests",
+    "change_request_events",
+    "mutation_idempotency_records",
+    "mutation_audit_events",
+    "ai_budget_ledger",
+    "assistant_action_requests",
+    "assistant_action_events",
+    "assistant_memories",
+    "assistant_memory_sources",
+    "assistant_memory_events",
+    "scheduler_jobs",
+    "scheduler_runs",
+    "scheduler_attempts",
+    "scheduler_effects",
+    "device_pairings",
+    "registered_devices",
+    "device_auth_events",
+    "app_state",
+    "expense_crypto_metadata",
+    "expense_sources",
+    "expense_import_batches",
+    "expense_import_preview_sessions",
+    "expense_raw_rows",
+    "expense_postings",
+    "expense_events",
+    "expense_event_postings",
+    "expense_allocations",
+    "expense_reviews",
+    "expense_rules",
+    "recurring_expense_items",
+    "recurring_expense_versions",
+    "recurring_expense_occurrences",
+    "expense_month_reports",
+    "expense_ai_reports",
+    "expense_ai_feedback",
+    "expense_ai_request_bindings",
+    "expense_ai_attempts",
+    "expense_mutation_receipts",
+    "expense_ai_classification_batches",
+    "expense_ai_classification_items",
+    "expense_ai_classification_receipts",
+    "mail_crypto_metadata",
+    "mail_accounts",
+    "mail_credentials",
+    "mail_sync_state",
+    "mail_items",
+    "mail_feedback",
+    "mail_rules",
+    "mail_oauth_states",
+    "mail_webhook_events",
+    "mail_triage_batches",
+    "mail_triage_items",
+    "mail_reports",
+    "mail_report_items",
+    "mail_sync_events",
+    "mail_mutation_receipts",
+];
+
+/// The schema 14 durability boundary ends at `app_state`. Schema 15 appends
+/// the expense tables beginning with `expense_crypto_metadata`.
+pub(crate) const SCHEMA_14_MANIFEST_TABLE_COUNT: usize = 45;
+/// Schema 16 appends the AI classification batch ledger after the complete
+/// schema 15 expense durability boundary.
+pub(crate) const SCHEMA_15_MANIFEST_TABLE_COUNT: usize = 65;
+/// Schema 17 appends the mail monitoring durability boundary after schema 16.
+pub(crate) const SCHEMA_16_MANIFEST_TABLE_COUNT: usize = 68;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -94,7 +190,7 @@ fn manifest_for_connection(connection: &Connection) -> Result<MigrationManifest>
     let schema_version = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
     let migration_versions = migration_versions(connection)?;
     let mut tables = BTreeMap::new();
-    for table in EXPORTED_TABLES {
+    for table in MANIFEST_TABLES {
         tables.insert((*table).to_owned(), table_manifest(connection, table)?);
     }
     let logical_sha256 = logical_manifest_hash(schema_version, &migration_versions, &tables);
@@ -117,6 +213,7 @@ fn validate_connection(connection: &Connection) -> Result<()> {
             "migration requires schema {SCHEMA_VERSION}, found {schema_version}"
         )));
     }
+    validate_schema_semantics(connection, schema_version)?;
     let integrity: String = connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
     if integrity != "ok" {
         return Err(Error::Invariant(format!(
@@ -160,28 +257,29 @@ fn table_manifest(connection: &Connection, table: &str) -> Result<MigrationTable
         )));
     }
 
-    let query = format!("SELECT * FROM \"{table}\"");
+    let order_by = columns
+        .iter()
+        .map(|column| format!("\"{}\"", column.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let query = format!("SELECT * FROM \"{table}\" ORDER BY {order_by}");
     let mut statement = connection.prepare(&query)?;
     let mut rows = statement.query([])?;
-    let mut canonical_rows = Vec::new();
+    let mut hasher = Sha256::new();
+    hasher.update(b"tm-table-manifest-v1\0");
+    let mut row_count = 0_u64;
     while let Some(row) = rows.next()? {
         let mut canonical_row = Vec::new();
         for (index, column) in columns.iter().enumerate() {
             push_bytes(&mut canonical_row, column.as_bytes());
             push_value(&mut canonical_row, row.get_ref(index)?);
         }
-        canonical_rows.push(canonical_row);
-    }
-    canonical_rows.sort_unstable();
-
-    let mut hasher = Sha256::new();
-    hasher.update(b"tm-table-manifest-v1\0");
-    for row in &canonical_rows {
-        hasher.update((row.len() as u64).to_be_bytes());
-        hasher.update(row);
+        hasher.update((canonical_row.len() as u64).to_be_bytes());
+        hasher.update(&canonical_row);
+        row_count = row_count.saturating_add(1);
     }
     Ok(MigrationTableManifest {
-        row_count: canonical_rows.len() as u64,
+        row_count,
         sha256: format!("{:x}", hasher.finalize()),
     })
 }

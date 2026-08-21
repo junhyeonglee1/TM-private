@@ -2,10 +2,17 @@
 /data/
 /backups/
 /exports/
+/거래내역 예씨/
 
 # Build outputs and packaged executables are reproducible artifacts.
 /dist/
 /tm.exe
+/tm-cli.exe
+/tm-office-decryptor.exe
+/SHA256SUMS.txt
+/STEP10_PROVENANCE.json
+**/__pycache__/
+*.py[cod]
 
 # Secrets must be injected by the local process or a cloud secret manager.
 .env

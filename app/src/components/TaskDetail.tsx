@@ -1,6 +1,12 @@
 import { useEffect, useId, useState } from "react";
 
-import type { ChecklistItem, Project, Task, UpdateTaskInput } from "../types";
+import {
+  UNCATEGORIZED_PROJECT_SYSTEM_KEY,
+  type ChecklistItem,
+  type Project,
+  type Task,
+  type UpdateTaskInput,
+} from "../types";
 import { Icon } from "./Icon";
 
 interface TaskDetailProps {
@@ -37,12 +43,15 @@ const formatDateTime = (value: string): string =>
 
 export function TaskDetail({ task, projects, saving, onClose, onSave, onTrash }: TaskDetailProps) {
   const titleId = useId();
+  const uncategorizedProjectId = projects.find(
+    (project) => project.systemKey === UNCATEGORIZED_PROJECT_SYSTEM_KEY,
+  )?.id ?? "";
   const [title, setTitle] = useState(task.title);
   const [description, setDescription] = useState(task.description);
   const [status, setStatus] = useState(task.status);
   const [priority, setPriority] = useState(task.priority);
   const [dueDate, setDueDate] = useState(task.dueDate ?? "");
-  const [projectId, setProjectId] = useState(task.projectId ?? "");
+  const [projectId, setProjectId] = useState(task.projectId ?? uncategorizedProjectId);
   const [tags, setTags] = useState(task.tags.join(", "));
   const [checklist, setChecklist] = useState(task.checklist);
   const [newChecklistItem, setNewChecklistItem] = useState("");
@@ -55,6 +64,12 @@ export function TaskDetail({ task, projects, saving, onClose, onSave, onTrash }:
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [onClose]);
+
+  useEffect(() => {
+    if (!projectId && uncategorizedProjectId) {
+      setProjectId(uncategorizedProjectId);
+    }
+  }, [projectId, uncategorizedProjectId]);
 
   const addChecklistItem = () => {
     const label = newChecklistItem.trim();
@@ -75,7 +90,7 @@ export function TaskDetail({ task, projects, saving, onClose, onSave, onTrash }:
       status,
       priority,
       dueDate: dueDate || null,
-      projectId: projectId || null,
+      projectId: projectId || uncategorizedProjectId || null,
       tags: tags
         .split(",")
         .map((tag) => tag.trim().replace(/^#/, ""))
@@ -145,8 +160,11 @@ export function TaskDetail({ task, projects, saving, onClose, onSave, onTrash }:
             </label>
             <label className="field">
               <span>프로젝트</span>
-              <select value={projectId} onChange={(event) => setProjectId(event.target.value)}>
-                <option value="">프로젝트 없음</option>
+              <select
+                value={projectId || uncategorizedProjectId}
+                onChange={(event) => setProjectId(event.target.value || uncategorizedProjectId)}
+              >
+                {!uncategorizedProjectId && <option value="">프로젝트 없음</option>}
                 {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
               </select>
             </label>

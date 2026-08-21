@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import { App } from "./App";
@@ -12,6 +12,15 @@ const renderApp = () => {
 };
 
 describe("TM 데스크톱 UI", () => {
+  it("상단에 API와 Cloud 비용만 월 한도와 함께 표시한다", async () => {
+    renderApp();
+
+    const status = await screen.findByLabelText("현재 비용 현황");
+    expect(within(status).getByText("API $0.01 / $20")).toBeInTheDocument();
+    expect(within(status).getByText("Cloud $0.09 / $30")).toBeInTheDocument();
+    expect(status).not.toHaveTextContent("tokens");
+  });
+
   it("오늘의 네 개 기록 영역을 snapshot에서 표시한다", async () => {
     renderApp();
 
@@ -31,19 +40,128 @@ describe("TM 데스크톱 UI", () => {
     expect(within(plannedSection as HTMLElement).queryByRole("button", { name: "이월" })).not.toBeInTheDocument();
   });
 
-  it("Inbox는 기능 없는 기획 대기 화면으로 유지한다", async () => {
+  it("오늘 Task를 목록에서 확인 모달을 거쳐 원터치로 완료한다", async () => {
     const user = userEvent.setup();
+    const { api } = renderApp();
+    await screen.findByRole("heading", { name: "오늘", level: 1 });
+
+    const progressTask = screen.getByText("데이터 모델 불변 조건 검토").closest("article");
+    expect(progressTask).not.toBeNull();
+    await user.click(within(progressTask as HTMLElement).getByRole("button", {
+      name: "데이터 모델 불변 조건 검토 완료",
+    }));
+
+    let dialog = await screen.findByRole("dialog", { name: "Task를 완료할까요?" });
+    expect(within(dialog).getByText("데이터 모델 불변 조건 검토")).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "취소" }));
+    expect(screen.queryByRole("dialog", { name: "Task를 완료할까요?" })).not.toBeInTheDocument();
+    expect((await api.getSnapshot()).tasks.find((task) => task.id === "task-schema")?.status)
+      .toBe("in_progress");
+
+    await user.click(within(progressTask as HTMLElement).getByRole("button", {
+      name: "데이터 모델 불변 조건 검토 완료",
+    }));
+    dialog = await screen.findByRole("dialog", { name: "Task를 완료할까요?" });
+    await user.click(within(dialog).getByRole("button", { name: "완료 처리" }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent("Task를 완료했습니다: 데이터 모델 불변 조건 검토");
+    await waitFor(async () => {
+      expect((await api.getSnapshot()).tasks.find((task) => task.id === "task-schema")?.status)
+        .toBe("done");
+    });
+  });
+
+  it("오늘 계획 Task 완료는 확인 모달 뒤 날짜 기록까지 함께 확정한다", async () => {
+    const user = userEvent.setup();
+    const { api } = renderApp();
+    await screen.findByRole("heading", { name: "오늘", level: 1 });
+
+    const plannedTask = screen.getByText("오늘 화면 정보 밀도 다듬기").closest("article");
+    expect(plannedTask).not.toBeNull();
+    await user.click(within(plannedTask as HTMLElement).getByRole("button", {
+      name: "오늘 화면 정보 밀도 다듬기 완료",
+    }));
+    const dialog = await screen.findByRole("dialog", { name: "Task를 완료할까요?" });
+    await user.click(within(dialog).getByRole("button", { name: "완료 처리" }));
+
+    await waitFor(async () => {
+      const snapshot = await api.getSnapshot();
+      expect(snapshot.todayView.completed.find((entry) => entry.taskId === "task-ui")?.status)
+        .toBe("done");
+      expect(snapshot.tasks.find((task) => task.id === "task-ui")?.status).toBe("done");
+    });
+  });
+
+  it("프로젝트의 열린 Task도 목록에서 바로 완료한다", async () => {
+    const user = userEvent.setup();
+    const { api } = renderApp();
+    await screen.findByRole("heading", { name: "오늘", level: 1 });
+    await user.click(screen.getAllByRole("button", { name: "프로젝트" })[0]);
+
+    const task = (await screen.findByText("JSON · Markdown 내보내기 검증")).closest("article");
+    expect(task).not.toBeNull();
+    await user.click(within(task as HTMLElement).getByRole("button", {
+      name: "JSON · Markdown 내보내기 검증 완료",
+    }));
+    const dialog = await screen.findByRole("dialog", { name: "Task를 완료할까요?" });
+    await user.click(within(dialog).getByRole("button", { name: "완료 처리" }));
+
+    await waitFor(async () => {
+      expect((await api.getSnapshot()).tasks.find((item) => item.id === "task-export")?.status)
+        .toBe("done");
+    });
+  });
+
+  it("오늘의 Task·일정 AI 리포트를 만들고 품질 평가를 기록한다", async () => {
+    const user = userEvent.setup();
+    renderApp();
+
+    await screen.findByRole("heading", { name: "오늘", level: 1 });
+    await user.click(screen.getByRole("button", { name: "AI 리포트 만들기" }));
+
+    expect(await screen.findByRole("heading", { name: "오늘의 Task와 일정을 확인하세요" })).toBeInTheDocument();
+    expect(screen.getByText(/500 tokens/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "도움 됨" }));
+    expect(await screen.findByText("도움 됨으로 평가함")).toBeInTheDocument();
+  });
+
+  it("처음 쓰는 사람에게 기능 없는 Inbox 대신 핵심 메뉴를 먼저 보여준다", async () => {
     renderApp();
     await screen.findByRole("heading", { name: "오늘", level: 1 });
 
-    await user.click(screen.getAllByRole("button", { name: /Inbox/ })[0]);
-    expect(await screen.findByRole("heading", { name: "Inbox", level: 1 })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Inbox는 잠시 비워 두었습니다" })).toBeInTheDocument();
-    expect(screen.getByText(/즉흥 수집과 분류 기능은 제거했습니다/)).toBeInTheDocument();
-    expect(screen.queryByLabelText("빠른 Task 제목")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("빠른 Task 프로젝트")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("빠른 Task 우선순위")).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "정리 완료" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Inbox/ })).not.toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "오늘" }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("button", { name: "캘린더" }).length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("button", { name: "프로젝트" }).length).toBeGreaterThan(0);
+  });
+
+  it("개인 캘린더에 매월 말일 납부 일정을 추가한다", async () => {
+    const user = userEvent.setup();
+    const { api } = renderApp();
+    await screen.findByRole("heading", { name: "오늘", level: 1 });
+    const snapshot = await api.getSnapshot();
+
+    await user.click(screen.getAllByRole("button", { name: "캘린더" })[0]);
+    expect(await screen.findByRole("heading", { name: "캘린더", level: 1 })).toBeInTheDocument();
+    expect((await screen.findAllByText("보험료 납부")).length).toBeGreaterThan(0);
+    await user.click(screen.getByRole("button", { name: "일정 추가" }));
+
+    const formHeading = screen.getByRole("heading", { name: "일정 추가", level: 2 });
+    const formPanel = formHeading.closest("section");
+    expect(formPanel).not.toBeNull();
+    const form = within(formPanel as HTMLElement);
+    await user.type(form.getByLabelText("제목"), "관리비 납부");
+    await user.selectOptions(form.getByLabelText("종류"), "payment");
+    await user.selectOptions(form.getByLabelText("반복"), "monthly_last_day");
+    await user.click(form.getByRole("button", { name: "일정 추가" }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent("일정을 추가했습니다");
+    expect((await screen.findAllByText("관리비 납부")).length).toBeGreaterThan(0);
+    const month = await api.getCalendarMonth(snapshot.today.slice(0, 7));
+    const created = month.events.find((event) => event.title === "관리비 납부");
+    expect(created).toMatchObject({ kind: "payment", recurrence: "monthly_last_day" });
+    expect(month.occurrences.find((occurrence) => occurrence.eventId === created?.id)?.date)
+      .toBe(month.monthEnd);
   });
 
   it("새 프로젝트를 자동 선택하고 compact 입력으로 todo Task를 추가한다", async () => {
@@ -152,14 +270,14 @@ describe("TM 데스크톱 UI", () => {
     renderApp();
     await screen.findByRole("heading", { name: "오늘", level: 1 });
 
-    await user.click(screen.getByRole("button", { name: "WorkLog" }));
+    await user.click(screen.getByRole("button", { name: "작업 기록" }));
     const logHeading = await screen.findByRole("heading", { name: "이력 불변성 검토" });
     const logCard = logHeading.closest("article");
     expect(logCard).not.toBeNull();
     await user.click(within(logCard as HTMLElement).getByRole("button", { name: "이력 불변성 검토 휴지통으로 이동" }));
     await waitFor(() => expect(screen.queryByRole("heading", { name: "이력 불변성 검토" })).not.toBeInTheDocument());
 
-    await user.click(screen.getByRole("button", { name: "Note" }));
+    await user.click(screen.getByRole("button", { name: "메모" }));
     const noteHeading = await screen.findByRole("heading", { name: "SQLite WAL과 busy timeout" });
     const noteCard = noteHeading.closest("article");
     expect(noteCard).not.toBeNull();
@@ -172,7 +290,7 @@ describe("TM 데스크톱 UI", () => {
     const { api } = renderApp();
     await screen.findByRole("heading", { name: "오늘", level: 1 });
 
-    await user.click(screen.getByRole("button", { name: /개선 요청함/ }));
+    await user.click(screen.getByRole("button", { name: /개선 요청/ }));
     expect(await screen.findByRole("heading", { name: "개선 요청함", level: 1 })).toBeInTheDocument();
     expect(
       screen.getByText("TM 승인 요청 처리해줘. app/docs/prompts/change-request-processing.md를 따라줘."),
@@ -212,14 +330,14 @@ describe("TM 데스크톱 UI", () => {
     expect(
       screen.getAllByText("TM 승인 요청 처리해줘. app/docs/prompts/change-request-processing.md를 따라줘.").length,
     ).toBeGreaterThan(1);
-  });
+  }, 10_000);
 
   it("개선 요청 작성 가이드는 유형에 맞게 바뀌고 입력 내용을 보존한다", async () => {
     const user = userEvent.setup();
     renderApp();
     await screen.findByRole("heading", { name: "오늘", level: 1 });
 
-    await user.click(screen.getByRole("button", { name: /개선 요청함/ }));
+    await user.click(screen.getByRole("button", { name: /개선 요청/ }));
     await user.click(screen.getByRole("button", { name: "새 요청" }));
 
     const title = screen.getByLabelText("개선 요청 제목");
@@ -244,7 +362,7 @@ describe("TM 데스크톱 UI", () => {
     const user = userEvent.setup();
     const { api } = renderApp();
     await screen.findByRole("heading", { name: "오늘", level: 1 });
-    await user.click(screen.getByRole("button", { name: /개선 요청함/ }));
+    await user.click(screen.getByRole("button", { name: /개선 요청/ }));
 
     const failedHeading = await screen.findByRole("heading", {
       name: "히스토리 필터 응답 속도 개선",
@@ -293,12 +411,78 @@ describe("TM 데스크톱 UI", () => {
     const user = userEvent.setup();
     renderApp();
     await screen.findByRole("heading", { name: "오늘", level: 1 });
-    await user.click(screen.getByRole("button", { name: /개선 요청함/ }));
+    await user.click(screen.getByRole("button", { name: /개선 요청/ }));
     await user.click(screen.getByRole("button", { name: /완료 · 취소/ }));
 
     expect(await screen.findByText("백업 시각과 트리거를 한눈에 확인하도록 배지를 정리했습니다.")).toBeInTheDocument();
     expect(screen.getByText("현재 작업 방식에는 필요하지 않아 요청을 종료했습니다.")).toBeInTheDocument();
     expect(screen.getAllByText("읽기 전용")).toHaveLength(2);
+  });
+
+  it("조회 전용 주식 차트를 안전한 iframe으로 열고 관심 종목을 동기화한다", async () => {
+    Object.defineProperty(window.navigator, "onLine", { configurable: true, value: true });
+    const user = userEvent.setup();
+    const { api } = renderApp();
+    await screen.findByRole("heading", { name: "오늘", level: 1 });
+    expect(await screen.findByRole("heading", { name: "S&P 500 일일 등락" })).toBeInTheDocument();
+    expect(await screen.findByText("NVIDIA Corporation")).toBeInTheDocument();
+
+    await user.click(screen.getAllByRole("button", { name: "주식" })[0]);
+    expect(await screen.findByRole("heading", { name: "주식 차트", level: 1 })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "S&P 500 일일 등락 스캐너" })).toBeInTheDocument();
+
+    const frame = screen.getByTestId("tradingview-frame");
+    const sandbox = frame.getAttribute("sandbox") ?? "";
+    const source = frame.getAttribute("src") ?? "";
+    expect(sandbox).toBe(
+      "allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox",
+    );
+    expect(frame).toHaveAttribute("referrerpolicy", "no-referrer");
+    expect(source).toMatch(/^https:\/\/www\.tradingview-widget\.com\/embed-widget\/advanced-chart\/\?locale=kr#/);
+    const widgetSettings = JSON.parse(decodeURIComponent(new URL(source).hash.slice(1)));
+    expect(widgetSettings).toMatchObject({
+      symbol: "NASDAQ:AAPL",
+      support_host: "https://www.tradingview.com",
+      timezone: "Asia/Seoul",
+      save_image: false,
+      "page-uri": "__NHTTP__",
+    });
+    expect(source).not.toContain("data:text/html");
+    expect(source).not.toContain("__TAURI");
+
+    await user.selectOptions(screen.getByLabelText("방향"), "up");
+    const nvidia = await screen.findByRole("button", { name: /NVIDIA Corporation \+14\.30%, 차트에서 보기/ });
+    await user.click(nvidia);
+    expect(screen.getByRole("heading", { name: "NASDAQ:NVDA", level: 2 })).toBeInTheDocument();
+
+    await user.type(screen.getByRole("combobox", { name: "회사명 또는 종목코드" }), "삼성전자");
+    await user.click(await screen.findByRole("option", { name: /삼성전자.*KRX:005930/ }));
+    await user.click(screen.getByRole("button", { name: /관심 종목 저장/ }));
+
+    expect(await screen.findByText("삼성전자 관심 종목을 저장했습니다.")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "KRX:005930", level: 2 })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "TradingView 외부 차트에서 확인" }))
+      .toHaveAttribute("href", "https://www.tradingview.com/symbols/KRX-005930/");
+    expect((await api.getStockWatchlist())[0]).toMatchObject({
+      symbol: "KRX:005930",
+      market: "KRX",
+      ticker: "005930",
+      displayName: "삼성전자",
+    });
+
+    await user.click(screen.getByRole("button", { name: "삼성전자 관심 종목 삭제" }));
+    await waitFor(async () => expect(await api.getStockWatchlist()).toHaveLength(0));
+    expect(screen.getByRole("heading", { name: "NASDAQ:AAPL", level: 2 })).toBeInTheDocument();
+
+    try {
+      Object.defineProperty(window.navigator, "onLine", { configurable: true, value: false });
+      act(() => window.dispatchEvent(new Event("offline")));
+      expect(await screen.findByText("차트를 보려면 인터넷 연결이 필요합니다.")).toBeInTheDocument();
+      expect(screen.queryByTestId("tradingview-frame")).not.toBeInTheDocument();
+    } finally {
+      Object.defineProperty(window.navigator, "onLine", { configurable: true, value: true });
+      act(() => window.dispatchEvent(new Event("online")));
+    }
   });
 
   it("페이지 이동 시 본문 포커스가 화면을 강제로 스크롤하지 않는다", async () => {
@@ -307,7 +491,7 @@ describe("TM 데스크톱 UI", () => {
     renderApp();
     await screen.findByRole("heading", { name: "오늘", level: 1 });
 
-    await user.click(screen.getByRole("button", { name: /개선 요청함/ }));
+    await user.click(screen.getByRole("button", { name: /개선 요청/ }));
 
     expect(focus).toHaveBeenLastCalledWith({ preventScroll: true });
     focus.mockRestore();

@@ -1,0 +1,31 @@
+{
+  "name": "TM Assistant",
+  "short_name": "TM",
+  "description": "TM 개인 AI 비서 모바일 클라이언트",
+  "lang": "ko-KR",
+  "start_url": "/mobile/",
+  "scope": "/mobile/",
+  "display": "standalone",
+  "background_color": "#0d1017",
+  "theme_color": "#151923",
+  "icons": [
+    {
+      "src": "/mobile/icon-256.png",
+      "sizes": "256x256",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/mobile/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/mobile/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

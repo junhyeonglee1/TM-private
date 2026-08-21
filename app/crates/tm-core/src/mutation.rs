@@ -5,20 +5,26 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    CreateNoteInput, CreateTaskInput, Error, Note, NotePatch, Result, Task, TaskPatch, TaskStatus,
-    TmCore,
+    AssistantMemory, CreateMemoryInput, CreateNoteInput, CreateProjectInput, CreateTaskInput,
+    Error, MemoryPatch, Note, NotePatch, Result, Task, TaskPatch, TaskStatus, TmCore,
     core::{
-        create_note_in_transaction, create_task_in_transaction, query_checklist_item, query_note,
-        query_project, query_task, update_checklist_item_in_transaction,
-        update_note_in_transaction, update_task_in_transaction,
+        create_note_in_transaction, create_project_in_transaction, create_task_in_transaction,
+        normalize_task_project_id, query_checklist_item, query_note, query_task,
+        update_checklist_item_in_transaction, update_note_in_transaction,
+        update_task_in_transaction,
     },
     database::{new_id, now_utc},
     error::invalid,
+    memory::{
+        create_memory_in_transaction, delete_memory_in_transaction, query_memory,
+        update_memory_in_transaction,
+    },
 };
 
 const MAX_TITLE_CHARS: usize = 500;
 const MAX_TASK_DESCRIPTION_CHARS: usize = 20_000;
 const MAX_NOTE_BODY_CHARS: usize = 50_000;
+const INITIAL_PROJECT_VERSION: u64 = 1;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -40,12 +46,14 @@ impl MutationExpectedVersion {
 #[serde(rename_all = "snake_case")]
 pub enum MutationApprovalPolicy {
     ExplicitUserConfirmation,
+    AiActionApproval,
 }
 
 impl MutationApprovalPolicy {
     const fn as_str(self) -> &'static str {
         match self {
             Self::ExplicitUserConfirmation => "explicit_user_confirmation",
+            Self::AiActionApproval => "ai_action_approval",
         }
     }
 }
@@ -53,30 +61,40 @@ impl MutationApprovalPolicy {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum MutationOperation {
+    ProjectCreate,
     TaskCreate,
     TaskUpdate,
     NoteCreate,
     NoteUpdate,
     ChecklistSetDone,
+    MemoryCreate,
+    MemoryUpdate,
+    MemoryDelete,
 }
 
 impl MutationOperation {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::ProjectCreate => "project.create",
             Self::TaskCreate => "task.create",
             Self::TaskUpdate => "task.update",
             Self::NoteCreate => "note.create",
             Self::NoteUpdate => "note.update",
             Self::ChecklistSetDone => "checklist.set_done",
+            Self::MemoryCreate => "memory.create",
+            Self::MemoryUpdate => "memory.update",
+            Self::MemoryDelete => "memory.delete",
         }
     }
 
     const fn resource_type(self) -> &'static str {
         match self {
+            Self::ProjectCreate => "project",
             Self::TaskCreate | Self::TaskUpdate => "task",
             Self::NoteCreate | Self::NoteUpdate => "note",
             Self::ChecklistSetDone => "checklist",
+            Self::MemoryCreate | Self::MemoryUpdate | Self::MemoryDelete => "memory",
         }
     }
 }
@@ -84,22 +102,52 @@ impl MutationOperation {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "operation", rename_all = "snake_case")]
 pub enum MutationCommand {
-    TaskCreate { input: CreateTaskInput },
-    TaskUpdate { task_id: String, patch: TaskPatch },
-    NoteCreate { input: CreateNoteInput },
-    NoteUpdate { note_id: String, patch: NotePatch },
-    ChecklistSetDone { item_id: String, is_done: bool },
+    ProjectCreate {
+        input: CreateProjectInput,
+    },
+    TaskCreate {
+        input: CreateTaskInput,
+    },
+    TaskUpdate {
+        task_id: String,
+        patch: TaskPatch,
+    },
+    NoteCreate {
+        input: CreateNoteInput,
+    },
+    NoteUpdate {
+        note_id: String,
+        patch: NotePatch,
+    },
+    ChecklistSetDone {
+        item_id: String,
+        is_done: bool,
+    },
+    MemoryCreate {
+        input: CreateMemoryInput,
+    },
+    MemoryUpdate {
+        memory_id: String,
+        patch: MemoryPatch,
+    },
+    MemoryDelete {
+        memory_id: String,
+    },
 }
 
 impl MutationCommand {
     #[must_use]
     pub const fn operation(&self) -> MutationOperation {
         match self {
+            Self::ProjectCreate { .. } => MutationOperation::ProjectCreate,
             Self::TaskCreate { .. } => MutationOperation::TaskCreate,
             Self::TaskUpdate { .. } => MutationOperation::TaskUpdate,
             Self::NoteCreate { .. } => MutationOperation::NoteCreate,
             Self::NoteUpdate { .. } => MutationOperation::NoteUpdate,
             Self::ChecklistSetDone { .. } => MutationOperation::ChecklistSetDone,
+            Self::MemoryCreate { .. } => MutationOperation::MemoryCreate,
+            Self::MemoryUpdate { .. } => MutationOperation::MemoryUpdate,
+            Self::MemoryDelete { .. } => MutationOperation::MemoryDelete,
         }
     }
 }
@@ -178,8 +226,13 @@ impl TmCore {
                     return Ok(result);
                 }
 
-                let execution =
-                    execute_command(transaction, &request.command, request.expected_version)?;
+                let execution = execute_command(
+                    transaction,
+                    &request.command,
+                    request.expected_version,
+                    &request.actor,
+                    &request.request_id,
+                )?;
                 let result = MutationResult {
                     operation,
                     resource_type: operation.resource_type().to_owned(),
@@ -268,14 +321,21 @@ fn execute_command(
     transaction: &Transaction<'_>,
     command: &MutationCommand,
     expected_version: MutationExpectedVersion,
+    actor: &str,
+    request_id: &str,
 ) -> Result<MutationExecution> {
     match command {
+        MutationCommand::ProjectCreate { input } => {
+            require_absent(expected_version)?;
+            let project = create_project_in_transaction(transaction, input)?;
+            // Projects have no mutable version column; the create-only remote contract starts at 1.
+            completed_execution(None, &project, &project.id, INITIAL_PROJECT_VERSION)
+        }
         MutationCommand::TaskCreate { input } => {
             require_absent(expected_version)?;
             validate_task_create(input)?;
             if let Some(project_id) = input.project_id.as_deref() {
                 validate_id("projectId", project_id)?;
-                validate_project_target(transaction, project_id)?;
             }
             let task = create_task_in_transaction(transaction, input)?;
             completed_execution(None, &task, &task.id, task.version)
@@ -289,9 +349,14 @@ fn execute_command(
             validate_task_transition(current.status, patch.status)?;
             if let Some(project_id) = patch.project_id.as_deref() {
                 validate_id("projectId", project_id)?;
-                validate_project_target(transaction, project_id)?;
             }
-            if !task_patch_changes(&current, patch) {
+            let resolved_project_id = normalize_task_project_id(
+                transaction,
+                current.project_id.as_deref(),
+                patch.project_id.as_deref(),
+                patch.clear_project,
+            )?;
+            if !task_patch_changes(&current, patch, &resolved_project_id) {
                 return Err(invalid("task update must change at least one field"));
             }
             let before = serde_json::to_value(&current)?;
@@ -340,6 +405,35 @@ fn execute_command(
                 None,
             )?;
             completed_execution(Some(before), &item, &item.id, item.version)
+        }
+        MutationCommand::MemoryCreate { input } => {
+            require_absent(expected_version)?;
+            let memory = create_memory_in_transaction(transaction, input, actor, request_id)?;
+            completed_execution(None, &memory, &memory.id, memory.revision)
+        }
+        MutationCommand::MemoryUpdate { memory_id, patch } => {
+            validate_id("memoryId", memory_id)?;
+            let expected = require_exact(expected_version)?;
+            let current = query_memory(transaction, memory_id)?;
+            let before = serde_json::to_value(&current)?;
+            let memory = update_memory_in_transaction(
+                transaction,
+                memory_id,
+                expected,
+                patch,
+                actor,
+                request_id,
+            )?;
+            completed_execution(Some(before), &memory, &memory.id, memory.revision)
+        }
+        MutationCommand::MemoryDelete { memory_id } => {
+            validate_id("memoryId", memory_id)?;
+            let expected = require_exact(expected_version)?;
+            let current: AssistantMemory = query_memory(transaction, memory_id)?;
+            let before = serde_json::to_value(&current)?;
+            let memory =
+                delete_memory_in_transaction(transaction, memory_id, expected, actor, request_id)?;
+            completed_execution(Some(before), &memory, &memory.id, memory.revision)
         }
     }
 }
@@ -437,17 +531,7 @@ fn validate_id(field: &str, value: &str) -> Result<()> {
         .map_err(|_| invalid(format!("{field} must be a UUID")))
 }
 
-fn validate_project_target(transaction: &Transaction<'_>, project_id: &str) -> Result<()> {
-    let project = query_project(transaction, project_id)?;
-    if project.deleted_at.is_some() || project.archived_at.is_some() {
-        return Err(Error::Conflict(
-            "task project must be active before it can receive remote changes".to_owned(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_task_create(input: &CreateTaskInput) -> Result<()> {
+pub(crate) fn validate_task_create(input: &CreateTaskInput) -> Result<()> {
     validate_required_text("task title", &input.title, MAX_TITLE_CHARS)?;
     validate_optional_text(
         "task description",
@@ -523,7 +607,7 @@ fn validate_task_transition(current: TaskStatus, requested: Option<TaskStatus>) 
     Ok(())
 }
 
-fn task_patch_changes(current: &Task, patch: &TaskPatch) -> bool {
+fn task_patch_changes(current: &Task, patch: &TaskPatch, resolved_project_id: &str) -> bool {
     patch
         .title
         .as_ref()
@@ -536,11 +620,7 @@ fn task_patch_changes(current: &Task, patch: &TaskPatch) -> bool {
         || patch
             .priority
             .is_some_and(|value| value != current.priority)
-        || patch
-            .project_id
-            .as_ref()
-            .is_some_and(|value| Some(value) != current.project_id.as_ref())
-        || (patch.clear_project && current.project_id.is_some())
+        || current.project_id.as_deref() != Some(resolved_project_id)
         || patch
             .due_date
             .is_some_and(|value| Some(value) != current.due_date)
@@ -634,11 +714,15 @@ fn map_audit_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<MutationAuditEve
 
 fn parse_operation(index: usize, value: &str) -> rusqlite::Result<MutationOperation> {
     match value {
+        "project.create" => Ok(MutationOperation::ProjectCreate),
         "task.create" => Ok(MutationOperation::TaskCreate),
         "task.update" => Ok(MutationOperation::TaskUpdate),
         "note.create" => Ok(MutationOperation::NoteCreate),
         "note.update" => Ok(MutationOperation::NoteUpdate),
         "checklist.set_done" => Ok(MutationOperation::ChecklistSetDone),
+        "memory.create" => Ok(MutationOperation::MemoryCreate),
+        "memory.update" => Ok(MutationOperation::MemoryUpdate),
+        "memory.delete" => Ok(MutationOperation::MemoryDelete),
         _ => Err(rusqlite::Error::FromSqlConversionFailure(
             index,
             Type::Text,

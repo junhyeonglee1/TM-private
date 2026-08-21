@@ -1,16 +1,20 @@
 import { useEffect, useState } from "react";
+import type { ReactNode } from "react";
 
 import type {
   CreateTaskInput,
   DayEntryStatus,
   HistoryDay,
+  LatestStockScreen,
   Project,
   Task,
   TodaySnapshot,
 } from "../types";
+import type { TaskReportResult } from "../lib/api";
 import { EmptyState } from "./EmptyState";
 import { Icon } from "./Icon";
 import { TaskCard } from "./TaskCard";
+import { StockScreenCompactCard } from "./StockScreen";
 
 export function InboxPage() {
   return (
@@ -38,8 +42,19 @@ export function InboxPage() {
 interface TodayPageProps {
   today: string;
   view: TodaySnapshot;
+  tasks: Task[];
+  report: TaskReportResult | null;
+  reportLoading: boolean;
   onOpen: (task: Task) => void;
+  onComplete: (task: Task) => Promise<void>;
   onResolve: (entryId: string, status: Exclude<DayEntryStatus, "planned">) => void;
+  onGenerateReport: () => Promise<void>;
+  onRateReport: (helpful: boolean) => Promise<void>;
+  onOpenStocks: () => void;
+  stockScreen: LatestStockScreen | null;
+  stockScreenError: string | null;
+  stockScreenLoading: boolean;
+  expenseDueCards?: ReactNode;
 }
 
 const friendlyDate = (date: string): string =>
@@ -50,25 +65,16 @@ const friendlyDate = (date: string): string =>
     timeZone: "Asia/Seoul",
   }).format(new Date(`${date}T12:00:00+09:00`));
 
-export function TodayPage({ today, view, onOpen, onResolve }: TodayPageProps) {
-  const total = view.planned.length + view.inProgress.length + view.completed.length;
-  const progress = total ? Math.round((view.completed.length / total) * 100) : 0;
-  return (
-    <div className="page-stack">
-      <header className="page-header page-header--today">
-        <div>
-          <span className="eyebrow">{friendlyDate(today)}</span>
-          <h1>오늘</h1>
-          <p>자동 이월 없이, 오늘 집중할 일을 직접 선택합니다.</p>
-        </div>
-        <div className="today-progress" aria-label={`오늘 완료율 ${progress}%`}>
-          <div className="today-progress__ring" style={{ "--progress": `${progress * 3.6}deg` } as React.CSSProperties}>
-            <span>{progress}%</span>
-          </div>
-          <div><strong>{view.completed.length}</strong><span> / {total} 완료</span></div>
-        </div>
-      </header>
+interface TodayTaskSectionsProps {
+  view: TodaySnapshot;
+  onOpen: (task: Task) => void;
+  onComplete: (task: Task) => Promise<void>;
+  onResolve: (entryId: string, status: Exclude<DayEntryStatus, "planned">) => void;
+}
 
+function TodayTaskSections({ view, onOpen, onComplete, onResolve }: TodayTaskSectionsProps) {
+  return (
+    <>
       {view.yesterdayIncomplete.length > 0 && (
         <section className="panel panel--attention" aria-labelledby="yesterday-heading">
           <div className="panel__header">
@@ -113,13 +119,13 @@ export function TodayPage({ today, view, onOpen, onResolve }: TodayPageProps) {
             <span className="count-pill count-pill--accent">{view.inProgress.length}</span>
           </div>
           <div className="task-list">
-            {view.inProgress.map((task) => <TaskCard compact key={task.id} onOpen={onOpen} task={task} />)}
+            {view.inProgress.map((task) => <TaskCard compact key={task.id} onComplete={onComplete} onOpen={onOpen} task={task} />)}
             {view.inProgress.length === 0 && <EmptyState icon="play" title="진행 중인 Task가 없습니다" description="하나를 골라 집중 세션을 시작해 보세요." />}
           </div>
         </section>
       </div>
 
-      <section className="panel panel--completed" aria-labelledby="completed-heading">
+      <section className="panel panel--completed today-completed" aria-labelledby="completed-heading">
         <div className="panel__header panel__header--compact">
           <div>
             <span className="section-kicker section-kicker--success"><Icon name="check" size={14} /> 성과</span>
@@ -132,6 +138,151 @@ export function TodayPage({ today, view, onOpen, onResolve }: TodayPageProps) {
           {view.completed.length === 0 && <EmptyState icon="check" title="아직 완료 기록이 없습니다" description="작은 일부터 하나씩 마쳐 보세요." />}
         </div>
       </section>
+    </>
+  );
+}
+
+export function TodayPage({
+  today,
+  view,
+  tasks,
+  report,
+  reportLoading,
+  onOpen,
+  onComplete,
+  onResolve,
+  onGenerateReport,
+  onRateReport,
+  onOpenStocks,
+  stockScreen,
+  stockScreenError,
+  stockScreenLoading,
+  expenseDueCards,
+}: TodayPageProps) {
+  const total = view.planned.length + view.inProgress.length + view.completed.length;
+  const progress = total ? Math.round((view.completed.length / total) * 100) : 0;
+  return (
+    <div className="page-stack page-stack--today">
+      <header className="page-header page-header--today">
+        <div>
+          <span className="eyebrow">{friendlyDate(today)}</span>
+          <h1>오늘</h1>
+          <p>자동 이월 없이, 오늘 집중할 일을 직접 선택합니다.</p>
+        </div>
+        <div className="today-progress" aria-label={`오늘 완료율 ${progress}%`}>
+          <div className="today-progress__ring" style={{ "--progress": `${progress * 3.6}deg` } as React.CSSProperties}>
+            <span>{progress}%</span>
+          </div>
+          <div><strong>{view.completed.length}</strong><span> / {total} 완료</span></div>
+        </div>
+      </header>
+
+      <TodayTaskSections onComplete={onComplete} onOpen={onOpen} onResolve={onResolve} view={view} />
+
+      {expenseDueCards}
+
+      <section className="panel task-report" aria-labelledby="task-report-heading" aria-busy={reportLoading}>
+        <div className="panel__header task-report__header">
+          <div>
+            <span className="section-kicker section-kicker--accent"><Icon name="spark" size={14} /> AI 비서 · 읽기 전용</span>
+            <h2 id="task-report-heading">오늘의 우선순위·일정</h2>
+            <p>Task와 앞으로 7일의 일정·납부일만 선별해 오늘의 행동과 알림을 제안합니다.</p>
+          </div>
+          <button
+            className="primary-button"
+            disabled={reportLoading}
+            onClick={() => { void onGenerateReport(); }}
+            type="button"
+          >
+            {reportLoading ? "분석 중…" : report?.reportDate === today ? "다시 분석" : "AI 리포트 만들기"}
+          </button>
+        </div>
+
+        {!report && !reportLoading && (
+          <div className="task-report__empty">
+            <strong>아직 생성한 리포트가 없습니다.</strong>
+            <span>수동 호출만 사용하며 하루 최대 4회, 1회 비용 상한은 $0.05입니다.</span>
+          </div>
+        )}
+
+        {report && (
+          <div className="task-report__body">
+            {report.reportDate !== today && <span className="task-report__stale">이전 리포트 · {report.reportDate}</span>}
+            <div className="task-report__summary">
+              <h3>{report.report.headline}</h3>
+              <p>{report.report.summary}</p>
+            </div>
+            {report.report.priorities.length > 0 && (
+              <ol className="task-report__priorities">
+                {report.report.priorities.map((priority) => {
+                  const task = tasks.find((item) => item.id === priority.taskId);
+                  return (
+                    <li key={priority.taskId}>
+                      <span className="task-report__rank">{priority.rank}</span>
+                      <div>
+                        <button disabled={!task} onClick={() => task && onOpen(task)} type="button">
+                          {task?.title ?? "현재 목록에서 찾을 수 없는 Task"}
+                        </button>
+                        <p>{priority.reason}</p>
+                        <strong>다음 행동 · {priority.nextAction}</strong>
+                        {priority.alert && <small>{priority.alert}</small>}
+                      </div>
+                    </li>
+                  );
+                })}
+              </ol>
+            )}
+            {report.report.scheduleHighlights.length > 0 && (
+              <section className="brief-schedule" aria-label="가까운 일정과 납부일">
+                <h3>가까운 일정</h3>
+                <ul>
+                  {report.report.scheduleHighlights.map((schedule) => (
+                    <li key={schedule.occurrenceKey}>
+                      <span className={`brief-schedule__kind brief-schedule__kind--${schedule.kind}`}>
+                        {schedule.kind === "payment" ? "납부" : "일정"}
+                      </span>
+                      <div>
+                        <strong>{schedule.title}</strong>
+                        <small>{schedule.date}{schedule.eventTime ? ` · ${schedule.eventTime.slice(0, 5)}` : ""}</small>
+                        <p>{schedule.reason}</p>
+                        {schedule.alert && <em>{schedule.alert}</em>}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )}
+            {report.report.alerts.length > 0 && (
+              <ul className="task-report__alerts">
+                {report.report.alerts.map((alert) => <li key={alert}>{alert}</li>)}
+              </ul>
+            )}
+            <footer className="task-report__footer">
+              <span>
+                후보 {report.candidateCount}개 · {report.usage ? `${report.usage.totalTokens.toLocaleString("ko-KR")} tokens` : "AI 호출 없음"}
+                {` · $${(report.estimatedCostMicrousd / 1_000_000).toFixed(4)}`}
+                {report.latencyMs !== null ? ` · ${(report.latencyMs / 1000).toFixed(1)}초` : ""}
+              </span>
+              <div aria-label="리포트 품질 평가">
+                {report.helpful === null ? (
+                  <>
+                    <button onClick={() => { void onRateReport(true); }} type="button">도움 됨</button>
+                    <button onClick={() => { void onRateReport(false); }} type="button">도움 안 됨</button>
+                  </>
+                ) : <strong>{report.helpful ? "도움 됨으로 평가함" : "도움 안 됨으로 평가함"}</strong>}
+              </div>
+            </footer>
+          </div>
+        )}
+      </section>
+
+      <StockScreenCompactCard
+        error={stockScreenError}
+        loading={stockScreenLoading}
+        onOpen={onOpenStocks}
+        screen={stockScreen}
+      />
+
     </div>
   );
 }
@@ -140,6 +291,7 @@ interface ProjectsPageProps {
   projects: Project[];
   tasks: Task[];
   onOpen: (task: Task) => void;
+  onComplete: (task: Task) => Promise<void>;
   onPlan: (task: Task) => void;
   onCreateProject: (name: string) => Promise<string>;
   onCreateTask: (input: CreateTaskInput) => Promise<void>;
@@ -235,6 +387,7 @@ export function ProjectsPage({
   projects,
   tasks,
   onOpen,
+  onComplete,
   onPlan,
   onCreateProject,
   onCreateTask,
@@ -354,7 +507,15 @@ export function ProjectsPage({
                     </header>
                     {groupedTasks.length > 0 && (
                       <div className={`task-list ${group.status === "done" ? "task-list--completed" : ""}`}>
-                        {groupedTasks.map((task) => <TaskCard key={task.id} onOpen={onOpen} onPlan={onPlan} task={task} />)}
+                        {groupedTasks.map((task) => (
+                          <TaskCard
+                            key={task.id}
+                            onComplete={taskFilter === "open" ? onComplete : undefined}
+                            onOpen={onOpen}
+                            onPlan={taskFilter === "open" ? onPlan : undefined}
+                            task={task}
+                          />
+                        ))}
                       </div>
                     )}
                   </section>

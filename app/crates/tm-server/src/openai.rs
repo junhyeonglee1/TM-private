@@ -1,12 +1,18 @@
 use std::{env, fmt, net::IpAddr, sync::Arc, time::Duration};
 
 use reqwest::StatusCode;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde_json::Value;
+use tm_core::{AiBudgetPolicy, AiBudgetStatus};
 use url::Url;
 
 pub const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1/";
-pub const DEFAULT_OPENAI_MODEL: &str = "gpt-5.6";
-pub const DEFAULT_OPENAI_TIMEOUT_SECS: u64 = 30;
+pub const DEFAULT_OPENAI_MODEL: &str = "gpt-5.6-terra";
+pub const DEFAULT_OPENAI_TIMEOUT_SECS: u64 = 60;
+pub const DEFAULT_OPENAI_MONTHLY_WARNING_MICROUSD: u64 = 10_000_000;
+pub const DEFAULT_OPENAI_MONTHLY_HARD_LIMIT_MICROUSD: u64 = 20_000_000;
+pub const PROBE_MAXIMUM_COST_MICROUSD: u64 = 10_000;
+pub(crate) const MAX_OPENAI_RESPONSE_BODY_BYTES: usize = 256 * 1024;
 
 const PROBE_EXPECTED_TEXT: &str = "TM_OPENAI_OK";
 const PROBE_INSTRUCTIONS: &str =
@@ -19,6 +25,7 @@ pub struct OpenAiConfig {
     model: String,
     base_url: Url,
     timeout: Duration,
+    budget_policy: AiBudgetPolicy,
 }
 
 impl fmt::Debug for OpenAiConfig {
@@ -29,6 +36,7 @@ impl fmt::Debug for OpenAiConfig {
             .field("model", &self.model)
             .field("base_url", &self.base_url.as_str())
             .field("timeout", &self.timeout)
+            .field("budget_policy", &self.budget_policy)
             .finish()
     }
 }
@@ -41,6 +49,10 @@ impl Default for OpenAiConfig {
             base_url: Url::parse(DEFAULT_OPENAI_BASE_URL)
                 .expect("the built-in OpenAI base URL must be valid"),
             timeout: Duration::from_secs(DEFAULT_OPENAI_TIMEOUT_SECS),
+            budget_policy: AiBudgetPolicy {
+                warning_limit_microusd: DEFAULT_OPENAI_MONTHLY_WARNING_MICROUSD,
+                hard_limit_microusd: DEFAULT_OPENAI_MONTHLY_HARD_LIMIT_MICROUSD,
+            },
         }
     }
 }
@@ -71,11 +83,33 @@ impl OpenAiConfig {
             return Err("TM_OPENAI_TIMEOUT_SECS must be between 1 and 120".to_owned());
         }
 
+        let warning_limit_microusd = optional_env("TM_OPENAI_MONTHLY_WARNING_USD")?
+            .map(|value| parse_usd_microusd("TM_OPENAI_MONTHLY_WARNING_USD", &value))
+            .transpose()?
+            .unwrap_or(DEFAULT_OPENAI_MONTHLY_WARNING_MICROUSD);
+        let hard_limit_microusd = optional_env("TM_OPENAI_MONTHLY_HARD_LIMIT_USD")?
+            .map(|value| parse_usd_microusd("TM_OPENAI_MONTHLY_HARD_LIMIT_USD", &value))
+            .transpose()?
+            .unwrap_or(DEFAULT_OPENAI_MONTHLY_HARD_LIMIT_MICROUSD);
+        if warning_limit_microusd == 0
+            || hard_limit_microusd == 0
+            || warning_limit_microusd > hard_limit_microusd
+        {
+            return Err(
+                "TM OpenAI monthly warning must be positive and no greater than the hard limit"
+                    .to_owned(),
+            );
+        }
+
         Ok(Self {
             api_key,
             model,
             base_url,
             timeout: Duration::from_secs(timeout_secs),
+            budget_policy: AiBudgetPolicy {
+                warning_limit_microusd,
+                hard_limit_microusd,
+            },
         })
     }
 
@@ -97,6 +131,10 @@ impl OpenAiConfig {
             model: model.to_owned(),
             base_url: validate_base_url(base_url)?,
             timeout,
+            budget_policy: AiBudgetPolicy {
+                warning_limit_microusd: DEFAULT_OPENAI_MONTHLY_WARNING_MICROUSD,
+                hard_limit_microusd: DEFAULT_OPENAI_MONTHLY_HARD_LIMIT_MICROUSD,
+            },
         })
     }
 
@@ -115,11 +153,46 @@ impl OpenAiConfig {
         self.base_url.as_str()
     }
 
+    #[must_use]
+    pub const fn budget_policy(&self) -> AiBudgetPolicy {
+        self.budget_policy
+    }
+
+    #[must_use]
+    pub fn estimate_cost_microusd(&self, usage: &ProbeUsage) -> Option<u64> {
+        estimate_model_cost_microusd(&self.model, usage)
+    }
+
     fn responses_url(&self) -> Result<Url, OpenAiError> {
         self.base_url
             .join("responses")
             .map_err(|_| OpenAiError::InvalidConfiguration)
     }
+}
+
+/// Returns the standard-processing token cost for a model in millionths of a US
+/// dollar. Unknown models fail closed so a newly named model cannot bypass TM's
+/// persisted budget guard.
+#[must_use]
+pub fn estimate_model_cost_microusd(model: &str, usage: &ProbeUsage) -> Option<u64> {
+    let (uncached_rate, cached_rate, output_rate) = if model.starts_with("gpt-5.4-nano") {
+        (200_000_u128, 20_000_u128, 1_250_000_u128)
+    } else if model.starts_with("gpt-5.6-terra") {
+        (2_500_000_u128, 250_000_u128, 15_000_000_u128)
+    } else if model.starts_with("gpt-5.6-luna") {
+        (1_000_000_u128, 100_000_u128, 6_000_000_u128)
+    } else if model.starts_with("gpt-5.6") {
+        (5_000_000_u128, 500_000_u128, 30_000_000_u128)
+    } else {
+        return None;
+    };
+    let uncached_input = usage.input_tokens.saturating_sub(usage.cached_input_tokens);
+    let numerator = u128::from(uncached_input)
+        .saturating_mul(uncached_rate)
+        .saturating_add(u128::from(usage.cached_input_tokens).saturating_mul(cached_rate))
+        .saturating_add(u128::from(usage.output_tokens).saturating_mul(output_rate));
+    let rounded_up = numerator.saturating_add(999_999) / 1_000_000;
+    u64::try_from(rounded_up).ok()
 }
 
 #[derive(Clone)]
@@ -184,10 +257,9 @@ impl OpenAiClient {
             return Err(classify_upstream_error(status, upstream_request_id));
         }
 
-        let response = response
-            .json::<ProbeResponse>()
-            .await
-            .map_err(|_| OpenAiError::InvalidResponse)?;
+        let response =
+            read_bounded_json_response::<ProbeResponse>(response, upstream_request_id.clone())
+                .await?;
         let output_text = response
             .output
             .iter()
@@ -197,7 +269,9 @@ impl OpenAiClient {
             .collect::<String>();
 
         if output_text.trim().is_empty() {
-            return Err(OpenAiError::InvalidResponse);
+            return Err(OpenAiError::InvalidResponse {
+                upstream_request_id,
+            });
         }
 
         Ok(OpenAiProbeResult {
@@ -211,8 +285,114 @@ impl OpenAiClient {
             matched_expected_text: response_matches_probe(&response.output),
             usage: response.usage.map(Into::into),
             stored: false,
+            estimated_cost_microusd: None,
+            budget: None,
         })
     }
+
+    pub(crate) async fn create_response(
+        &self,
+        request: &Value,
+    ) -> Result<OpenAiResponseCall, OpenAiError> {
+        validate_non_stored_request(request)?;
+        let api_key = self
+            .config
+            .api_key
+            .as_deref()
+            .ok_or(OpenAiError::NotConfigured)?;
+        let response = self
+            .http
+            .post(self.config.responses_url()?)
+            .bearer_auth(api_key)
+            .json(request)
+            .send()
+            .await
+            .map_err(|_| OpenAiError::Transport)?;
+
+        let status = response.status();
+        let upstream_request_id = response
+            .headers()
+            .get("x-request-id")
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned);
+        if !status.is_success() {
+            return Err(classify_upstream_error(status, upstream_request_id));
+        }
+
+        let response =
+            read_bounded_json_response::<OpenAiResponse>(response, upstream_request_id.clone())
+                .await?;
+        Ok(OpenAiResponseCall {
+            response,
+            upstream_request_id,
+        })
+    }
+}
+
+fn validate_non_stored_request(request: &Value) -> Result<(), OpenAiError> {
+    if request.get("store").and_then(Value::as_bool) == Some(false) {
+        return Ok(());
+    }
+    Err(OpenAiError::InvalidConfiguration)
+}
+
+async fn read_bounded_json_response<T: DeserializeOwned>(
+    mut response: reqwest::Response,
+    upstream_request_id: Option<String>,
+) -> Result<T, OpenAiError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_OPENAI_RESPONSE_BODY_BYTES as u64)
+    {
+        return Err(OpenAiError::InvalidResponse {
+            upstream_request_id,
+        });
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| OpenAiError::InvalidResponse {
+            upstream_request_id: upstream_request_id.clone(),
+        })?
+    {
+        append_bounded_response_chunk(&mut body, &chunk).map_err(|()| {
+            OpenAiError::InvalidResponse {
+                upstream_request_id: upstream_request_id.clone(),
+            }
+        })?;
+    }
+    serde_json::from_slice(&body).map_err(|_| OpenAiError::InvalidResponse {
+        upstream_request_id,
+    })
+}
+
+fn append_bounded_response_chunk(body: &mut Vec<u8>, chunk: &[u8]) -> Result<(), ()> {
+    if body
+        .len()
+        .checked_add(chunk.len())
+        .is_none_or(|length| length > MAX_OPENAI_RESPONSE_BODY_BYTES)
+    {
+        return Err(());
+    }
+    body.extend_from_slice(chunk);
+    Ok(())
+}
+
+#[derive(Debug)]
+pub(crate) struct OpenAiResponseCall {
+    pub response: OpenAiResponse,
+    pub upstream_request_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct OpenAiResponse {
+    pub id: String,
+    pub status: String,
+    pub model: String,
+    #[serde(default)]
+    pub output: Vec<Value>,
+    pub usage: Option<UpstreamUsage>,
 }
 
 #[derive(Debug)]
@@ -224,7 +404,31 @@ pub enum OpenAiError {
     RateLimited { upstream_request_id: Option<String> },
     RequestRejected { upstream_request_id: Option<String> },
     UpstreamUnavailable { upstream_request_id: Option<String> },
-    InvalidResponse,
+    InvalidResponse { upstream_request_id: Option<String> },
+}
+
+impl OpenAiError {
+    #[must_use]
+    pub fn upstream_request_id(&self) -> Option<&str> {
+        match self {
+            Self::Authentication {
+                upstream_request_id,
+            }
+            | Self::RateLimited {
+                upstream_request_id,
+            }
+            | Self::RequestRejected {
+                upstream_request_id,
+            }
+            | Self::UpstreamUnavailable {
+                upstream_request_id,
+            }
+            | Self::InvalidResponse {
+                upstream_request_id,
+            } => upstream_request_id.as_deref(),
+            Self::NotConfigured | Self::InvalidConfiguration | Self::Transport => None,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -240,12 +444,15 @@ pub struct OpenAiProbeResult {
     pub matched_expected_text: bool,
     pub usage: Option<ProbeUsage>,
     pub stored: bool,
+    pub estimated_cost_microusd: Option<u64>,
+    pub budget: Option<AiBudgetStatus>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProbeUsage {
     pub input_tokens: u64,
+    pub cached_input_tokens: u64,
     pub output_tokens: u64,
     pub total_tokens: u64,
 }
@@ -288,21 +495,73 @@ struct ProbeOutputContent {
     text: Option<String>,
 }
 
-#[derive(Deserialize)]
-struct UpstreamUsage {
-    input_tokens: u64,
-    output_tokens: u64,
-    total_tokens: u64,
+#[derive(Debug, Deserialize)]
+pub(crate) struct UpstreamUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    #[serde(default)]
+    pub input_tokens_details: Option<InputTokenDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct InputTokenDetails {
+    #[serde(default)]
+    pub cached_tokens: u64,
 }
 
 impl From<UpstreamUsage> for ProbeUsage {
     fn from(value: UpstreamUsage) -> Self {
         Self {
             input_tokens: value.input_tokens,
+            cached_input_tokens: value
+                .input_tokens_details
+                .map_or(0, |details| details.cached_tokens),
             output_tokens: value.output_tokens,
             total_tokens: value.total_tokens,
         }
     }
+}
+
+impl ProbeUsage {
+    pub(crate) fn saturating_add(self, other: Self) -> Self {
+        Self {
+            input_tokens: self.input_tokens.saturating_add(other.input_tokens),
+            cached_input_tokens: self
+                .cached_input_tokens
+                .saturating_add(other.cached_input_tokens),
+            output_tokens: self.output_tokens.saturating_add(other.output_tokens),
+            total_tokens: self.total_tokens.saturating_add(other.total_tokens),
+        }
+    }
+}
+
+fn parse_usd_microusd(name: &str, value: &str) -> Result<u64, String> {
+    let value = value.trim();
+    let (whole, fractional) = value.split_once('.').map_or((value, ""), |parts| parts);
+    if whole.is_empty()
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || !fractional.bytes().all(|byte| byte.is_ascii_digit())
+        || fractional.len() > 6
+    {
+        return Err(format!(
+            "{name} must be a positive USD decimal with at most 6 digits after the decimal point"
+        ));
+    }
+    let whole = whole
+        .parse::<u64>()
+        .map_err(|error| format!("{name} is invalid: {error}"))?;
+    let fractional = if fractional.is_empty() {
+        0
+    } else {
+        format!("{fractional:0<6}")
+            .parse::<u64>()
+            .map_err(|error| format!("{name} is invalid: {error}"))?
+    };
+    whole
+        .checked_mul(1_000_000)
+        .and_then(|value| value.checked_add(fractional))
+        .ok_or_else(|| format!("{name} is too large"))
 }
 
 fn optional_env(name: &str) -> Result<Option<String>, String> {
@@ -413,4 +672,57 @@ fn response_matches_probe(output: &[ProbeOutputItem]) -> bool {
         .collect::<String>()
         .trim()
         == PROBE_EXPECTED_TEXT
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{
+        MAX_OPENAI_RESPONSE_BODY_BYTES, ProbeUsage, append_bounded_response_chunk,
+        estimate_model_cost_microusd, validate_non_stored_request,
+    };
+
+    #[test]
+    fn response_client_requires_explicit_non_storage() {
+        assert!(validate_non_stored_request(&json!({"store": false})).is_ok());
+        for payload in [json!({}), json!({"store": true}), json!({"store": "false"})] {
+            assert!(validate_non_stored_request(&payload).is_err());
+        }
+    }
+
+    #[test]
+    fn response_client_rejects_a_body_above_the_fixed_limit() {
+        let mut body = vec![0_u8; MAX_OPENAI_RESPONSE_BODY_BYTES - 1];
+        assert!(append_bounded_response_chunk(&mut body, &[1]).is_ok());
+        assert_eq!(body.len(), MAX_OPENAI_RESPONSE_BODY_BYTES);
+        assert!(append_bounded_response_chunk(&mut body, &[2]).is_err());
+        assert_eq!(body.len(), MAX_OPENAI_RESPONSE_BODY_BYTES);
+    }
+
+    #[test]
+    fn nano_stock_digest_estimate_uses_pinned_standard_rates() {
+        let cost = estimate_model_cost_microusd(
+            "gpt-5.4-nano-2026-03-17",
+            &ProbeUsage {
+                input_tokens: 10_000,
+                cached_input_tokens: 0,
+                output_tokens: 1_200,
+                total_tokens: 11_200,
+            },
+        );
+        assert_eq!(cost, Some(3_500));
+        assert_eq!(
+            estimate_model_cost_microusd(
+                "unknown-model",
+                &ProbeUsage {
+                    input_tokens: 1,
+                    cached_input_tokens: 0,
+                    output_tokens: 1,
+                    total_tokens: 2,
+                },
+            ),
+            None
+        );
+    }
 }

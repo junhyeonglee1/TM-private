@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#151923">
+    <meta name="description" content="TM 개인 AI 비서 모바일 클라이언트">
+    <link rel="manifest" href="/mobile/manifest.webmanifest">
+    <link rel="icon" href="/mobile/icon.svg" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="/mobile/icon-256.png">
+    <link rel="stylesheet" href="/mobile/styles.css">
+    <title>TM Assistant</title>
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/mobile/" aria-label="TM 홈"><span>TM</span><strong>Assistant</strong></a>
+      <div class="topbar-meta">
+        <div id="cost-status" class="cost-status hidden" aria-label="현재 비용 현황">
+          <span id="cost-api" class="cost-pill">API — / $20</span>
+          <span id="cost-cloud" class="cost-pill">Cloud — / $30</span>
+        </div>
+        <span id="network-state" class="status-pill">연결 확인 중</span>
+      </div>
+    </header>
+
+    <main>
+      <section id="loading-view" class="panel centered" aria-live="polite">
+        <div class="spinner"></div>
+        <h1>기기 상태를 확인하고 있어요</h1>
+      </section>
+
+      <section id="pairing-view" class="panel hidden" aria-labelledby="pairing-title">
+        <p class="eyebrow">안전한 기기 등록</p>
+        <h1 id="pairing-title">Windows TM과 연결하기</h1>
+        <p class="muted">모바일 브라우저마다 한 번만 등록합니다. 등록 후 90일 동안 유지되며 Windows TM에서 언제든 즉시 해제할 수 있습니다.</p>
+        <form id="pairing-form">
+          <label for="device-label">이 기기의 이름</label>
+          <input id="device-label" name="deviceLabel" maxlength="80" autocomplete="off" placeholder="예: 내 iPhone" required>
+          <button class="primary" type="submit">6자리 코드 만들기</button>
+        </form>
+        <div id="pairing-code-card" class="code-card hidden">
+          <span>Windows TM → 기기 관리에서 입력</span>
+          <strong id="pairing-code">000000</strong>
+          <small id="pairing-expiry"></small>
+          <button id="complete-pairing" class="primary" type="button">Windows에서 승인했어요</button>
+          <button id="cancel-pairing" class="text-button" type="button">새 코드로 다시 시작</button>
+        </div>
+        <p id="pairing-message" class="message" role="status"></p>
+      </section>
+
+      <section id="app-view" class="hidden">
+        <nav class="tabs" aria-label="모바일 메뉴">
+          <button data-tab="tasks" aria-current="page">할 일</button>
+          <button data-tab="calendar">캘린더</button>
+          <button data-tab="expenses">지출</button>
+          <button data-tab="mail">메일</button>
+          <button data-tab="assistant">AI 비서</button>
+          <button data-tab="stocks">주식</button>
+          <button data-tab="notes">메모</button>
+          <button data-tab="approvals">승인</button>
+          <button data-tab="device">기기</button>
+        </nav>
+
+        <section id="tab-assistant" class="tab-panel panel hidden">
+          <p class="eyebrow">OpenAI API · 명시적 전송만</p>
+          <h1>무엇을 도와드릴까요?</h1>
+          <section class="expense-due-brief" aria-labelledby="expense-due-brief-heading">
+            <div class="expense-due-brief-heading"><div><p class="eyebrow">무료 일정 계산 · 푸시 없음</p><h2 id="expense-due-brief-heading">정기지출 확인</h2></div><button id="expense-due-open" class="secondary" type="button">전체 보기</button></div>
+            <div id="expense-due-brief-content" class="expense-due-grid" aria-live="polite"><p class="empty">납부 일정을 불러오는 중입니다.</p></div>
+          </section>
+          <section class="task-report-card" aria-labelledby="mobile-task-report-heading">
+            <div class="task-report-heading">
+              <div><p class="eyebrow">읽기 전용 · 하루 최대 4회</p><h2 id="mobile-task-report-heading">오늘의 우선순위·일정</h2></div>
+              <button id="task-report-generate" class="secondary" type="button">AI 리포트 만들기</button>
+            </div>
+            <p class="muted task-report-description">Task와 앞으로 7일의 일정·납부일만 선별합니다. 1회 비용 상한은 $0.05입니다.</p>
+            <div id="task-report-result" class="task-report-result" aria-live="polite"><p class="empty">아직 생성한 리포트가 없습니다.</p></div>
+          </section>
+          <section id="stock-screen-brief" class="stock-screen-brief" aria-labelledby="stock-screen-brief-heading" aria-busy="true">
+            <div class="stock-screen-brief-heading">
+              <div><p class="eyebrow">조회 전용 · 매일 자동 계산</p><h2 id="stock-screen-brief-heading">S&amp;P 500 일일 등락</h2></div>
+              <button id="stock-screen-open" class="secondary" type="button">전체 보기</button>
+            </div>
+            <div id="stock-screen-brief-content" aria-live="polite"><p class="empty">최근 결과를 불러오는 중입니다.</p></div>
+          </section>
+          <div id="assistant-log" class="assistant-log" aria-live="polite">
+            <article class="assistant-message assistant-message--tm">질문을 전송할 때만 AI 사용료가 발생합니다. 답변과 TM 데이터는 이 브라우저의 오프라인 캐시에 저장하지 않습니다.</article>
+          </div>
+          <form id="assistant-form" class="composer">
+            <label class="sr-only" for="assistant-message">비서에게 보낼 내용</label>
+            <textarea id="assistant-message" maxlength="8192" rows="4" placeholder="예: 오늘 해야 할 일을 요약해줘" required></textarea>
+            <button class="primary" type="submit">AI 비서에게 전송</button>
+          </form>
+        </section>
+
+        <section id="tab-calendar" class="tab-panel panel hidden">
+          <div class="section-heading calendar-heading">
+            <div><p class="eyebrow">개인 일정 · 서울 시간</p><h1>캘린더</h1></div>
+            <button id="calendar-add" class="secondary" type="button">일정 추가</button>
+          </div>
+          <div class="calendar-toolbar" aria-label="월 이동">
+            <button id="calendar-prev" class="secondary calendar-nav" aria-label="이전 달" type="button">‹</button>
+            <strong id="calendar-month-label"></strong>
+            <button id="calendar-next" class="secondary calendar-nav" aria-label="다음 달" type="button">›</button>
+            <button id="calendar-today" class="secondary calendar-today" type="button">오늘</button>
+          </div>
+          <div class="calendar-weekdays" aria-hidden="true"><span>월</span><span>화</span><span>수</span><span>목</span><span>금</span><span>토</span><span>일</span></div>
+          <div id="calendar-grid" class="calendar-grid" aria-label="월간 캘린더"></div>
+          <section class="calendar-agenda" aria-labelledby="calendar-selected-label">
+            <div class="calendar-subheading"><h2 id="calendar-selected-label"></h2><button id="calendar-add-selected" class="secondary" type="button">이 날짜에 추가</button></div>
+            <div id="calendar-agenda-list" class="calendar-agenda-list"></div>
+          </section>
+          <form id="calendar-form" class="calendar-form hidden">
+            <div class="calendar-subheading"><h2 id="calendar-form-title">일정 추가</h2><button id="calendar-form-close" class="text-button calendar-close" type="button">닫기</button></div>
+            <label for="calendar-title">제목</label>
+            <input id="calendar-title" maxlength="200" required>
+            <label for="calendar-kind">종류</label>
+            <select id="calendar-kind"><option value="personal">개인 일정</option><option value="payment">납부일</option></select>
+            <label for="calendar-start-date">날짜·시작일</label>
+            <input id="calendar-start-date" type="date" required>
+            <label for="calendar-time">시간 (선택)</label>
+            <input id="calendar-time" type="time">
+            <label for="calendar-recurrence">반복</label>
+            <select id="calendar-recurrence"><option value="none">반복 없음</option><option value="monthly_day">매월 특정일</option><option value="monthly_first_day">매월 초일</option><option value="monthly_last_day">매월 말일</option></select>
+            <div id="calendar-day-field" class="hidden">
+              <label for="calendar-day-of-month">매월 날짜</label>
+              <input id="calendar-day-of-month" type="number" min="1" max="31">
+              <small>31일이 없는 달에는 건너뜁니다. 매월 실제 마지막 날은 ‘말일’을 선택하세요.</small>
+            </div>
+            <div id="calendar-end-field" class="hidden">
+              <label for="calendar-ends-on">반복 종료일 (선택)</label>
+              <input id="calendar-ends-on" type="date">
+            </div>
+            <label for="calendar-description">메모 (선택)</label>
+            <textarea id="calendar-description" maxlength="4000" rows="3"></textarea>
+            <div class="calendar-form-actions">
+              <button id="calendar-delete" class="danger hidden" type="button">일정 삭제</button>
+              <button id="calendar-save" class="primary" type="submit">일정 추가</button>
+            </div>
+          </form>
+          <section class="calendar-recurring" aria-labelledby="calendar-recurring-title">
+            <h2 id="calendar-recurring-title">반복 일정</h2>
+            <div id="calendar-recurring-list" class="card-list"></div>
+          </section>
+        </section>
+
+        <section id="tab-mail" class="tab-panel panel hidden">
+          <div class="section-heading">
+            <div><p class="eyebrow">읽기 전용 · 원문은 웹메일</p><h1>중요 메일</h1></div>
+            <button id="mail-refresh" class="secondary" type="button">새로고침</button>
+          </div>
+          <p class="muted">계정 연결과 해제는 Windows 관리자 앱에서만 할 수 있습니다.</p>
+          <div id="mail-summary" class="mail-mobile-summary" aria-live="polite"><p class="empty">메일 요약을 불러오는 중입니다.</p></div>
+          <nav class="expense-subtabs" aria-label="메일 상세 메뉴">
+            <button data-mail-view="important" aria-current="page" type="button">중요 메일</button>
+            <button data-mail-view="review" type="button">확인 필요</button>
+            <button data-mail-view="reports" type="button">요약</button>
+            <button data-mail-view="status" type="button">연동 상태</button>
+          </nav>
+          <section id="mail-view-important" class="mail-view"><div id="mail-important-list" class="card-list"></div></section>
+          <section id="mail-view-review" class="mail-view hidden"><div id="mail-review-list" class="card-list"></div></section>
+          <section id="mail-view-reports" class="mail-view hidden"><div id="mail-report-list" class="card-list"></div></section>
+          <section id="mail-view-status" class="mail-view hidden"><div id="mail-account-list" class="card-list"></div></section>
+        </section>
+
+        <section id="tab-expenses" class="tab-panel panel hidden">
+          <div class="section-heading expense-heading">
+            <div><p class="eyebrow">정규화 거래 · 원본 파일 없음</p><h1>지출</h1></div>
+            <button id="expense-refresh" class="secondary" type="button">새로고침</button>
+          </div>
+          <p class="muted">원화와 외화는 환산하지 않습니다. 파일 가져오기는 Windows TM에서만 할 수 있습니다.</p>
+          <div class="expense-month-toolbar" aria-label="지출 조회 월">
+            <button id="expense-prev" class="secondary" aria-label="이전 달" type="button">‹</button>
+            <strong id="expense-month-label"></strong>
+            <button id="expense-next" class="secondary" aria-label="다음 달" type="button">›</button>
+          </div>
+          <section id="expense-summary" class="expense-summary" aria-labelledby="expense-summary-heading" aria-live="polite">
+            <h2 id="expense-summary-heading">월간 요약</h2>
+            <p class="empty">지출 요약을 불러오는 중입니다.</p>
+          </section>
+          <nav class="expense-subtabs" aria-label="지출 상세 메뉴">
+            <button data-expense-view="transactions" aria-current="page" type="button">거래</button>
+            <button data-expense-view="reviews" type="button">확인 필요</button>
+            <button data-expense-view="recurring" type="button">정기지출</button>
+          </nav>
+          <section id="expense-view-transactions" class="expense-view" aria-labelledby="expense-transactions-heading">
+            <div class="expense-subheading"><h2 id="expense-transactions-heading">거래</h2><span id="expense-transactions-count">0건</span></div>
+            <div id="expense-transactions-list" class="card-list"></div>
+            <button id="expense-transactions-more" class="secondary pagination-more hidden" type="button">거래 더 보기</button>
+          </section>
+          <section id="expense-view-reviews" class="expense-view hidden" aria-labelledby="expense-reviews-heading">
+            <div class="expense-subheading"><h2 id="expense-reviews-heading">확인 필요</h2><span id="expense-reviews-count">0건</span></div>
+            <p class="muted">구매 카테고리는 검토하지 않아도 현재 분류로 합계에 반영됩니다. 목적이 불명확한 송금만 결정 전까지 확정 지출에서 제외됩니다.</p>
+            <section id="expense-classification" class="expense-classification" aria-labelledby="expense-classification-heading">
+              <div><h3 id="expense-classification-heading">AI 자동 분류</h3><p>버튼을 누를 때만 실행합니다. 개인정보 필터를 거친 업체 표시명만 OpenAI에 보냅니다. 불명확한 개인 간 송금은 AI에 보내지 않습니다.</p><small>비용 한도: 1회 최대 $0.01 · 서울 기준 월 12회 · 이 기능 월 $0.25에서 중단</small></div>
+              <button id="expense-classification-run" class="primary" type="button">AI 자동 분류</button>
+              <div id="expense-classification-result" class="expense-classification-result hidden" aria-live="polite"></div>
+            </section>
+            <button id="expense-review-categories-toggle" class="secondary hidden" type="button">선택 분류 보기</button>
+            <div id="expense-reviews-list" class="card-list"></div>
+            <button id="expense-reviews-more" class="secondary pagination-more hidden" type="button">검토 더 보기</button>
+            <button id="expense-category-reviews-more" class="secondary pagination-more hidden" type="button">선택 분류 더 보기</button>
+          </section>
+          <section id="expense-view-recurring" class="expense-view hidden" aria-labelledby="expense-recurring-heading">
+            <div class="expense-subheading"><h2 id="expense-recurring-heading">정기지출</h2><button id="expense-recurring-add" class="primary" type="button">항목 추가</button></div>
+            <h3>이 달의 납부</h3>
+            <div id="expense-occurrences-list" class="card-list"></div>
+            <h3>등록 항목</h3>
+            <div id="expense-recurring-list" class="card-list"></div>
+          </section>
+          <form id="expense-recurring-form" class="mobile-editor hidden">
+            <div class="mobile-editor-heading"><h2 id="expense-recurring-form-title">정기지출 추가</h2><button id="expense-recurring-form-close" class="text-button" type="button">닫기</button></div>
+            <p id="expense-recurring-registration-note" class="expense-registration-note hidden"></p>
+            <label for="expense-recurring-name">이름</label>
+            <input id="expense-recurring-name" maxlength="120" required>
+            <label for="expense-recurring-category">카테고리</label>
+            <select id="expense-recurring-category"></select>
+            <label for="expense-recurring-merchant">업체 (선택)</label>
+            <input id="expense-recurring-merchant" maxlength="200">
+            <div class="expense-field-grid">
+              <div><label for="expense-recurring-amount">예상 금액 (minor unit)</label><input id="expense-recurring-amount" type="number" min="1" step="1" required></div>
+              <div><label for="expense-recurring-currency">통화</label><input id="expense-recurring-currency" minlength="3" maxlength="3" value="KRW" required></div>
+            </div>
+            <div class="expense-field-grid">
+              <div><label for="expense-recurring-amount-type">금액 유형</label><select id="expense-recurring-amount-type"><option value="fixed">고정</option><option value="estimate">예상</option><option value="limit">최대 한도</option></select></div>
+              <div><label for="expense-recurring-interval">주기</label><select id="expense-recurring-interval"><option value="1">매월</option><option value="2">2개월마다</option><option value="3">3개월마다</option><option value="6">6개월마다</option><option value="12">12개월마다</option></select></div>
+            </div>
+            <input id="expense-recurring-payment-method" type="hidden">
+            <p id="expense-recurring-payment-method-note" class="expense-payment-learning muted">첫 실제 거래 연결을 확인하면 업체·결제수단을 안전하게 학습합니다. 원문 카드·계좌번호는 표시하거나 저장하지 않습니다.</p>
+            <div class="expense-field-grid">
+              <div><label for="expense-recurring-due-rule">결제일</label><select id="expense-recurring-due-rule"><option value="specific_day">특정일</option><option value="first_day">초일</option><option value="last_day">말일</option></select></div>
+              <div id="expense-recurring-due-day-field"><label for="expense-recurring-due-day">매월 날짜</label><input id="expense-recurring-due-day" type="number" min="1" max="31" required><small>없는 날짜는 말일로 보정합니다.</small></div>
+            </div>
+            <div class="expense-field-grid">
+              <div><label for="expense-recurring-start">시작일</label><input id="expense-recurring-start" type="date" required></div>
+              <div><label for="expense-recurring-end">종료일 (선택)</label><input id="expense-recurring-end" type="date"></div>
+            </div>
+            <div class="expense-field-grid">
+              <div><label for="expense-recurring-reminder">사전 알림일</label><input id="expense-recurring-reminder" type="number" min="0" max="31" value="7" required></div>
+              <div><label for="expense-recurring-status">상태</label><select id="expense-recurring-status"><option value="active">활성</option><option value="paused">일시정지</option><option value="ended">종료</option></select></div>
+            </div>
+            <label for="expense-recurring-note">메모 (선택)</label>
+            <textarea id="expense-recurring-note" maxlength="500" rows="3"></textarea>
+            <label class="expense-checkbox" for="expense-recurring-auto-match"><input id="expense-recurring-auto-match" type="checkbox"> 이후 고신뢰 거래 자동 연결 <small>처음 켜는 것은 실제 거래를 직접 연결하며 동의한 경우에만 가능합니다. 편집에서는 기존 동의를 철회할 수 있습니다.</small></label>
+            <div class="expense-form-actions"><button id="expense-recurring-delete" class="danger hidden" type="button">삭제</button><button id="expense-recurring-save" class="primary" type="submit">저장</button></div>
+          </form>
+        </section>
+
+        <section id="tab-stocks" class="tab-panel panel hidden">
+          <div class="section-heading stock-heading">
+            <div><p class="eyebrow">조회 전용 · 거래소별 지연 가능</p><h1>주식 차트</h1></div>
+            <a id="stock-external-link" class="secondary stock-external-link" href="https://www.tradingview.com/symbols/NASDAQ-AAPL/" rel="noopener noreferrer" target="_blank">TradingView에서 열기</a>
+          </div>
+          <p class="muted">한국·미국 지연 차트와 S&amp;P 500 종가 변화를 조회합니다. 주문과 계좌 연결은 없습니다.</p>
+          <section id="stock-screen-panel" class="stock-screen-panel" aria-labelledby="stock-screen-title" aria-busy="true">
+            <div class="stock-screen-panel-heading">
+              <div><p class="eyebrow">주가 데이터 API 추가비용 $0 · AI 요약 월 $2 제한</p><h2 id="stock-screen-title">S&amp;P 500 일일 등락 스캐너</h2></div>
+              <button id="stock-screen-refresh" class="secondary" type="button">새로고침</button>
+            </div>
+            <p class="stock-screen-description">분할 조정 종가를 정확히 5·21거래일 전과 비교합니다.</p>
+            <div id="stock-screen-status" class="stock-screen-status" aria-live="polite"><p class="empty">최근 시장 결과를 불러오는 중입니다.</p></div>
+            <fieldset class="stock-screen-filters">
+              <legend>등락 조건</legend>
+              <label for="stock-screen-horizon">기간</label>
+              <select id="stock-screen-horizon"><option value="5">5거래일</option><option value="21">21거래일</option></select>
+              <label for="stock-screen-direction">방향</label>
+              <select id="stock-screen-direction"><option value="down">하락</option><option value="up">상승</option></select>
+              <label for="stock-screen-band">구간</label>
+              <select id="stock-screen-band"><option value="ten_to_twenty">10% 이상 20% 미만</option><option value="twenty_plus">20% 이상</option></select>
+            </fieldset>
+            <div id="stock-screen-results" class="stock-screen-results" aria-live="polite"><p class="empty">발행된 결과를 기다리고 있습니다.</p></div>
+            <button id="stock-screen-more" class="secondary stock-screen-more hidden" type="button">다음 50개</button>
+            <p class="stock-screen-legal">S&amp;P 500 구성종목 공개 스냅샷과 지연 시장 데이터를 사용합니다. 투자 추천이나 총수익률이 아닙니다.</p>
+          </section>
+          <section class="stock-chart-card" aria-labelledby="stock-chart-symbol">
+            <div class="stock-chart-heading"><div><p class="eyebrow">외부 데이터 · OpenAI 비용 없음</p><h2 id="stock-chart-symbol">NASDAQ:AAPL</h2></div><span id="stock-network" class="status-pill">온라인</span></div>
+            <div id="stock-chart-container" class="stock-chart-container"></div>
+            <p class="stock-disclaimer">시세는 지연되거나 일부 종목이 위젯에서 제한될 수 있습니다. 투자 추천이나 주문 기능을 제공하지 않습니다.</p>
+            <p class="stock-fallback">차트가 비어 있거나 KRX 종목 표시가 제한되면 우회 수집하지 않습니다. <a id="stock-fallback-link" href="https://www.tradingview.com/symbols/NASDAQ-AAPL/" rel="noopener noreferrer" target="_blank">TradingView 외부 차트에서 확인</a></p>
+          </section>
+          <section class="stock-watchlist-panel" aria-labelledby="stock-watchlist-title">
+            <div class="stock-watchlist-heading"><h2 id="stock-watchlist-title">관심 종목</h2><span id="stock-watchlist-count">0/50</span></div>
+            <div id="stock-watchlist" class="stock-watchlist-list"><p class="empty">아직 저장한 종목이 없습니다.</p></div>
+            <form id="stock-form" class="stock-form">
+              <h2>관심 종목 추가</h2>
+              <label for="stock-market">시장</label>
+              <select id="stock-market"><option value="KRX">한국 KRX</option><option value="NASDAQ">미국 NASDAQ</option><option value="NYSE">미국 NYSE</option><option value="AMEX">미국 AMEX</option></select>
+              <label for="stock-company-search">회사명 또는 종목코드</label>
+              <div class="stock-search">
+                <input id="stock-company-search" role="combobox" aria-autocomplete="list" aria-controls="stock-search-results" aria-expanded="false" maxlength="80" autocomplete="off" placeholder="예: 삼성전자" required>
+                <div id="stock-search-results" class="stock-search-results hidden" role="listbox" aria-label="종목 검색 결과"></div>
+              </div>
+              <small id="stock-catalog-summary" class="stock-catalog-summary">상장 종목 목록을 준비하는 중입니다.</small>
+              <div id="stock-selection" class="stock-selection hidden"></div>
+              <button id="stock-save" class="primary" type="submit" disabled>관심 종목 저장</button>
+            </form>
+          </section>
+        </section>
+
+        <section id="tab-tasks" class="tab-panel panel">
+          <div class="section-heading task-heading">
+            <div><p class="eyebrow">오늘 할 일을 빠르게 확인</p><h1>할 일</h1></div>
+            <button class="secondary" data-refresh="tasks" type="button">새로고침</button>
+          </div>
+
+          <div class="task-primary-actions">
+            <button id="project-add" class="secondary" type="button">프로젝트 추가</button>
+            <button id="task-add" class="primary" type="button">Task 추가</button>
+          </div>
+
+          <button id="task-mail-brief" class="mail-today-brief hidden" type="button">
+            <span>중요 메일</span>
+            <strong id="task-mail-brief-title"></strong>
+            <small id="task-mail-brief-detail"></small>
+          </button>
+
+          <form id="project-form" class="mobile-editor hidden">
+            <div class="mobile-editor-heading">
+              <h2>프로젝트 추가</h2>
+              <button id="project-form-close" class="text-button" type="button">닫기</button>
+            </div>
+            <label for="project-name">이름</label>
+            <input id="project-name" maxlength="500" autocomplete="off" required>
+            <label for="project-description">설명 (선택)</label>
+            <textarea id="project-description" maxlength="20000" rows="3"></textarea>
+            <label for="project-color">표시 색상</label>
+            <input id="project-color" type="color" value="#7088ff">
+            <button id="project-save" class="primary" type="submit">프로젝트 저장</button>
+          </form>
+
+          <form id="task-form" class="mobile-editor hidden">
+            <div class="mobile-editor-heading">
+              <h2 id="task-form-title">Task 추가</h2>
+              <button id="task-form-close" class="text-button" type="button">닫기</button>
+            </div>
+            <label for="task-title">제목</label>
+            <input id="task-title" maxlength="500" autocomplete="off" required>
+            <label for="task-description">설명 (선택)</label>
+            <textarea id="task-description" maxlength="20000" rows="4"></textarea>
+            <label for="task-project">프로젝트</label>
+            <select id="task-project"><option value="">기타에 자동 배정</option></select>
+            <div class="task-field-grid">
+              <div>
+                <label for="task-status">상태</label>
+                <select id="task-status"></select>
+              </div>
+              <div>
+                <label for="task-priority">우선순위</label>
+                <select id="task-priority">
+                  <option value="0">없음</option>
+                  <option value="1">1 · 매우 낮음</option>
+                  <option value="2">2 · 낮음</option>
+                  <option value="3">3 · 보통</option>
+                  <option value="4">4 · 높음</option>
+                </select>
+              </div>
+            </div>
+            <label for="task-due-date">기한 (선택)</label>
+            <input id="task-due-date" type="date">
+            <button id="task-save" class="primary" type="submit">Task 저장</button>
+          </form>
+
+          <form id="task-filters" class="task-filters">
+            <label for="task-filter-project">프로젝트</label>
+            <select id="task-filter-project"><option value="">전체 프로젝트</option></select>
+            <label for="task-filter-status">상태</label>
+            <select id="task-filter-status">
+              <option value="">전체 상태</option>
+              <option value="inbox">수신함</option>
+              <option value="todo">할 일</option>
+              <option value="in_progress">진행 중</option>
+              <option value="blocked">막힘</option>
+              <option value="done">완료</option>
+              <option value="cancelled">취소</option>
+            </select>
+          </form>
+          <div class="task-subheading">
+            <h2>Task</h2>
+            <span id="tasks-count">0개</span>
+          </div>
+          <div id="tasks-list" class="card-list"></div>
+          <button id="tasks-more" class="secondary pagination-more hidden" type="button">Task 더 보기</button>
+
+          <details class="project-browser project-browser--collapsed">
+            <summary><strong id="projects-heading">프로젝트 관리</strong><span id="projects-count">0개</span></summary>
+            <div id="projects-list" class="project-list"></div>
+            <button id="projects-more" class="secondary pagination-more hidden" type="button">프로젝트 더 보기</button>
+          </details>
+        </section>
+
+        <section id="tab-notes" class="tab-panel panel hidden">
+          <div class="section-heading"><div><p class="eyebrow">온라인 조회</p><h1>최근 노트</h1></div><button class="secondary" data-refresh="notes" type="button">새로고침</button></div>
+          <div id="notes-list" class="card-list"></div>
+        </section>
+
+        <section id="tab-approvals" class="tab-panel panel hidden">
+          <div class="section-heading"><div><p class="eyebrow">사용자 확인 필수</p><h1>AI 제안 승인</h1></div><button class="secondary" data-refresh="approvals" type="button">새로고침</button></div>
+          <p class="muted">승인과 거절은 자동 재시도되지 않습니다. 결과가 불분명하면 목록을 다시 확인하세요.</p>
+          <div id="approvals-list" class="card-list"></div>
+        </section>
+
+        <section id="tab-device" class="tab-panel panel hidden">
+          <p class="eyebrow">현재 브라우저</p>
+          <h1>등록 기기 정보</h1>
+          <dl id="device-details" class="details"></dl>
+          <p class="muted">위치, 연락처, 브라우저 지문은 수집하지 않습니다.</p>
+          <button id="logout" class="danger" type="button">이 기기 연결 해제</button>
+        </section>
+      </section>
+    </main>
+
+    <div id="toast" class="toast hidden" role="status"></div>
+    <script src="/mobile/app.js" defer></script>
+  </body>
+</html>

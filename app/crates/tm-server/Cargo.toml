@@ -15,17 +15,25 @@ path = "src/main.rs"
 
 [dependencies]
 axum.workspace = true
+base64.workspace = true
 chrono.workspace = true
+chrono-tz.workspace = true
+chacha20poly1305.workspace = true
+getrandom.workspace = true
+hmac.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tm-core = { path = "../tm-core" }
 tokio.workspace = true
+tokio-rustls.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 url.workspace = true
 uuid.workspace = true
+webpki-roots.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

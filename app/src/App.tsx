@@ -1,13 +1,23 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { DataPage, TrashPage } from "./components/DataPages";
 import { ChangeRequestsPage } from "./components/ChangeRequestsPage";
+import { CalendarPage } from "./components/CalendarPage";
 import { Icon, type IconName } from "./components/Icon";
 import { NotesPage, SearchPage, WorkLogsPage } from "./components/KnowledgePages";
 import { SessionPage } from "./components/SessionPage";
+import { StockPage } from "./components/StockPage";
+import { DeviceManagementPage } from "./components/DeviceManagementPage";
+import { ExpensesPage, TodayExpenseDueCards } from "./components/ExpensesPage";
+import { MailPage, TodayMailCards } from "./components/MailPage";
 import { TaskDetail } from "./components/TaskDetail";
 import { HistoryPage, InboxPage, ProjectsPage, TodayPage } from "./components/TaskPages";
-import { createDefaultApi, type TmApi } from "./lib/api";
+import {
+  createDefaultApi,
+  type CostStatus,
+  type TaskReportResult,
+  type TmApi,
+} from "./lib/api";
 import type {
   AppSnapshot,
   CreateChangeRequestInput,
@@ -16,6 +26,7 @@ import type {
   CreateWorkLogInput,
   DayEntryStatus,
   FinishSessionInput,
+  LatestStockScreen,
   NoteType,
   StartSessionInput,
   Task,
@@ -26,14 +37,19 @@ import type {
 type PageId =
   | "inbox"
   | "today"
+  | "calendar"
   | "projects"
   | "history"
   | "sessions"
   | "worklogs"
   | "notes"
+  | "stocks"
+  | "expenses"
+  | "mail"
   | "search"
   | "change-requests"
   | "trash"
+  | "devices"
   | "data";
 
 interface AppProps {
@@ -48,6 +64,27 @@ interface NavigationItem {
 }
 
 const defaultApi = createDefaultApi();
+const DEFAULT_API_HARD_LIMIT_MICROUSD = 20_000_000;
+const DEFAULT_CLOUD_HARD_LIMIT_MICROUSD = 30_000_000;
+const COST_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
+
+const formatUsd = (microusd: number, alwaysCents = true): string => {
+  const dollars = microusd / 1_000_000;
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: alwaysCents ? 2 : Number.isInteger(dollars) ? 0 : 2,
+    maximumFractionDigits: 2,
+  }).format(dollars);
+};
+
+const costClassName = (usedMicrousd: number | null, hardLimitMicrousd: number): string => {
+  if (usedMicrousd === null || hardLimitMicrousd <= 0) return "cost-pill cost-pill--unavailable";
+  const ratio = usedMicrousd / hardLimitMicrousd;
+  if (ratio >= 1) return "cost-pill cost-pill--danger";
+  if (ratio >= 0.8) return "cost-pill cost-pill--warning";
+  return "cost-pill";
+};
 
 const errorMessage = (error: unknown): string => {
   if (error instanceof Error) return error.message;
@@ -59,11 +96,19 @@ export function App({ api = defaultApi }: AppProps) {
   const [snapshot, setSnapshot] = useState<AppSnapshot | null>(null);
   const [page, setPage] = useState<PageId>("today");
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [selectedRecurringExpenseId, setSelectedRecurringExpenseId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [savingTask, setSavingTask] = useState(false);
   const [fatalError, setFatalError] = useState<string | null>(null);
   const [toast, setToast] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [taskReport, setTaskReport] = useState<TaskReportResult | null>(null);
+  const [taskReportLoading, setTaskReportLoading] = useState(false);
+  const [costStatus, setCostStatus] = useState<CostStatus | null>(null);
+  const [stockScreen, setStockScreen] = useState<LatestStockScreen | null>(null);
+  const [stockScreenLoading, setStockScreenLoading] = useState(true);
+  const [stockScreenError, setStockScreenError] = useState<string | null>(null);
+  const stockScreenLoadGeneration = useRef(0);
 
   const loadSnapshot = useCallback(async () => {
     try {
@@ -80,6 +125,48 @@ export function App({ api = defaultApi }: AppProps) {
   useEffect(() => {
     void loadSnapshot();
   }, [loadSnapshot]);
+
+  const loadCostStatus = useCallback(async () => {
+    try {
+      setCostStatus(await api.getCostStatus());
+    } catch {
+      // Cost status is supplementary and must never block the main workspace.
+    }
+  }, [api]);
+
+  useEffect(() => {
+    void loadCostStatus();
+    const timer = window.setInterval(() => void loadCostStatus(), COST_REFRESH_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [loadCostStatus]);
+
+  const loadStockScreen = useCallback(async () => {
+    const generation = ++stockScreenLoadGeneration.current;
+    setStockScreenLoading(true);
+    try {
+      const next = await api.getLatestStockScreen();
+      if (generation !== stockScreenLoadGeneration.current) return;
+      setStockScreen(next);
+      setStockScreenError(null);
+    } catch (error) {
+      if (generation !== stockScreenLoadGeneration.current) return;
+      setStockScreenError(errorMessage(error));
+    } finally {
+      if (generation === stockScreenLoadGeneration.current) setStockScreenLoading(false);
+    }
+  }, [api]);
+
+  useEffect(() => {
+    void loadStockScreen();
+  }, [loadStockScreen]);
+
+  useEffect(() => {
+    let active = true;
+    void api.latestTaskReport().then((report) => {
+      if (active) setTaskReport(report);
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [api]);
 
   useEffect(() => {
     const handleShortcut = (event: KeyboardEvent) => {
@@ -98,8 +185,8 @@ export function App({ api = defaultApi }: AppProps) {
     return () => window.clearTimeout(timer);
   }, [toast]);
 
-  const notify = (message: string, type: "success" | "error" = "success") =>
-    setToast({ message, type });
+  const notify = useCallback((message: string, type: "success" | "error" = "success") =>
+    setToast({ message, type }), []);
 
   const mutate = useCallback(
     async (action: () => Promise<void>, successMessage: string) => {
@@ -113,7 +200,7 @@ export function App({ api = defaultApi }: AppProps) {
         return false;
       }
     },
-    [loadSnapshot],
+    [loadSnapshot, notify],
   );
 
   const mutateVoid = useCallback(
@@ -148,12 +235,64 @@ export function App({ api = defaultApi }: AppProps) {
       setSavingTask(false);
     }
   };
+  const completeTask = async (task: Task): Promise<void> => {
+    const plannedEntry = [
+      ...(snapshot?.todayView.planned ?? []),
+      ...(snapshot?.todayView.yesterdayIncomplete ?? []),
+    ].find((entry) => entry.taskId === task.id);
+
+    if (plannedEntry) {
+      await mutateVoid(
+        () => api.resolveDayEntry(plannedEntry.id, "done"),
+        `Task를 완료했습니다: ${task.title}`,
+      );
+      return;
+    }
+
+    await mutateVoid(
+      () => api.updateTask({
+        taskId: task.id,
+        title: task.title,
+        description: task.description,
+        status: "done",
+        priority: task.priority,
+        dueDate: task.dueDate,
+        projectId: task.projectId,
+        tags: task.tags,
+        checklist: task.checklist,
+      }),
+      `Task를 완료했습니다: ${task.title}`,
+    );
+  };
   const planTask = (task: Task) => snapshot
     ? mutate(() => api.planTask(task.id, snapshot.today), "오늘 계획에 추가했습니다.")
     : Promise.resolve();
   const resolveDayEntry = (entryId: string, status: Exclude<DayEntryStatus, "planned">) => {
     const messages = { done: "완료 기록을 확정했습니다.", deferred: "어제 기록을 이월하고 오늘 계획을 만들었습니다.", skipped: "건너뛰기 기록을 확정했습니다." };
     void mutate(() => api.resolveDayEntry(entryId, status), messages[status]).catch(() => undefined);
+  };
+  const generateTaskReport = async () => {
+    setTaskReportLoading(true);
+    try {
+      const report = await api.generateTaskReport();
+      setTaskReport(report);
+      void loadCostStatus();
+      notify("오늘의 Task AI 리포트를 만들었습니다.");
+    } catch (error) {
+      notify(errorMessage(error), "error");
+    } finally {
+      setTaskReportLoading(false);
+    }
+  };
+  const rateTaskReport = async (helpful: boolean) => {
+    if (!taskReport) return;
+    try {
+      const report = await api.rateTaskReport(taskReport.runId, helpful);
+      setTaskReport(report);
+      notify("리포트 평가를 기록했습니다.");
+    } catch (error) {
+      notify(errorMessage(error), "error");
+    }
   };
   const startSession = (input: StartSessionInput) => mutateVoid(() => api.startSession(input), "집중 세션을 시작했습니다.");
   const finishSession = (input: FinishSessionInput) => mutateVoid(() => api.finishSession(input), "세션과 WorkLog를 원자적으로 저장했습니다.");
@@ -224,9 +363,15 @@ export function App({ api = defaultApi }: AppProps) {
   );
 
   const navigate = (target: PageId) => {
+    if (target !== "expenses") setSelectedRecurringExpenseId(null);
     setPage(target);
     setMobileNavOpen(false);
     document.querySelector<HTMLElement>("#main-content")?.focus({ preventScroll: true });
+  };
+
+  const openExpenses = (recurringExpenseId?: string) => {
+    setSelectedRecurringExpenseId(recurringExpenseId ?? null);
+    navigate("expenses");
   };
 
   if (loading) {
@@ -256,29 +401,37 @@ export function App({ api = defaultApi }: AppProps) {
   ).length;
   const navigation: Array<{ title: string; items: NavigationItem[] }> = [
     {
-      title: "Task",
+      title: "할 일",
       items: [
-        { id: "inbox", label: "Inbox", icon: "inbox" },
         { id: "today", label: "오늘", icon: "today", count: snapshot.todayView.planned.length + snapshot.todayView.inProgress.length },
+        { id: "calendar", label: "캘린더", icon: "calendar" },
         { id: "projects", label: "프로젝트", icon: "projects" },
-        { id: "history", label: "히스토리", icon: "history" },
+      ],
+    },
+    {
+      title: "생활",
+      items: [
+        { id: "expenses", label: "지출", icon: "chart" },
+        { id: "mail", label: "메일", icon: "mail" },
+        { id: "stocks", label: "주식", icon: "chart" },
       ],
     },
     {
       title: "기록",
       items: [
+        { id: "history", label: "지난 기록", icon: "history" },
         { id: "sessions", label: "작업 세션", icon: "timer" },
-        { id: "worklogs", label: "WorkLog", icon: "worklog" },
-        { id: "notes", label: "Note", icon: "note" },
+        { id: "worklogs", label: "작업 기록", icon: "worklog" },
+        { id: "notes", label: "메모", icon: "note" },
+        { id: "change-requests", label: "개선 요청", icon: "spark", count: pendingApprovalCount || undefined },
       ],
     },
     {
-      title: "도구",
+      title: "관리",
       items: [
-        { id: "search", label: "통합 검색", icon: "search" },
-        { id: "change-requests", label: "개선 요청함", icon: "spark", count: pendingApprovalCount || undefined },
         { id: "trash", label: "휴지통", icon: "trash", count: snapshot.trash.length || undefined },
-        { id: "data", label: "백업 · 내보내기", icon: "database" },
+        { id: "devices", label: "모바일 기기", icon: "shield" },
+        { id: "data", label: "백업", icon: "database" },
       ],
     },
   ];
@@ -288,9 +441,11 @@ export function App({ api = defaultApi }: AppProps) {
       case "inbox":
         return <InboxPage />;
       case "today":
-        return <TodayPage onOpen={(task) => setSelectedTaskId(task.id)} onResolve={resolveDayEntry} today={snapshot.today} view={snapshot.todayView} />;
+        return <TodayPage expenseDueCards={<><TodayExpenseDueCards api={api} onOpenExpenses={openExpenses} today={snapshot.today} /><TodayMailCards api={api} onOpenMail={() => navigate("mail")} today={snapshot.today} /></>} onComplete={completeTask} onGenerateReport={generateTaskReport} onOpen={(task) => setSelectedTaskId(task.id)} onOpenStocks={() => navigate("stocks")} onRateReport={rateTaskReport} onResolve={resolveDayEntry} report={taskReport} reportLoading={taskReportLoading} stockScreen={stockScreen} stockScreenError={stockScreenError} stockScreenLoading={stockScreenLoading} tasks={snapshot.tasks} today={snapshot.today} view={snapshot.todayView} />;
+      case "calendar":
+        return <CalendarPage onCreate={api.createCalendarEvent} onDelete={api.deleteCalendarEvent} onLoad={api.getCalendarMonth} onNotify={notify} onOpenExpense={(recurringExpenseId) => openExpenses(recurringExpenseId)} onUpdate={api.updateCalendarEvent} today={snapshot.today} />;
       case "projects":
-        return <ProjectsPage onCreateProject={createProject} onCreateTask={createTask} onOpen={(task) => setSelectedTaskId(task.id)} onPlan={(task) => void planTask(task)} projects={snapshot.projects} tasks={snapshot.tasks} />;
+        return <ProjectsPage onComplete={completeTask} onCreateProject={createProject} onCreateTask={createTask} onOpen={(task) => setSelectedTaskId(task.id)} onPlan={(task) => void planTask(task)} projects={snapshot.projects} tasks={snapshot.tasks} />;
       case "history":
         return <HistoryPage history={snapshot.history} onOpen={(task) => setSelectedTaskId(task.id)} />;
       case "sessions":
@@ -299,18 +454,27 @@ export function App({ api = defaultApi }: AppProps) {
         return <WorkLogsPage logs={snapshot.workLogs} onCreate={createWorkLog} onOpenTask={(task) => setSelectedTaskId(task.id)} onPromote={promoteWorkLog} onTrash={(workLogId) => moveRecordToTrash(workLogId, "work_log", "WorkLog")} projects={snapshot.projects} tasks={snapshot.tasks} />;
       case "notes":
         return <NotesPage notes={snapshot.notes} onCreate={createNote} onOpenTask={(task) => setSelectedTaskId(task.id)} onTrash={(noteId) => moveRecordToTrash(noteId, "note", "Note")} sessions={snapshot.recentSessions} tasks={snapshot.tasks} />;
+      case "stocks":
+        return <StockPage onDelete={api.deleteStockWatchlistItem} onListScreenResults={api.listStockScreenResults} onLoad={api.getStockWatchlist} onNotify={notify} onRefreshScreen={loadStockScreen} onUpsert={api.upsertStockWatchlistItem} screen={stockScreen} screenError={stockScreenError} screenLoading={stockScreenLoading} />;
+      case "expenses":
+        return <ExpensesPage api={api} initialRecurringExpenseId={selectedRecurringExpenseId} onNotify={notify} today={snapshot.today} />;
+      case "mail":
+        return <MailPage api={api} onNotify={notify} today={snapshot.today} />;
       case "search":
         return <SearchPage onOpenTask={(taskId) => setSelectedTaskId(taskId)} onSearch={(query) => api.search(query)} />;
       case "change-requests":
         return <ChangeRequestsPage onAbandon={abandonChangeRequest} onApprove={approveChangeRequest} onCancel={cancelChangeRequest} onCreate={createChangeRequest} onReturnToDraft={returnChangeRequestToDraft} onUpdate={updateChangeRequest} projects={snapshot.projects} requests={snapshot.changeRequests} tasks={snapshot.tasks} />;
       case "trash":
         return <TrashPage items={snapshot.trash} onRestore={(itemId) => mutateVoid(() => api.restoreTrashItem(itemId), "항목과 연결을 복원했습니다.")} />;
+      case "devices":
+        return <DeviceManagementPage />;
       case "data":
         return <DataPage backups={snapshot.backups} databasePath={snapshot.databasePath} lastBackupAt={snapshot.lastBackupAt} onBackup={() => mutateVoid(() => api.createBackup(), "최신 상태를 새 백업 파일로 저장했습니다.")} onExport={() => api.exportAll()} onRestore={(backupId) => mutateVoid(() => api.restoreBackup(backupId), "백업 복원을 완료했습니다.")} />;
     }
   };
 
-  const pageLabel = navigation.flatMap((section) => section.items).find((item) => item.id === page)?.label ?? "TM";
+  const pageLabel = navigation.flatMap((section) => section.items).find((item) => item.id === page)?.label
+    ?? (page === "search" ? "통합 검색" : page === "inbox" ? "Inbox" : "TM");
 
   return (
     <div className="app-shell">
@@ -325,7 +489,7 @@ export function App({ api = defaultApi }: AppProps) {
         <nav className="sidebar__nav">
           {navigation.map((section) => (
             <section key={section.title}>
-              <h2>{section.title}</h2>
+              <p className="sidebar__section-title">{section.title}</p>
               {section.items.map((item) => (
                 <button aria-current={page === item.id ? "page" : undefined} key={item.id} onClick={() => navigate(item.id)} type="button">
                   <Icon name={item.icon} /><span>{item.label}</span>{item.count !== undefined && <em>{item.count}</em>}
@@ -356,6 +520,30 @@ export function App({ api = defaultApi }: AppProps) {
           <button aria-label="메뉴 열기" className="icon-button topbar__menu" onClick={() => setMobileNavOpen(true)} type="button"><Icon name="menu" /></button>
           <strong className="topbar__title">{pageLabel}</strong>
           <button className="command-search" onClick={() => navigate("search")} type="button"><Icon name="search" size={16} /><span>전체 기록 검색</span><kbd>Ctrl K</kbd></button>
+          <div className="topbar__costs" aria-label="현재 비용 현황">
+            <span
+              className={costClassName(
+                costStatus?.api.usedMicrousd ?? null,
+                costStatus?.api.hardLimitMicrousd ?? DEFAULT_API_HARD_LIMIT_MICROUSD,
+              )}
+              title={costStatus ? `OpenAI API ${costStatus.api.budgetMonth}` : "OpenAI API 비용 확인 중"}
+            >
+              API {costStatus ? formatUsd(costStatus.api.usedMicrousd) : "—"} / {formatUsd(costStatus?.api.hardLimitMicrousd ?? DEFAULT_API_HARD_LIMIT_MICROUSD, false)}
+            </span>
+            <span
+              className={costClassName(
+                costStatus?.cloud.usedMicrousd ?? null,
+                costStatus?.cloud.hardLimitMicrousd ?? DEFAULT_CLOUD_HARD_LIMIT_MICROUSD,
+              )}
+              title={costStatus?.cloud.billingPeriodStart && costStatus.cloud.billingPeriodEnd
+                ? `Railway ${new Date(costStatus.cloud.billingPeriodStart).toLocaleDateString("ko-KR")}–${new Date(costStatus.cloud.billingPeriodEnd).toLocaleDateString("ko-KR")}${costStatus.cloud.stale ? " · 마지막 확인값" : ""}`
+                : "Railway 비용 확인 중"}
+            >
+              Cloud {costStatus?.cloud.usedMicrousd !== null && costStatus?.cloud.usedMicrousd !== undefined
+                ? formatUsd(costStatus.cloud.usedMicrousd)
+                : "—"} / {formatUsd(costStatus?.cloud.hardLimitMicrousd ?? DEFAULT_CLOUD_HARD_LIMIT_MICROUSD, false)}
+            </span>
+          </div>
           <div className="topbar__date"><span>{new Intl.DateTimeFormat("ko-KR", { timeZone: "Asia/Seoul", month: "long", day: "numeric", weekday: "short" }).format(new Date(`${snapshot.today}T12:00:00+09:00`))}</span><i /></div>
         </header>
 

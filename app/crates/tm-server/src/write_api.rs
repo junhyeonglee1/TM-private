@@ -8,14 +8,15 @@ use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tm_core::{
-    ChecklistItem, CreateNoteInput, CreateTaskInput, Error as CoreError, MutationApprovalPolicy,
-    MutationCommand, MutationExpectedVersion, MutationOperation, MutationRequest, MutationResult,
-    Note, NotePatch, NoteType, Task, TaskPatch, TaskStatus,
+    ChecklistItem, CreateNoteInput, CreateProjectInput, CreateTaskInput, Error as CoreError,
+    MutationApprovalPolicy, MutationCommand, MutationExpectedVersion, MutationOperation,
+    MutationRequest, MutationResult, Note, NotePatch, NoteType, Project, Task, TaskPatch,
+    TaskStatus,
 };
 
 use super::{
     ApiEnvelope, ApiError, AppState, RequestId,
-    read_api::{ChecklistItemDto, NoteDto, TaskDto},
+    read_api::{ChecklistItemDto, NoteDto, ProjectDto, TaskDto},
 };
 
 pub(super) const MAX_MUTATION_BODY_BYTES: usize = 64 * 1024;
@@ -23,6 +24,15 @@ const IDEMPOTENCY_KEY_HEADER: HeaderName = HeaderName::from_static("idempotency-
 const MUTATION_CONFIRM_HEADER: HeaderName = HeaderName::from_static("x-tm-confirm-mutation");
 const IDEMPOTENCY_REPLAYED_HEADER: HeaderName =
     HeaderName::from_static("x-tm-idempotency-replayed");
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct CreateProjectBody {
+    name: String,
+    #[serde(default)]
+    description: String,
+    color: Option<String>,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -91,6 +101,30 @@ struct MutationResponseData {
 
 pub(super) fn body_limit() -> DefaultBodyLimit {
     DefaultBodyLimit::max(MAX_MUTATION_BODY_BYTES)
+}
+
+pub(super) async fn create_project(
+    State(state): State<AppState>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+    payload: Result<Json<CreateProjectBody>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let body = parse_json(payload, &request_id)?.0;
+    let operation = MutationOperation::ProjectCreate;
+    let metadata = mutation_metadata(
+        &headers,
+        operation,
+        ExpectedVersionKind::Absent,
+        &request_id,
+    )?;
+    let command = MutationCommand::ProjectCreate {
+        input: CreateProjectInput {
+            name: body.name,
+            description: body.description,
+            color: body.color,
+        },
+    };
+    execute_mutation(state, request_id, metadata, command, StatusCode::CREATED).await
 }
 
 pub(super) async fn create_task(
@@ -376,6 +410,12 @@ fn mutation_response(
     status: StatusCode,
 ) -> Result<Response, ApiError> {
     let item = match result.operation {
+        MutationOperation::ProjectCreate => {
+            let project: Project = serde_json::from_value(result.entity)
+                .map_err(|_| internal_response_error(&request_id))?;
+            serde_json::to_value(ProjectDto::from(project))
+                .map_err(|_| internal_response_error(&request_id))?
+        }
         MutationOperation::TaskCreate | MutationOperation::TaskUpdate => {
             let task: Task = serde_json::from_value(result.entity)
                 .map_err(|_| internal_response_error(&request_id))?;
@@ -393,6 +433,11 @@ fn mutation_response(
                 .map_err(|_| internal_response_error(&request_id))?;
             serde_json::to_value(ChecklistItemDto::from(item))
                 .map_err(|_| internal_response_error(&request_id))?
+        }
+        MutationOperation::MemoryCreate
+        | MutationOperation::MemoryUpdate
+        | MutationOperation::MemoryDelete => {
+            return Err(internal_response_error(&request_id));
         }
     };
     let etag = HeaderValue::from_str(&format!("\"{}\"", result.version))

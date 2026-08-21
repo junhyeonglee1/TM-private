@@ -7,21 +7,28 @@ use rusqlite::{
 use serde_json::{Value, json};
 
 use crate::{
-    Attachment, BackupArtifact, BackupInfo, ChangeRequest, ChangeRequestClaim, ChangeRequestEvent,
-    ChecklistItem, ChecklistMutationInput, CreateAttachmentInput, CreateChangeRequestInput,
-    CreateLinkInput, CreateNoteAggregateInput, CreateNoteInput, CreateProjectInput,
-    CreateTaskAggregateInput, CreateTaskInput, CreateWorkLogInput, DigestDelivery, DigestKind,
-    DigestPreparation, EndSessionInput, EntityLink, EntityType, Error, ExportArtifact,
-    HealthReport, LinkTargetType, MigrationDryRun, MigrationManifest, Note, NoteAggregate,
-    NotePatch, NoteType, Project, Result, SearchHit, SessionCompletion, SessionStatus,
-    StartSessionInput, Tag, Task, TaskAggregate, TaskDayEntry, TaskDayStatus, TaskEvent, TaskPatch,
-    TaskStatus, TmHome, TrashEntityType, TrashItem, UpdateChangeRequestInput,
-    UpdateTaskAggregateInput, WorkLog, WorkSession, backup, change_request,
-    database::{Database, SCHEMA_VERSION, new_id, now_utc, today_seoul},
+    AiBudgetPolicy, AiBudgetReservation, AiBudgetSettlementRecord, AiBudgetStatus,
+    AiOperationBudgetStatus, AiTokenUsage, Attachment, BackupArtifact, BackupInfo,
+    BackupVerification, ChangeRequest, ChangeRequestClaim, ChangeRequestEvent, ChecklistItem,
+    ChecklistMutationInput, CreateAttachmentInput, CreateChangeRequestInput, CreateLinkInput,
+    CreateNoteAggregateInput, CreateNoteInput, CreateProjectInput, CreateTaskAggregateInput,
+    CreateTaskInput, CreateWorkLogInput, DigestDelivery, DigestKind, DigestPreparation,
+    EndSessionInput, EntityLink, EntityType, Error, ExportArtifact, HealthReport, LinkTargetType,
+    MigrationDryRun, MigrationManifest, Note, NoteAggregate, NotePatch, NoteType, Project, Result,
+    SearchHit, SessionCompletion, SessionStatus, StartSessionInput, Tag, Task, TaskAggregate,
+    TaskDayEntry, TaskDayStatus, TaskEvent, TaskPatch, TaskReportCompletion, TaskReportRun,
+    TaskReportStart, TaskStatus, TmHome, TrashEntityType, TrashItem, UpdateChangeRequestInput,
+    UpdateTaskAggregateInput, WorkLog, WorkSession, ai_budget, backup, change_request,
+    database::{Database, SCHEMA_VERSION, new_id, now_utc, today_seoul, validate_schema_semantics},
     digest,
     error::{invalid, not_found},
-    export, migration,
+    export, migration, task_report,
 };
+
+const MAX_PROJECT_NAME_CHARS: usize = 500;
+const MAX_PROJECT_DESCRIPTION_CHARS: usize = 20_000;
+const UNCATEGORIZED_PROJECT_NAME: &str = "기타";
+const UNCATEGORIZED_PROJECT_SYSTEM_KEY: &str = "uncategorized";
 
 #[derive(Debug, Clone)]
 pub struct TmCore {
@@ -45,24 +52,17 @@ impl TmCore {
     }
 
     pub fn create_project(&self, input: CreateProjectInput) -> Result<Project> {
-        let name = required_text("project name", &input.name)?;
-        let now = now_utc();
-        let id = new_id();
-        let connection = self.database.connect()?;
-        connection.execute(
-            "INSERT INTO projects(
-                id, name, description, color, sort_order, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, 0, ?5, ?5)",
-            params![id, name, input.description.trim(), input.color, now],
-        )?;
-        query_project(&connection, &id)
+        self.database
+            .transaction(TransactionBehavior::Immediate, |transaction| {
+                create_project_in_transaction(transaction, &input)
+            })
     }
 
     pub fn list_projects(&self, include_deleted: bool) -> Result<Vec<Project>> {
         let connection = self.database.connect()?;
         let mut statement = connection.prepare(
             "SELECT id, name, description, color, sort_order, created_at, updated_at,
-                    archived_at, deleted_at
+                    archived_at, deleted_at, system_key
              FROM projects
              WHERE (?1 = 1 OR deleted_at IS NULL)
              ORDER BY sort_order ASC, name COLLATE NOCASE ASC",
@@ -951,6 +951,14 @@ impl TmCore {
             TrashEntityType::Session => ("work_sessions", "goal", ""),
         };
         let connection = self.database.connect()?;
+        if matches!(entity_type, TrashEntityType::Project) && deleted_at.is_some() {
+            let project = query_project(&connection, id)?;
+            if project.system_key.as_deref() == Some(UNCATEGORIZED_PROJECT_SYSTEM_KEY) {
+                return Err(Error::Conflict(
+                    "the uncategorized system project cannot be moved to the trash".to_owned(),
+                ));
+            }
+        }
         let sql = format!(
             "UPDATE {table} SET deleted_at = ?2, updated_at = ?3{version_update} WHERE id = ?1 AND {title_column} IS NOT NULL"
         );
@@ -1091,6 +1099,50 @@ impl TmCore {
         digest::prepare(&self.database, kind, date)
     }
 
+    pub fn preview_digest(&self, kind: DigestKind, date: NaiveDate) -> Result<crate::DigestFacts> {
+        digest::preview(&self.database, kind, date)
+    }
+
+    pub fn begin_task_report(&self, input: &TaskReportStart<'_>) -> Result<TaskReportRun> {
+        task_report::begin(&self.database, input)
+    }
+
+    pub fn record_empty_task_report(
+        &self,
+        id: &str,
+        date: NaiveDate,
+        actor: &str,
+        prompt_version: &str,
+        model: &str,
+        result: &Value,
+    ) -> Result<TaskReportRun> {
+        task_report::record_no_tasks(
+            &self.database,
+            id,
+            date,
+            actor,
+            prompt_version,
+            model,
+            result,
+        )
+    }
+
+    pub fn complete_task_report(
+        &self,
+        id: &str,
+        completion: &TaskReportCompletion,
+    ) -> Result<TaskReportRun> {
+        task_report::complete(&self.database, id, completion)
+    }
+
+    pub fn latest_task_report(&self) -> Result<Option<TaskReportRun>> {
+        task_report::latest(&self.database)
+    }
+
+    pub fn rate_task_report(&self, id: &str, helpful: bool, actor: &str) -> Result<TaskReportRun> {
+        task_report::feedback(&self.database, id, helpful, actor)
+    }
+
     pub fn complete_digest(&self, delivery_key: &str, slack_ref: &str) -> Result<DigestDelivery> {
         digest::complete(&self.database, delivery_key, slack_ref)
     }
@@ -1108,6 +1160,93 @@ impl TmCore {
             &self.home().database_path(),
             &self.home().database_backups_dir(),
             "manual",
+        )
+    }
+
+    pub fn ai_budget_status(&self, policy: AiBudgetPolicy) -> Result<AiBudgetStatus> {
+        ai_budget::status(&self.database, policy)
+    }
+
+    pub fn reserve_ai_budget(
+        &self,
+        request_id: &str,
+        provider: &str,
+        model: &str,
+        operation: &str,
+        maximum_cost_microusd: u64,
+        policy: AiBudgetPolicy,
+    ) -> Result<AiBudgetReservation> {
+        ai_budget::reserve(
+            &self.database,
+            request_id,
+            provider,
+            model,
+            operation,
+            maximum_cost_microusd,
+            policy,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn reserve_ai_budget_with_operation_limit(
+        &self,
+        request_id: &str,
+        provider: &str,
+        model: &str,
+        operation: &str,
+        maximum_cost_microusd: u64,
+        policy: AiBudgetPolicy,
+        operation_hard_limit_microusd: u64,
+    ) -> Result<AiBudgetReservation> {
+        ai_budget::reserve_with_operation_limit(
+            &self.database,
+            request_id,
+            provider,
+            model,
+            operation,
+            maximum_cost_microusd,
+            policy,
+            Some(operation_hard_limit_microusd),
+        )
+    }
+
+    pub fn ai_operation_budget_status(
+        &self,
+        operation: &str,
+        hard_limit_microusd: u64,
+    ) -> Result<AiOperationBudgetStatus> {
+        ai_budget::operation_status(&self.database, operation, hard_limit_microusd)
+    }
+
+    pub fn get_ai_budget_reservation(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<AiBudgetReservation>> {
+        ai_budget::reservation(&self.database, request_id)
+    }
+
+    pub fn get_ai_budget_settlement(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<AiBudgetSettlementRecord>> {
+        ai_budget::settlement(&self.database, request_id)
+    }
+
+    pub fn settle_ai_budget(
+        &self,
+        reservation: &AiBudgetReservation,
+        actual_cost_microusd: u64,
+        usage: Option<AiTokenUsage>,
+        outcome: &str,
+        policy: AiBudgetPolicy,
+    ) -> Result<AiBudgetStatus> {
+        ai_budget::settle(
+            &self.database,
+            reservation,
+            actual_cost_microusd,
+            usage,
+            outcome,
+            policy,
         )
     }
 
@@ -1230,6 +1369,22 @@ impl TmCore {
         Ok(backups)
     }
 
+    pub fn verify_database_backup(
+        &self,
+        backup_path: impl AsRef<Path>,
+    ) -> Result<BackupVerification> {
+        let backup_root = std::fs::canonicalize(self.home().database_backups_dir())?;
+        let candidate = std::fs::canonicalize(backup_path.as_ref())?;
+        if candidate.parent() != Some(backup_root.as_path())
+            || candidate
+                .extension()
+                .is_none_or(|extension| extension != "sqlite3")
+        {
+            return Err(Error::InvalidBackup(candidate));
+        }
+        backup::verify_database_backup(&candidate)
+    }
+
     pub fn export_json(&self) -> Result<Value> {
         export::json_snapshot(&self.database)
     }
@@ -1265,6 +1420,30 @@ impl TmCore {
             })
     }
 
+    pub fn migration_applied_at(&self, version: i64) -> Result<Option<String>> {
+        let connection = self.database.connect()?;
+        connection
+            .query_row(
+                "SELECT applied_at FROM schema_migrations WHERE version = ?1",
+                [version],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn migration_name(&self, version: i64) -> Result<Option<String>> {
+        let connection = self.database.connect()?;
+        connection
+            .query_row(
+                "SELECT name FROM schema_migrations WHERE version = ?1",
+                [version],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn health(&self) -> Result<HealthReport> {
         let connection = self.database.connect()?;
         let schema_version: i64 =
@@ -1277,10 +1456,12 @@ impl TmCore {
             connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
         let sqlite_version: String =
             connection.query_row("SELECT sqlite_version()", [], |row| row.get(0))?;
+        let schema_semantics_ok = validate_schema_semantics(&connection, schema_version).is_ok();
         Ok(HealthReport {
             ok: schema_version == SCHEMA_VERSION
                 && foreign_keys == 1
                 && integrity_check == "ok"
+                && schema_semantics_ok
                 && journal_mode.eq_ignore_ascii_case("wal"),
             database_path: self.home().database_path().to_string_lossy().into_owned(),
             schema_version,
@@ -1299,6 +1480,52 @@ fn required_text(field: &str, value: &str) -> Result<String> {
         return Err(invalid(format!("{field} cannot be empty")));
     }
     Ok(value.to_owned())
+}
+
+pub(crate) fn create_project_in_transaction(
+    transaction: &Transaction<'_>,
+    input: &CreateProjectInput,
+) -> Result<Project> {
+    let name = required_text("project name", &input.name)?;
+    if name.chars().count() > MAX_PROJECT_NAME_CHARS {
+        return Err(invalid(format!(
+            "project name cannot exceed {MAX_PROJECT_NAME_CHARS} characters"
+        )));
+    }
+    if name == UNCATEGORIZED_PROJECT_NAME {
+        return Err(invalid(
+            "project name 기타 is reserved for TM's uncategorized system project",
+        ));
+    }
+    if input.description.chars().count() > MAX_PROJECT_DESCRIPTION_CHARS {
+        return Err(invalid(format!(
+            "project description cannot exceed {MAX_PROJECT_DESCRIPTION_CHARS} characters"
+        )));
+    }
+    if input
+        .color
+        .as_deref()
+        .is_some_and(|color| !valid_project_color(color))
+    {
+        return Err(invalid(
+            "project color must be a six-digit CSS hex color such as #7386ff",
+        ));
+    }
+    let now = now_utc();
+    let id = new_id();
+    transaction.execute(
+        "INSERT INTO projects(
+            id, name, description, color, sort_order, created_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, 0, ?5, ?5)",
+        params![id, name, input.description.trim(), input.color, now],
+    )?;
+    query_project(transaction, &id)
+}
+
+fn valid_project_color(color: &str) -> bool {
+    color
+        .strip_prefix('#')
+        .is_some_and(|hex| hex.len() == 6 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
 pub(crate) fn update_task_in_transaction(
@@ -1329,11 +1556,12 @@ pub(crate) fn update_task_in_transaction(
         .transpose()?
         .unwrap_or(current.title);
     let description = patch.description.unwrap_or(current.description);
-    let project_id = if patch.clear_project {
-        None
-    } else {
-        patch.project_id.or(current.project_id)
-    };
+    let project_id = normalize_task_project_id(
+        transaction,
+        current.project_id.as_deref(),
+        patch.project_id.as_deref(),
+        patch.clear_project,
+    )?;
     let due_date = if patch.clear_due_date {
         None
     } else {
@@ -1655,6 +1883,8 @@ pub(crate) fn create_task_in_transaction(
     let id = new_id();
     let now = now_utc();
     let completed_at = (input.status == TaskStatus::Done).then(|| now.clone());
+    let project_id =
+        normalize_task_project_id(transaction, None, input.project_id.as_deref(), false)?;
     transaction.execute(
         "INSERT INTO tasks(
             id, project_id, title, description, status, priority, due_date,
@@ -1662,7 +1892,7 @@ pub(crate) fn create_task_in_transaction(
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)",
         params![
             id,
-            input.project_id,
+            project_id,
             title,
             input.description.trim(),
             input.status.as_str(),
@@ -1679,7 +1909,7 @@ pub(crate) fn query_project(connection: &Connection, id: &str) -> Result<Project
     connection
         .query_row(
             "SELECT id, name, description, color, sort_order, created_at, updated_at,
-                    archived_at, deleted_at
+                    archived_at, deleted_at, system_key
              FROM projects WHERE id = ?1",
             [id],
             map_project,
@@ -1691,6 +1921,7 @@ pub(crate) fn query_project(connection: &Connection, id: &str) -> Result<Project
 fn map_project(row: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
     Ok(Project {
         id: row.get(0)?,
+        system_key: row.get(9)?,
         name: row.get(1)?,
         description: row.get(2)?,
         color: row.get(3)?,
@@ -1700,6 +1931,51 @@ fn map_project(row: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
         archived_at: row.get(7)?,
         deleted_at: row.get(8)?,
     })
+}
+
+pub(crate) fn normalize_task_project_id(
+    connection: &Connection,
+    current_project_id: Option<&str>,
+    requested_project_id: Option<&str>,
+    clear_project: bool,
+) -> Result<String> {
+    if clear_project && requested_project_id.is_some() {
+        return Err(invalid("project cannot be both set and cleared"));
+    }
+    if clear_project {
+        return uncategorized_project_id(connection);
+    }
+    if let Some(project_id) = requested_project_id {
+        let project = query_project(connection, project_id)?;
+        if current_project_id == Some(project_id) {
+            return Ok(project_id.to_owned());
+        }
+        if project.deleted_at.is_some() || project.archived_at.is_some() {
+            return Err(Error::Conflict(
+                "task project must be active before it can receive changes".to_owned(),
+            ));
+        }
+        return Ok(project_id.to_owned());
+    }
+    if let Some(project_id) = current_project_id {
+        return Ok(project_id.to_owned());
+    }
+    uncategorized_project_id(connection)
+}
+
+fn uncategorized_project_id(connection: &Connection) -> Result<String> {
+    connection
+        .query_row(
+            "SELECT id
+             FROM projects
+             WHERE system_key = ?1 AND archived_at IS NULL AND deleted_at IS NULL",
+            [UNCATEGORIZED_PROJECT_SYSTEM_KEY],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or_else(|| {
+            Error::Invariant("uncategorized system project is missing or inactive".to_owned())
+        })
 }
 
 pub(crate) fn query_task(connection: &Connection, id: &str, include_deleted: bool) -> Result<Task> {
