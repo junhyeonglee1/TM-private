@@ -153,7 +153,7 @@ fn current_schema_migrates_schema_fourteen_without_losing_existing_work() -> Res
     drop(connection);
 
     let core = TmCore::open(TmHome::new(temporary.path()))?;
-    assert_eq!(core.health()?.schema_version, 16);
+    assert_eq!(core.health()?.schema_version, 17);
     assert!(core.health()?.ok);
     let task = core.get_task(&task_id)?;
     assert_eq!(task.project_id.as_deref(), Some(project_id.as_str()));
@@ -169,7 +169,7 @@ fn current_schema_migrates_schema_fourteen_without_losing_existing_work() -> Res
     );
 
     let manifest = core.migration_manifest()?;
-    assert_eq!(manifest.schema_version, 16);
+    assert_eq!(manifest.schema_version, 17);
     for table in [
         "expense_crypto_metadata",
         "expense_sources",
@@ -275,7 +275,7 @@ fn schema_sixteen_migrates_schema_fifteen_expenses_with_defaults_and_backup() ->
     drop(connection);
 
     let core = TmCore::open(TmHome::new(temporary.path()))?;
-    assert_eq!(core.health()?.schema_version, 16);
+    assert_eq!(core.health()?.schema_version, 17);
     assert!(core.health()?.ok);
     let connection = Connection::open(&database_path)?;
     let preserved: (String, String, Option<u8>, u64) = connection.query_row(
@@ -316,7 +316,7 @@ fn schema_sixteen_migrates_schema_fifteen_expenses_with_defaults_and_backup() ->
     drop(connection);
 
     let manifest = core.migration_manifest()?;
-    assert_eq!(manifest.schema_version, 16);
+    assert_eq!(manifest.schema_version, 17);
     assert!(
         manifest
             .tables
@@ -471,7 +471,7 @@ fn schema_fourteen_adopts_one_active_uncategorized_project_and_backfills_tasks()
     drop(connection);
 
     let core = TmCore::open(TmHome::new(temporary.path()))?;
-    assert_eq!(core.health()?.schema_version, 16);
+    assert_eq!(core.health()?.schema_version, 17);
     let projects = core.list_projects(true)?;
     let system_projects = projects
         .iter()
@@ -609,7 +609,7 @@ fn manifest_is_deterministic_and_does_not_expose_row_contents() -> Result<()> {
     let first = core.migration_manifest()?;
     let second = core.migration_manifest()?;
     assert!(first.logically_matches(&second));
-    assert_eq!(first.schema_version, 16);
+    assert_eq!(first.schema_version, 17);
     assert_eq!(
         first.migration_versions,
         vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]

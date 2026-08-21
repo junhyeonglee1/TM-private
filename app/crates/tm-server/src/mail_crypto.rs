@@ -9,6 +9,7 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use zeroize::{Zeroize, Zeroizing};
 
+#[cfg(not(test))]
 pub(super) const MAIL_DATA_KEY_ENV: &str = "TM_MAIL_DATA_KEY_V1";
 const KEY_BYTES: usize = 32;
 const NONCE_BYTES: usize = 24;

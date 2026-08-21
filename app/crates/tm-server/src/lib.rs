@@ -1750,7 +1750,7 @@ async fn deployment_readyz(
             }
         };
     if !health.ok
-        || (expense_crypto_required && health.schema_version != 16)
+        || (expense_crypto_required && health.schema_version < 16)
         || !key_binding_ready
         || !key_state_ready
     {
@@ -4540,7 +4540,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
         assert_eq!(body["data"]["status"], "ready");
-        assert_eq!(body["data"]["schemaVersion"], 16);
+        assert_eq!(body["data"]["schemaVersion"], 17);
         assert_eq!(body["data"]["journalMode"], "wal");
     }
 
@@ -5607,7 +5607,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await;
         assert_eq!(body["data"]["database"]["ok"], true);
-        assert_eq!(body["data"]["database"]["schemaVersion"], 16);
+        assert_eq!(body["data"]["database"]["schemaVersion"], 17);
         assert_eq!(
             body["data"]["database"]["currentSchemaMigrationName"],
             "expense-ai-hybrid-classification"

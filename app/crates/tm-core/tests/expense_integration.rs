@@ -357,7 +357,7 @@ fn expense_key_initialization_is_allowed_only_before_any_ledger_state() -> Resul
 #[test]
 fn current_schema_imports_reconciles_and_summarizes_without_plaintext() -> Result<()> {
     let (_temporary, core) = fixture()?;
-    assert_eq!(core.health()?.schema_version, 16);
+    assert_eq!(core.health()?.schema_version, 17);
     let probe = ExpenseCryptoProbe {
         key_version: 1,
         nonce: "nonce-for-expense-key-probe".to_owned(),
