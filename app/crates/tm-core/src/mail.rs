@@ -377,7 +377,8 @@ impl TmCore {
     }
 
     pub fn mail_account(&self, account_id: &str) -> Result<EncryptedMailAccount> {
-        query_mail_account(&self.database.connect()?, account_id)
+        let connection = self.database.connect()?;
+        query_mail_account(&connection, account_id)
     }
 
     pub fn mail_account_credential(&self, account_id: &str) -> Result<EncryptedMailCredential> {
@@ -937,7 +938,8 @@ impl TmCore {
     }
 
     pub fn mail_item(&self, item_id: &str) -> Result<EncryptedMailItem> {
-        query_mail_item(&self.database.connect()?, item_id)
+        let connection = self.database.connect()?;
+        query_mail_item(&connection, item_id)
     }
 
     pub fn record_mail_feedback(
@@ -1382,7 +1384,7 @@ impl TmCore {
 
     pub fn mail_ops_status(&self) -> Result<MailOpsStatus> {
         let connection = self.database.connect()?;
-        let (accounts, connected, reconnect): (i64, i64, i64) = connection.query_row(
+        let (account_count, connected, reconnect): (i64, i64, i64) = connection.query_row(
             "SELECT count(*),
                     coalesce(sum(CASE WHEN status = 'connected' THEN 1 ELSE 0 END), 0),
                     coalesce(sum(CASE WHEN status = 'reconnect_required' THEN 1 ELSE 0 END), 0)
@@ -1457,7 +1459,7 @@ impl TmCore {
             )
             .optional()?;
         Ok(MailOpsStatus {
-            account_count: nonnegative_u32(accounts),
+            account_count: nonnegative_u32(account_count),
             connected_count: nonnegative_u32(connected),
             reconnect_required_count: nonnegative_u32(reconnect),
             unacknowledged_important_count: nonnegative_u32(important),
