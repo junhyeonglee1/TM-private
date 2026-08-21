@@ -5610,7 +5610,7 @@ mod tests {
         assert_eq!(body["data"]["database"]["schemaVersion"], 17);
         assert_eq!(
             body["data"]["database"]["currentSchemaMigrationName"],
-            "expense-ai-hybrid-classification"
+            "read-only-mail-monitoring"
         );
         assert!(body["data"]["database"]["currentSchemaAppliedAt"].is_string());
         assert_eq!(body["data"]["localBackup"]["preMigrationCount"], 0);

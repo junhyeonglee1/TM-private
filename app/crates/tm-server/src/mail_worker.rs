@@ -1257,6 +1257,7 @@ fn sender_domain(sender: &str) -> Option<String> {
 fn clean_text(value: &str, max_chars: usize) -> String {
     let mut cleaned = String::with_capacity(value.len().min(max_chars));
     let mut in_tag = false;
+    let mut pending_space = false;
     let mut count = 0_usize;
     for character in value.chars() {
         if character == '<' {
@@ -1270,13 +1271,25 @@ fn clean_text(value: &str, max_chars: usize) -> String {
         if in_tag || character.is_control() {
             continue;
         }
+        if character.is_whitespace() {
+            pending_space = !cleaned.is_empty();
+            continue;
+        }
         if count >= max_chars {
             break;
+        }
+        if pending_space {
+            if count.saturating_add(1) >= max_chars {
+                break;
+            }
+            cleaned.push(' ');
+            count += 1;
+            pending_space = false;
         }
         cleaned.push(character);
         count += 1;
     }
-    cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
+    cleaned
 }
 
 fn clean_header(value: &str, max_chars: usize) -> String {
