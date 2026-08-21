@@ -1,4 +1,4 @@
-use std::{env, fmt, sync::Arc};
+use std::{fmt, sync::Arc};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chacha20poly1305::{
@@ -64,8 +64,9 @@ impl std::error::Error for MailCryptoError {}
 impl MailCrypto {
     #[cfg(not(test))]
     pub(super) fn from_env() -> Result<Self, MailCryptoError> {
-        let encoded =
-            Zeroizing::new(env::var(MAIL_DATA_KEY_ENV).map_err(|_| MailCryptoError::MissingKey)?);
+        let encoded = Zeroizing::new(
+            std::env::var(MAIL_DATA_KEY_ENV).map_err(|_| MailCryptoError::MissingKey)?,
+        );
         Self::from_encoded_key(&encoded)
     }
 
@@ -90,7 +91,7 @@ impl MailCrypto {
 
     pub(super) fn encrypt(
         &self,
-        field: &str,
+        _field: &str,
         aad: &[u8],
         plaintext: &str,
     ) -> Result<String, MailCryptoError> {
@@ -169,14 +170,13 @@ impl MailCrypto {
         message.extend_from_slice(field.as_bytes());
         message.push(0);
         message.extend_from_slice(normalized.as_bytes());
-        encode_hex(&hmac_sha256(&self.key[..], &message))
+        let tag = hmac_sha256(&self.key[..], &message);
+        encode_hex(&tag[..])
     }
 
     pub(super) fn key_fingerprint(&self) -> String {
-        format!(
-            "{FINGERPRINT_PREFIX}{}",
-            encode_hex(&hmac_sha256(&self.key[..], FINGERPRINT_DOMAIN))
-        )
+        let tag = hmac_sha256(&self.key[..], FINGERPRINT_DOMAIN);
+        format!("{FINGERPRINT_PREFIX}{}", encode_hex(&tag[..]))
     }
 }
 

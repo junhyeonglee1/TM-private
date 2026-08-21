@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tm_core::{
     EncryptedMailAccount, EncryptedMailItem, EncryptedMailReport, MailClassification,
-    MailOAuthState, MailProvider, MailSummary, StoreMailAccountInput, TmCore,
+    MailOAuthState, MailProvider, MailSummary, StoreMailAccountInput,
 };
 use url::Url;
 use zeroize::Zeroizing;
@@ -48,7 +48,7 @@ const GOOGLE_TOKENINFO_URL: &str = "https://oauth2.googleapis.com/tokeninfo";
 const GOOGLE_GMAIL_PROFILE_URL: &str = "https://gmail.googleapis.com/gmail/v1/users/me/profile";
 const GMAIL_READONLY_SCOPE: &str = "https://www.googleapis.com/auth/gmail.readonly";
 const MAX_BODY_BYTES: usize = 64 * 1024;
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct MailConfig {
     enabled: bool,
     gmail_enabled: bool,
@@ -58,7 +58,7 @@ pub struct MailConfig {
     google: Option<GoogleConfig>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct GoogleConfig {
     client_id: String,
     client_secret: String,
@@ -826,8 +826,9 @@ async fn connect_naver(
     let core = state.core.clone();
     let replay_key = preconditions.idempotency_key.clone();
     let operation = "naver_connect";
+    let replay_sha = body_sha.clone();
     if let Some(receipt) = blocking(&request_id, move || {
-        core.get_mail_mutation_receipt(&replay_key, operation, &body_sha)
+        core.get_mail_mutation_receipt(&replay_key, operation, &replay_sha)
     })
     .await?
     {
@@ -936,8 +937,9 @@ async fn disconnect_account(
     let request_sha = sha256_hex(format!("{account_id}:{version}").as_bytes());
     let core = state.core.clone();
     let replay_key = preconditions.idempotency_key.clone();
+    let replay_sha = request_sha.clone();
     if let Some(receipt) = blocking(&request_id, move || {
-        core.get_mail_mutation_receipt(&replay_key, "account_disconnect", &request_sha)
+        core.get_mail_mutation_receipt(&replay_key, "account_disconnect", &replay_sha)
     })
     .await?
     {
@@ -1019,8 +1021,9 @@ async fn acknowledge(
     let request_sha = sha256_hex(fingerprint.as_bytes());
     let core = state.core.clone();
     let replay_key = preconditions.idempotency_key.clone();
+    let replay_sha = request_sha.clone();
     if let Some(receipt) = blocking(&request_id, move || {
-        core.get_mail_mutation_receipt(&replay_key, "mail_acknowledge", &request_sha)
+        core.get_mail_mutation_receipt(&replay_key, "mail_acknowledge", &replay_sha)
     })
     .await?
     {
@@ -1102,8 +1105,9 @@ async fn feedback(
     let request_sha = sha256_hex(fingerprint.as_bytes());
     let core = state.core.clone();
     let replay_key = preconditions.idempotency_key.clone();
+    let replay_sha = request_sha.clone();
     if let Some(receipt) = blocking(&request_id, move || {
-        core.get_mail_mutation_receipt(&replay_key, "mail_feedback", &request_sha)
+        core.get_mail_mutation_receipt(&replay_key, "mail_feedback", &replay_sha)
     })
     .await?
     {

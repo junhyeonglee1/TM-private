@@ -239,15 +239,17 @@ async fn execute_mail_claim(
     claim: SchedulerClaim,
 ) -> Result<(), CoreError> {
     let (stop_heartbeat, mut claim_lost, heartbeat) = spawn_heartbeat(core.clone(), claim.clone());
-    let operation = run_mail_job(&core, &config, crypto.as_ref(), &openai, &claim);
-    tokio::pin!(operation);
-    let result = tokio::select! {
-        result = &mut operation => result,
-        changed = claim_lost.changed() => {
-            let _ = changed;
-            Err(CoreError::Conflict(
-                "scheduler claim is no longer active for mail work".to_owned(),
-            ))
+    let result = {
+        let operation = run_mail_job(&core, &config, crypto.as_ref(), &openai, &claim);
+        tokio::pin!(operation);
+        tokio::select! {
+            result = &mut operation => result,
+            changed = claim_lost.changed() => {
+                let _ = changed;
+                Err(CoreError::Conflict(
+                    "scheduler claim is no longer active for mail work".to_owned(),
+                ))
+            }
         }
     };
     let _ = stop_heartbeat.send(true);
