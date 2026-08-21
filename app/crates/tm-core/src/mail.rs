@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use rusqlite::{OptionalExtension, Row, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -1169,8 +1171,7 @@ impl TmCore {
         prompt_version: &str,
         model: &str,
         items: &[(String, u64)],
-        month_start: DateTime<Utc>,
-        next_month_start: DateTime<Utc>,
+        month_window: Range<DateTime<Utc>>,
     ) -> Result<String> {
         let item_count = u32::try_from(items.len()).unwrap_or(u32::MAX);
         validate_sha256(input_sha256, "mail triage input digest")?;
@@ -1189,7 +1190,10 @@ impl TmCore {
                 let attempts: i64 = transaction.query_row(
                     "SELECT count(*) FROM mail_triage_batches
                      WHERE created_at >= ?1 AND created_at < ?2",
-                    params![month_start.to_rfc3339(), next_month_start.to_rfc3339()],
+                    params![
+                        month_window.start.to_rfc3339(),
+                        month_window.end.to_rfc3339()
+                    ],
                     |row| row.get(0),
                 )?;
                 if attempts >= i64::from(MAIL_TRIAGE_MONTHLY_ATTEMPT_LIMIT) {
@@ -1802,8 +1806,7 @@ mod tests {
             "mail-triage-v1",
             "gpt-5.4-nano-2026-03-17",
             &[(item_id.to_owned(), 1)],
-            Utc::now() - Duration::days(1),
-            Utc::now() + Duration::days(31),
+            (Utc::now() - Duration::days(1))..(Utc::now() + Duration::days(31)),
         )
     }
 

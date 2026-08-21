@@ -221,8 +221,7 @@ async fn triage_mail(
         MAIL_TRIAGE_PROMPT_VERSION,
         MAIL_TRIAGE_MODEL,
         &bindings,
-        month_start,
-        next_month_start,
+        month_start..next_month_start,
     )?;
     let policy = openai.config().budget_policy();
     let reservation = match core.reserve_ai_budget_with_operation_limit(
