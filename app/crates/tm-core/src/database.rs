@@ -624,34 +624,6 @@ pub(crate) fn validate_schema_semantics(connection: &Connection, version: i64) -
     }
     require_schema_object(
         connection,
-        "trigger",
-        "mail_triage_batches_identity_immutable",
-        &["beforeupdateonmail_triage_batches", "old.status<>'claimed'"],
-    )?;
-    require_schema_object(
-        connection,
-        "trigger",
-        "mail_triage_items_guarded_completion",
-        &[
-            "beforeupdateonmail_triage_items",
-            "old.importance_scoreisnotnull",
-            "batch.status='claimed'",
-        ],
-    )?;
-    require_schema_object(
-        connection,
-        "trigger",
-        "mail_mutation_receipts_no_update",
-        &["beforeupdateonmail_mutation_receipts"],
-    )?;
-    require_schema_object(
-        connection,
-        "trigger",
-        "mail_mutation_receipts_no_delete",
-        &["beforedeleteonmail_mutation_receipts"],
-    )?;
-    require_schema_object(
-        connection,
         "index",
         "idx_expense_allocations_personal_unique",
         &[
@@ -1017,6 +989,34 @@ pub(crate) fn validate_schema_semantics(connection: &Connection, version: i64) -
     ] {
         require_schema_object(connection, "index", index, &["createindex"])?;
     }
+    require_schema_object(
+        connection,
+        "trigger",
+        "mail_triage_batches_identity_immutable",
+        &["beforeupdateonmail_triage_batches", "old.status<>'claimed'"],
+    )?;
+    require_schema_object(
+        connection,
+        "trigger",
+        "mail_triage_items_guarded_completion",
+        &[
+            "beforeupdateonmail_triage_items",
+            "old.importance_scoreisnotnull",
+            "batch.status='claimed'",
+        ],
+    )?;
+    require_schema_object(
+        connection,
+        "trigger",
+        "mail_mutation_receipts_no_update",
+        &["beforeupdateonmail_mutation_receipts"],
+    )?;
+    require_schema_object(
+        connection,
+        "trigger",
+        "mail_mutation_receipts_no_delete",
+        &["beforedeleteonmail_mutation_receipts"],
+    )?;
     for (table, forbidden_columns) in [
         ("mail_accounts", &["email", "display_name"][..]),
         (
