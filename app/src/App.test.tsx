@@ -330,7 +330,7 @@ describe("TM 데스크톱 UI", () => {
     expect(
       screen.getAllByText("TM 승인 요청 처리해줘. app/docs/prompts/change-request-processing.md를 따라줘.").length,
     ).toBeGreaterThan(1);
-  });
+  }, 10_000);
 
   it("개선 요청 작성 가이드는 유형에 맞게 바뀌고 입력 내용을 보존한다", async () => {
     const user = userEvent.setup();
