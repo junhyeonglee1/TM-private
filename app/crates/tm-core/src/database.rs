@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use crate::{Error, Result, TmHome};
 
-pub(crate) const SCHEMA_VERSION: i64 = 16;
+pub(crate) const SCHEMA_VERSION: i64 = 17;
 const INITIAL_MIGRATION: &str = include_str!("../migrations/0001_initial.sql");
 const CHANGE_REQUESTS_MIGRATION: &str = include_str!("../migrations/0002_change_requests.sql");
 const CHANGE_REQUESTS_STRICT_CAS_MIGRATION: &str =
@@ -39,6 +39,7 @@ const UNCATEGORIZED_PROJECT_MIGRATION: &str =
 const EXPENSE_REPORTING_MIGRATION: &str = include_str!("../migrations/0015_expense_reporting.sql");
 const EXPENSE_AI_CLASSIFICATION_MIGRATION: &str =
     include_str!("../migrations/0016_expense_ai_classification.sql");
+const MAIL_MONITORING_MIGRATION: &str = include_str!("../migrations/0017_mail_monitoring.sql");
 const BUSY_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone)]
@@ -312,6 +313,18 @@ impl Database {
                 [now_utc()],
             )?;
             transaction.pragma_update(None, "user_version", 16_i64)?;
+            transaction.commit()?;
+        }
+        if current_version < 17 {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(MAIL_MONITORING_MIGRATION)?;
+            transaction.execute(
+                "INSERT INTO schema_migrations(version, name, applied_at)
+                 VALUES (17, 'read-only-mail-monitoring', ?1)",
+                [now_utc()],
+            )?;
+            transaction.pragma_update(None, "user_version", 17_i64)?;
             transaction.commit()?;
         }
         Ok(())
@@ -609,6 +622,34 @@ pub(crate) fn validate_schema_semantics(connection: &Connection, version: i64) -
     ] {
         require_schema_object(connection, "index", index, &["createindex"])?;
     }
+    require_schema_object(
+        connection,
+        "trigger",
+        "mail_triage_batches_identity_immutable",
+        &["beforeupdateonmail_triage_batches", "old.status<>'claimed'"],
+    )?;
+    require_schema_object(
+        connection,
+        "trigger",
+        "mail_triage_items_guarded_completion",
+        &[
+            "beforeupdateonmail_triage_items",
+            "old.importance_scoreisnotnull",
+            "batch.status='claimed'",
+        ],
+    )?;
+    require_schema_object(
+        connection,
+        "trigger",
+        "mail_mutation_receipts_no_update",
+        &["beforeupdateonmail_mutation_receipts"],
+    )?;
+    require_schema_object(
+        connection,
+        "trigger",
+        "mail_mutation_receipts_no_delete",
+        &["beforedeleteonmail_mutation_receipts"],
+    )?;
     require_schema_object(
         connection,
         "index",
@@ -924,6 +965,110 @@ pub(crate) fn validate_schema_semantics(connection: &Connection, version: i64) -
     if invalid_no_candidate_receipts != 0 {
         return Err(Error::Invariant(format!(
             "schema 16 no-candidate receipts must contain only the fixed zero-result shape; found {invalid_no_candidate_receipts} invalid rows"
+        )));
+    }
+
+    if version < 17 {
+        return Ok(());
+    }
+
+    for table in [
+        "mail_crypto_metadata",
+        "mail_accounts",
+        "mail_credentials",
+        "mail_sync_state",
+        "mail_items",
+        "mail_feedback",
+        "mail_rules",
+        "mail_oauth_states",
+        "mail_webhook_events",
+        "mail_triage_batches",
+        "mail_triage_items",
+        "mail_reports",
+        "mail_report_items",
+        "mail_sync_events",
+        "mail_mutation_receipts",
+    ] {
+        let fragment = format!("createtable{table}");
+        require_schema_object(connection, "table", table, &[fragment.as_str()])?;
+    }
+    require_schema_object(
+        connection,
+        "table",
+        "scheduler_jobs",
+        &[
+            "'mail.gmail_watch'",
+            "'mail.gmail_reconcile'",
+            "'mail.naver_poll'",
+            "'mail.triage'",
+            "'mail.digest.morning'",
+            "'mail.digest.evening'",
+            "'mail.retention'",
+        ],
+    )?;
+    for index in [
+        "idx_mail_items_queue",
+        "idx_mail_items_account",
+        "idx_mail_items_expiry",
+        "idx_mail_oauth_states_expiry",
+        "idx_mail_triage_batches_quota",
+        "idx_mail_reports_date",
+        "idx_mail_sync_events_account",
+    ] {
+        require_schema_object(connection, "index", index, &["createindex"])?;
+    }
+    for (table, forbidden_columns) in [
+        ("mail_accounts", &["email", "display_name"][..]),
+        (
+            "mail_credentials",
+            &["refresh_token", "app_password", "secret"][..],
+        ),
+        (
+            "mail_items",
+            &[
+                "sender",
+                "sender_domain",
+                "subject",
+                "summary",
+                "body",
+                "html",
+            ][..],
+        ),
+        ("mail_reports", &["summary", "body", "html"][..]),
+    ] {
+        let pragma = format!("PRAGMA table_info(\"{table}\")");
+        let mut statement = connection.prepare(&pragma)?;
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if let Some(column) = forbidden_columns
+            .iter()
+            .find(|column| columns.iter().any(|candidate| candidate == **column))
+        {
+            return Err(Error::Invariant(format!(
+                "schema 17 forbids plaintext mail column {table}.{column}"
+            )));
+        }
+    }
+    let invalid_crypto_metadata: i64 = connection.query_row(
+        "SELECT count(*) FROM mail_crypto_metadata
+         WHERE singleton_key <> 'mail-data-key-probe' OR key_version <> 1",
+        [],
+        |row| row.get(0),
+    )?;
+    if invalid_crypto_metadata != 0 {
+        return Err(Error::Invariant(format!(
+            "schema 17 mail crypto metadata must use the singleton v1 probe; found {invalid_crypto_metadata} invalid rows"
+        )));
+    }
+    let provider_mutations: i64 = connection.query_row(
+        "SELECT count(*) FROM mail_sync_events WHERE changed_provider_state <> 0",
+        [],
+        |row| row.get(0),
+    )?;
+    if provider_mutations != 0 {
+        return Err(Error::Invariant(format!(
+            "schema 17 read-only mail sync forbids provider state changes; found {provider_mutations} invalid rows"
         )));
     }
 

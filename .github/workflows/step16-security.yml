@@ -148,7 +148,7 @@ jobs:
             --tag tm-server:step16 \
             "${TM_STEP16_CONTEXT}"
 
-      - name: Verify schema 16 backup receipt JSON semantics
+      - name: Verify schema 16 and 17 backup receipt JSON semantics
         shell: bash
         run: |
           set -euo pipefail

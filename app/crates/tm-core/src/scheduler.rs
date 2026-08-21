@@ -201,6 +201,146 @@ impl TmCore {
             .map_err(Into::into)
     }
 
+    pub fn configure_mail_scheduler(
+        &self,
+        mail_enabled: bool,
+        gmail_enabled: bool,
+        naver_enabled: bool,
+        mail_ai_enabled: bool,
+        mail_reports_enabled: bool,
+        as_of: DateTime<Utc>,
+    ) -> Result<()> {
+        self.ensure_scheduler_defaults(as_of)?;
+        let now = timestamp(as_of);
+        let jobs = [
+            (
+                "mail.gmail_watch",
+                "mail.gmail_watch",
+                "daily",
+                None,
+                Some("03:20:00"),
+                gmail_enabled,
+                timestamp(next_daily_after(Seoul, time(3, 20)?, as_of)?),
+            ),
+            (
+                "mail.gmail_reconcile",
+                "mail.gmail_reconcile",
+                "interval",
+                Some(300_i64),
+                None,
+                gmail_enabled,
+                now.clone(),
+            ),
+            (
+                "mail.naver_poll",
+                "mail.naver_poll",
+                "interval",
+                Some(180_i64),
+                None,
+                naver_enabled,
+                now.clone(),
+            ),
+            (
+                "mail.triage",
+                "mail.triage",
+                "interval",
+                Some(60_i64),
+                None,
+                mail_ai_enabled,
+                now.clone(),
+            ),
+            (
+                "mail.digest.morning",
+                "mail.digest.morning",
+                "daily",
+                None,
+                Some("08:00:00"),
+                mail_enabled && mail_reports_enabled,
+                timestamp(next_daily_after(Seoul, time(8, 0)?, as_of)?),
+            ),
+            (
+                "mail.digest.evening",
+                "mail.digest.evening",
+                "daily",
+                None,
+                Some("19:00:00"),
+                mail_enabled && mail_reports_enabled,
+                timestamp(next_daily_after(Seoul, time(19, 0)?, as_of)?),
+            ),
+            (
+                "mail.retention",
+                "mail.retention",
+                "daily",
+                None,
+                Some("03:40:00"),
+                mail_enabled,
+                timestamp(next_daily_after(Seoul, time(3, 40)?, as_of)?),
+            ),
+        ];
+        self.database
+            .transaction(TransactionBehavior::Immediate, |transaction| {
+                for (
+                    job_key,
+                    kind,
+                    schedule_type,
+                    interval_seconds,
+                    local_time,
+                    enabled,
+                    next_run_at,
+                ) in jobs
+                {
+                    transaction.execute(
+                        "INSERT INTO scheduler_jobs(
+                        id, job_key, kind, schedule_type, interval_seconds, local_time,
+                        timezone, enabled, max_attempts, misfire_grace_seconds, coalesce,
+                        next_run_at, last_scheduled_at, created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'Asia/Seoul', ?7, ?8, ?9, 1,
+                        ?10, NULL, ?11, ?11)
+                     ON CONFLICT(job_key) DO UPDATE SET
+                        enabled = excluded.enabled,
+                        max_attempts = excluded.max_attempts,
+                        misfire_grace_seconds = excluded.misfire_grace_seconds,
+                        next_run_at = CASE
+                            WHEN scheduler_jobs.enabled = 0 AND excluded.enabled = 1
+                            THEN excluded.next_run_at ELSE scheduler_jobs.next_run_at END,
+                        updated_at = excluded.updated_at",
+                        params![
+                            new_id(),
+                            job_key,
+                            kind,
+                            schedule_type,
+                            interval_seconds,
+                            local_time,
+                            if enabled { 1_i64 } else { 0_i64 },
+                            SCHEDULER_MAX_ATTEMPTS,
+                            SCHEDULER_MISFIRE_GRACE_SECONDS,
+                            next_run_at,
+                            now,
+                        ],
+                    )?;
+                }
+                Ok(())
+            })
+    }
+
+    pub fn wake_mail_scheduler_job(&self, job_key: &str, as_of: DateTime<Utc>) -> Result<()> {
+        if !matches!(
+            job_key,
+            "mail.gmail_reconcile" | "mail.naver_poll" | "mail.triage"
+        ) {
+            return Err(Error::InvalidInput(
+                "mail scheduler job cannot be woken".to_owned(),
+            ));
+        }
+        let changed = self.database.connect()?.execute(
+            "UPDATE scheduler_jobs SET next_run_at = ?2, updated_at = ?2
+             WHERE job_key = ?1 AND enabled = 1 AND next_run_at > ?2",
+            params![job_key, timestamp(as_of)],
+        )?;
+        let _ = changed;
+        Ok(())
+    }
+
     pub fn run_scheduler_cycle(
         &self,
         worker_id: &str,
@@ -282,7 +422,9 @@ impl TmCore {
                          JOIN scheduler_jobs AS job ON job.id = run.job_id
                          WHERE run.status IN ('pending', 'retry_wait')
                            AND run.available_at <= ?1
-                           AND (?2 = 1 OR job.kind <> 'stock.daily_screen')
+                           AND (?2 = 1 OR (
+                                job.kind <> 'stock.daily_screen' AND job.kind NOT LIKE 'mail.%'
+                           ))
                          ORDER BY run.available_at, run.scheduled_for, run.id
                          LIMIT 1",
                         params![now, if include_external_jobs { 1_i64 } else { 0_i64 }],
@@ -988,8 +1130,10 @@ fn time(hour: u32, minute: u32) -> Result<NaiveTime> {
 mod tests {
     use chrono::{TimeZone, Timelike};
     use chrono_tz::{America::New_York, Asia::Seoul};
+    use tempfile::tempdir;
 
     use super::{next_daily_after, time};
+    use crate::{Result, TmCore, TmHome};
 
     #[test]
     fn seoul_daily_schedule_is_stable_in_utc() {
@@ -1037,5 +1181,43 @@ mod tests {
                 .single()
                 .expect("valid UTC time")
         );
+    }
+
+    #[test]
+    fn mail_scheduler_separates_collection_ai_and_presentation_gates() -> Result<()> {
+        let temporary = tempdir()?;
+        let core = TmCore::open(TmHome::new(temporary.path()))?;
+        let as_of = chrono::Utc
+            .with_ymd_and_hms(2026, 8, 20, 15, 0, 0)
+            .single()
+            .expect("valid UTC time");
+        core.configure_mail_scheduler(true, true, false, false, false, as_of)?;
+        let connection = core.database.connect()?;
+        let row = |key: &str| -> Result<(i64, Option<i64>, Option<String>)> {
+            connection
+                .query_row(
+                    "SELECT enabled, interval_seconds, local_time
+                     FROM scheduler_jobs WHERE job_key = ?1",
+                    [key],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .map_err(Into::into)
+        };
+        assert_eq!(
+            row("mail.gmail_watch")?,
+            (1, None, Some("03:20:00".to_owned()))
+        );
+        assert_eq!(row("mail.gmail_reconcile")?, (1, Some(300), None));
+        assert_eq!(row("mail.naver_poll")?, (0, Some(180), None));
+        assert_eq!(row("mail.triage")?, (0, Some(60), None));
+        assert_eq!(row("mail.digest.morning")?.0, 0);
+        core.configure_mail_scheduler(true, true, false, false, true, as_of)?;
+        let enabled: i64 = core.database.connect()?.query_row(
+            "SELECT enabled FROM scheduler_jobs WHERE job_key = 'mail.digest.morning'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(enabled, 1);
+        Ok(())
     }
 }

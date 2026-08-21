@@ -50,7 +50,7 @@ case "$schema_version" in
         exit 1
         ;;
 esac
-if [ "$schema_version" -lt 1 ] || [ "$schema_version" -gt 16 ]; then
+if [ "$schema_version" -lt 1 ] || [ "$schema_version" -gt 17 ]; then
     echo "event=tm_backup_failed reason=unsupported_schema_version" >&2
     exit 1
 fi
@@ -209,6 +209,34 @@ expense_ai_classification_receipts'
         )"
         if [ "$table_exists" != "1" ]; then
             echo "event=tm_backup_failed reason=required_expense_classification_table_missing table=$table" >&2
+            exit 1
+        fi
+    done
+fi
+if [ "$schema_version" -ge 17 ]; then
+    mail_required_tables='mail_crypto_metadata
+mail_accounts
+mail_credentials
+mail_sync_state
+mail_items
+mail_feedback
+mail_rules
+mail_oauth_states
+mail_webhook_events
+mail_triage_batches
+mail_triage_items
+mail_reports
+mail_report_items
+mail_sync_events
+mail_mutation_receipts'
+    for table in $mail_required_tables; do
+        table_exists="$(
+            sqlite3 -readonly "$snapshot" \
+                "SELECT COUNT(*) FROM sqlite_schema
+                 WHERE type = 'table' AND name = '$table';"
+        )"
+        if [ "$table_exists" != "1" ]; then
+            echo "event=tm_backup_failed reason=required_mail_table_missing table=$table" >&2
             exit 1
         fi
     done
@@ -558,6 +586,72 @@ if [ "$schema_version" -ge 16 ]; then
     )"
     if [ "$expense_classification_semantic_summary" != "3|2|13|10|6|5|2|1|0|0|0" ]; then
         echo "event=tm_backup_failed reason=expense_classification_schema_semantics summary=$expense_classification_semantic_summary" >&2
+        exit 1
+    fi
+    schema_semantics_validated=true
+fi
+if [ "$schema_version" -ge 17 ]; then
+    mail_semantic_summary="$(
+        sqlite3 -readonly "$snapshot" "
+            WITH objects AS (
+                SELECT type, name,
+                       lower(replace(replace(replace(replace(sql, ' ', ''), char(9), ''), char(10), ''), char(13), '')) AS normalized_sql
+                FROM sqlite_schema WHERE sql IS NOT NULL
+            ), required_tables(name) AS (
+                VALUES
+                    ('mail_crypto_metadata'), ('mail_accounts'), ('mail_credentials'),
+                    ('mail_sync_state'), ('mail_items'), ('mail_feedback'), ('mail_rules'),
+                    ('mail_oauth_states'), ('mail_webhook_events'), ('mail_triage_batches'),
+                    ('mail_triage_items'), ('mail_reports'), ('mail_report_items'),
+                    ('mail_sync_events'), ('mail_mutation_receipts')
+            ), required_indexes(name) AS (
+                VALUES
+                    ('idx_mail_items_queue'), ('idx_mail_items_account'),
+                    ('idx_mail_items_expiry'), ('idx_mail_oauth_states_expiry'),
+                    ('idx_mail_triage_batches_quota'), ('idx_mail_reports_date'),
+                    ('idx_mail_sync_events_account')
+            ), required_triggers(name) AS (
+                VALUES
+                    ('mail_triage_batches_identity_immutable'),
+                    ('mail_triage_items_guarded_completion'),
+                    ('mail_mutation_receipts_no_update'),
+                    ('mail_mutation_receipts_no_delete')
+            ), forbidden_plaintext_columns(name) AS (
+                SELECT name FROM pragma_table_info('mail_accounts')
+                 WHERE name IN ('email', 'display_name')
+                UNION ALL
+                SELECT name FROM pragma_table_info('mail_credentials')
+                 WHERE name IN ('refresh_token', 'app_password', 'secret')
+                UNION ALL
+                SELECT name FROM pragma_table_info('mail_items')
+                 WHERE name IN ('sender', 'sender_domain', 'subject', 'summary', 'body', 'html')
+                UNION ALL
+                SELECT name FROM pragma_table_info('mail_reports')
+                 WHERE name IN ('summary', 'body', 'html')
+            )
+            SELECT
+                (SELECT COUNT(*) FROM required_tables AS required
+                 JOIN objects ON objects.type = 'table' AND objects.name = required.name) || '|' ||
+                (SELECT COUNT(*) FROM required_indexes AS required
+                 JOIN objects ON objects.type = 'index' AND objects.name = required.name) || '|' ||
+                (SELECT COUNT(*) FROM required_triggers AS required
+                 JOIN objects ON objects.type = 'trigger' AND objects.name = required.name) || '|' ||
+                (SELECT COUNT(*) FROM forbidden_plaintext_columns) || '|' ||
+                (SELECT COUNT(*) FROM mail_crypto_metadata
+                 WHERE singleton_key <> 'mail-data-key-probe' OR key_version <> 1) || '|' ||
+                (SELECT COUNT(*) FROM mail_sync_events WHERE changed_provider_state <> 0) || '|' ||
+                (SELECT COUNT(*) FROM objects
+                 WHERE type = 'table' AND name = 'scheduler_jobs'
+                   AND normalized_sql LIKE '%''mail.gmail_watch''%'
+                   AND normalized_sql LIKE '%''mail.gmail_reconcile''%'
+                   AND normalized_sql LIKE '%''mail.naver_poll''%'
+                   AND normalized_sql LIKE '%''mail.triage''%'
+                   AND normalized_sql LIKE '%''mail.digest.morning''%'
+                   AND normalized_sql LIKE '%''mail.digest.evening''%'
+                   AND normalized_sql LIKE '%''mail.retention''%');"
+    )"
+    if [ "$mail_semantic_summary" != "15|7|4|0|0|0|1" ]; then
+        echo "event=tm_backup_failed reason=mail_schema_semantics summary=$mail_semantic_summary" >&2
         exit 1
     fi
     schema_semantics_validated=true

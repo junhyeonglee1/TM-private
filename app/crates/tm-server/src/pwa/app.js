@@ -43,6 +43,12 @@ const state = {
   recurringRegistrationReview: null,
   recurringRegistrationCreated: null,
   selectedRecurringExpenseId: null,
+  mailView: "important",
+  mailAccounts: [],
+  mailSummary: null,
+  mailImportant: [],
+  mailReview: [],
+  mailReports: [],
   stockWatchlist: [],
   stockCatalog: null,
   selectedStockCandidate: null,
@@ -57,6 +63,7 @@ const state = {
   stockScreenResultGeneration: 0
 };
 const pendingExpenseMutationKeys = new Map();
+const pendingMailMutationKeys = new Map();
 const expenseClassificationTerminalCodes = new Set([
   "EXPENSE_CLASSIFICATION_BUDGET_EXHAUSTED",
   "EXPENSE_CLASSIFICATION_BUDGET_PERSISTENCE_FAILED",
@@ -362,6 +369,7 @@ function selectTab(tab) {
   byId(`tab-${tab}`).classList.remove("hidden");
   if (tab === "calendar") void loadCalendar();
   if (tab === "expenses") void loadExpenses();
+  if (tab === "mail") void loadMail();
   if (tab === "stocks") {
     void loadStockCatalog();
     void loadStockWatchlist();
@@ -2885,6 +2893,161 @@ byId("calendar-delete").addEventListener("click", async (event) => {
   }
 });
 
+async function loadMail() {
+  const today = todaySeoul();
+  try {
+    const [accounts, summary, important, review, reports] = await Promise.all([
+      api("/api/v1/mail/accounts"),
+      api(`/api/v1/mail/summary?date=${encodeURIComponent(today)}`),
+      api("/api/v1/mail/items?status=important&limit=100"),
+      api("/api/v1/mail/items?status=review&limit=100"),
+      api(`/api/v1/mail/reports?date=${encodeURIComponent(today)}`)
+    ]);
+    state.mailAccounts = accounts;
+    state.mailSummary = summary;
+    state.mailImportant = important.items;
+    state.mailReview = review.items;
+    state.mailReports = reports;
+    renderMail();
+  } catch (error) {
+    const root = byId("mail-summary");
+    clear(root);
+    root.append(text("p", error.code === "MAIL_DISABLED"
+      ? "메일 기능은 아직 운영 활성화 전입니다."
+      : error.message, "empty"));
+  }
+}
+
+function renderMail() {
+  const summaryRoot = byId("mail-summary");
+  clear(summaryRoot);
+  const summary = state.mailSummary;
+  summaryRoot.append(
+    mailMetric("미확인 중요", summary?.unacknowledgedImportant || 0),
+    mailMetric("확인 필요", summary?.reviewCount || 0),
+    mailMetric("연결 계정", state.mailAccounts.filter((account) => account.status === "connected").length)
+  );
+  renderMailItems("mail-important-list", state.mailImportant);
+  renderMailItems("mail-review-list", state.mailReview);
+  const reports = byId("mail-report-list");
+  clear(reports);
+  state.mailReports.forEach((report) => {
+    const card = text("article", "", "mobile-card mail-card");
+    card.append(text("strong", report.slot === "morning" ? "아침 요약" : "저녁 요약"));
+    card.append(text("p", report.summary));
+    card.append(text("small", `중요 ${report.importantCount} · 확인 필요 ${report.reviewCount}`));
+    reports.append(card);
+  });
+  if (!state.mailReports.length) reports.append(text("p", "아직 생성된 요약이 없습니다.", "empty"));
+  const accounts = byId("mail-account-list");
+  clear(accounts);
+  state.mailAccounts.forEach((account) => {
+    const card = text("article", "", "mobile-card mail-card");
+    card.append(text("strong", account.displayName || account.email));
+    card.append(text("small", `${account.provider === "gmail" ? "Gmail" : "네이버"} · ${account.status === "connected" ? "정상" : "재인증 필요"}`));
+    if (account.lastSuccessAt) card.append(text("small", `마지막 동기화 ${new Date(account.lastSuccessAt).toLocaleString("ko-KR")}`));
+    accounts.append(card);
+  });
+  if (!state.mailAccounts.length) accounts.append(text("p", "연동된 계정이 없습니다. Windows TM에서 연결하세요.", "empty"));
+}
+
+function mailMetric(label, value) {
+  const card = text("div", "", "mail-mobile-metric");
+  card.append(text("span", label), text("strong", String(value)));
+  return card;
+}
+
+function renderMailItems(rootId, items) {
+  const root = byId(rootId);
+  clear(root);
+  items.forEach((item) => {
+    const card = text("article", "", `mobile-card mail-card${item.acknowledgedAt ? " acknowledged" : ""}`);
+    const heading = text("div", "", "mail-card-heading");
+    heading.append(text("strong", item.sender), text("span", String(item.importanceScore)));
+    card.append(heading, text("h3", item.subject));
+    if (item.summary) card.append(text("p", item.summary));
+    if (item.action) card.append(text("p", `필요한 행동 · ${item.action}`, "mail-card-action"));
+    card.append(text("small", `${mailDecisionLabel(item.decisionReason)} · ${new Date(item.receivedAt).toLocaleString("ko-KR")}${item.deadline ? ` · 기한 ${item.deadline}` : ""}`));
+    const actions = text("div", "", "mail-card-actions");
+    const open = text("a", "원문 열기", "secondary");
+    open.href = item.originalUrl;
+    open.target = "_blank";
+    open.rel = "noopener noreferrer";
+    actions.append(open);
+    if (!item.acknowledgedAt) {
+      const acknowledge = text("button", "확인 완료", "secondary");
+      acknowledge.type = "button";
+      acknowledge.addEventListener("click", () => void mutateMobileMail(item, "acknowledge"));
+      actions.append(acknowledge);
+    }
+    const important = text("button", "중요", "secondary");
+    important.type = "button";
+    important.addEventListener("click", () => void mutateMobileMail(item, "feedback", true));
+    const notImportant = text("button", "중요하지 않음", "secondary");
+    notImportant.type = "button";
+    notImportant.addEventListener("click", () => void mutateMobileMail(item, "feedback", false));
+    actions.append(important, notImportant);
+    card.append(actions);
+    root.append(card);
+  });
+  if (!items.length) root.append(text("p", "표시할 메일이 없습니다.", "empty"));
+}
+
+function mailDecisionLabel(reason) {
+  return ({
+    otp: "인증 요청",
+    security_alert: "계정 보안 경고",
+    payment_failure: "결제 실패",
+    refund: "환불 확인",
+    reservation_change: "예약 변경·취소",
+    deadline: "기한 확인",
+    action_required: "행동 필요",
+    account_alert: "계정 알림",
+    payment_or_refund: "결제·환불 확인",
+    reservation_or_deadline: "예약·기한 확인",
+    uncertain: "사용자 확인 필요"
+  })[reason] || "중요도 판정";
+}
+
+async function mutateMobileMail(item, action, important = null) {
+  const operation = action === "acknowledge" ? "mail-item-acknowledge" : "mail-item-feedback";
+  const path = `/api/v1/mail/items/${encodeURIComponent(item.id)}/${action}`;
+  const mutation = `${operation}:${item.id}`;
+  const fingerprint = `${item.version}:${important === null ? "" : String(important)}`;
+  let pending = pendingMailMutationKeys.get(mutation);
+  if (!pending || pending.fingerprint !== fingerprint) {
+    pending = { fingerprint, key: crypto.randomUUID() };
+    pendingMailMutationKeys.set(mutation, pending);
+  }
+  try {
+    await api(path, {
+      method: "POST",
+      headers: mutationHeaders(operation, item.version, pending.key),
+      body: action === "feedback" ? { important } : undefined
+    });
+    if (pendingMailMutationKeys.get(mutation)?.key === pending.key) {
+      pendingMailMutationKeys.delete(mutation);
+    }
+    await loadMail();
+    toast(action === "acknowledge" ? "메일 확인을 완료했습니다." : "중요도 피드백을 반영했습니다.");
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+document.querySelectorAll("[data-mail-view]").forEach((button) => {
+  button.addEventListener("click", () => {
+    state.mailView = button.dataset.mailView;
+    document.querySelectorAll("[data-mail-view]").forEach((candidate) => {
+      if (candidate === button) candidate.setAttribute("aria-current", "page");
+      else candidate.removeAttribute("aria-current");
+    });
+    document.querySelectorAll(".mail-view").forEach((view) => view.classList.add("hidden"));
+    byId(`mail-view-${state.mailView}`).classList.remove("hidden");
+  });
+});
+byId("mail-refresh").addEventListener("click", () => void loadMail());
+
 const taskStatusLabels = {
   inbox: "수신함",
   todo: "할 일",
@@ -3015,9 +3178,25 @@ function refreshProjectSelects() {
 }
 
 async function loadTaskWorkspace() {
-  await loadProjects(false);
+  await Promise.all([loadProjects(false), loadMailBrief()]);
   await loadTasks(false);
 }
+
+async function loadMailBrief() {
+  try {
+    const summary = await api(`/api/v1/mail/summary?date=${encodeURIComponent(todaySeoul())}`);
+    const visible = summary.presentationEnabled
+      && (summary.unacknowledgedImportant > 0 || summary.reviewCount > 0 || summary.latestReport);
+    show("task-mail-brief", Boolean(visible));
+    if (!visible) return;
+    byId("task-mail-brief-title").textContent = `중요 ${summary.unacknowledgedImportant}건`;
+    byId("task-mail-brief-detail").textContent = `확인 필요 ${summary.reviewCount}건${summary.latestReport ? " · 최근 요약 있음" : ""}`;
+  } catch {
+    show("task-mail-brief", false);
+  }
+}
+
+byId("task-mail-brief").addEventListener("click", () => selectTab("mail"));
 
 async function loadProjects(append = false) {
   const list = byId("projects-list");

@@ -128,7 +128,7 @@ foreach ($required in @(
     '--label "org.opencontainers.image.revision=${TM_SOURCE_SHA}"',
     '-CommitSha $env:TM_SOURCE_SHA',
     '--platform linux/amd64',
-    'Verify schema 16 backup receipt JSON semantics',
+    'Verify schema 16 and 17 backup receipt JSON semantics',
     "docker run --rm --entrypoint sqlite3 tm-server:step16 :memory:",
     "SELECT json_object('itemGroupCount',0",
     'requirements-pip-audit-lock.txt',
@@ -690,6 +690,86 @@ if ($backupOnce -notmatch 'expense_ai_classification_batches' -or
     $backupOnce -notmatch 'idx_expense_ai_classification_batches_active_input' -or
     $backupOnce -notmatch 'forbidden_plaintext_columns') {
     $violations.Add('The remote backup script is missing schema 16 classification ledger semantics.')
+}
+if ($backupOnce -notmatch 'mail_required_tables' -or
+    $backupOnce -notmatch 'mail_crypto_metadata' -or
+    $backupOnce -notmatch 'mail_credentials' -or
+    $backupOnce -notmatch 'mail_webhook_events' -or
+    $backupOnce -notmatch 'mail_mutation_receipts' -or
+    $backupOnce -notmatch 'mail_triage_items_guarded_completion' -or
+    $backupOnce -notmatch 'mail_mutation_receipts_no_delete' -or
+    $backupOnce -notmatch 'forbidden_plaintext_columns' -or
+    $backupOnce -notmatch 'changed_provider_state' -or
+    $backupOnce -notmatch 'mail\.gmail_reconcile' -or
+    $backupOnce -notmatch 'mail\.naver_poll') {
+    $violations.Add('The remote backup script is missing schema 17 mail durability and privacy semantics.')
+}
+
+$mailApiSource = [System.IO.File]::ReadAllText(
+    (Join-Path $appRoot 'crates\tm-server\src\mail_api.rs'),
+    [System.Text.Encoding]::UTF8
+)
+$mailCryptoSource = [System.IO.File]::ReadAllText(
+    (Join-Path $appRoot 'crates\tm-server\src\mail_crypto.rs'),
+    [System.Text.Encoding]::UTF8
+)
+$mailWorkerSource = [System.IO.File]::ReadAllText(
+    (Join-Path $appRoot 'crates\tm-server\src\mail_worker.rs'),
+    [System.Text.Encoding]::UTF8
+)
+foreach ($required in @(
+    'https://www.googleapis.com/auth/gmail.readonly',
+    'authorizationUrlCiphertext',
+    'acknowledge_mail_item_with_receipt',
+    'record_mail_feedback_with_receipt',
+    'disable_mail_account_with_receipt',
+    'validate_google_oidc',
+    'email_verified',
+    'TM_MAIL_REPORTS_ENABLED'
+)) {
+    if (-not $mailApiSource.Contains($required)) {
+        $violations.Add("The mail API security boundary is missing: $required")
+    }
+}
+foreach ($required in @(
+    'TM_MAIL_DATA_KEY_V1',
+    'XChaCha20Poly1305',
+    'Hmac<Sha256>',
+    'Zeroizing'
+)) {
+    if (-not $mailCryptoSource.Contains($required)) {
+        $violations.Add("The mail credential encryption boundary is missing: $required")
+    }
+}
+foreach ($required in @(
+    'gpt-5.4-nano-2026-03-17',
+    'MAIL_TRIAGE_MONTHLY_HARD_LIMIT_MICROUSD',
+    'MAIL_TRIAGE_MAXIMUM_COST_MICROUSD',
+    '"store": false',
+    'EXAMINE INBOX',
+    'UID FETCH {uid} (UID INTERNALDATE BODY.PEEK',
+    'mail triage input exceeded its privacy boundary',
+    'sensitive mail entered the AI triage boundary'
+)) {
+    if (-not $mailWorkerSource.Contains($required)) {
+        $violations.Add("The read-only mail worker boundary is missing: $required")
+    }
+}
+foreach ($forbiddenImapCommand in @(
+    'SELECT INBOX',
+    'UID STORE',
+    'EXPUNGE',
+    'UID COPY',
+    'UID MOVE',
+    'APPEND INBOX'
+)) {
+    if ($mailWorkerSource.Contains($forbiddenImapCommand)) {
+        $violations.Add("The Naver IMAP worker contains a mailbox mutation command: $forbiddenImapCommand")
+    }
+}
+if ($mailApiSource -match '(?i)tracing::(?:debug|info|warn|error)!\([^\r\n]*(?:app_password|refresh_token|subject|sender|preview)' -or
+    $mailWorkerSource -match '(?i)tracing::(?:debug|info|warn|error)!\([^\r\n]*(?:app_password|refresh_token|subject|sender|preview)') {
+    $violations.Add('Mail secrets or message metadata may be written to telemetry.')
 }
 if ($backupLoop -notmatch '\[ "\$current_schema" -ge 15 \] 2>/dev/null' -or
     $backupLoop -match '\[ "\$current_schema" = "15" \]') {

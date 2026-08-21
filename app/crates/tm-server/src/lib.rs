@@ -21,6 +21,9 @@ mod expense_classification;
 mod expense_crypto;
 mod expense_report;
 mod import_api;
+pub mod mail_api;
+mod mail_crypto;
+mod mail_worker;
 mod memories;
 pub mod openai;
 mod orchestrator;
@@ -48,7 +51,8 @@ use serde::{Deserialize, Serialize};
 use tm_core::{
     ASSISTANT_ACTION_APPROVAL_TTL_SECONDS, AiBudgetStatus, AiOperationBudgetStatus, AiTokenUsage,
     DesktopCommand, Error as CoreError, ExpenseAiClassificationOpsStatus, ExpenseCryptoProbe,
-    HealthReport, STOCK_AI_MONTHLY_HARD_LIMIT_MICROUSD, STOCK_AI_OPERATION, SchedulerStatus,
+    HealthReport, MAIL_TRIAGE_MONTHLY_HARD_LIMIT_MICROUSD, MAIL_TRIAGE_OPERATION, MailOpsStatus,
+    STOCK_AI_MONTHLY_HARD_LIMIT_MICROUSD, STOCK_AI_OPERATION, SchedulerStatus,
     StockScreenAttemptSummary, StockScreenCoverage, TaskReportCompletion, TaskReportStart, TmCore,
     expense_text_aad,
 };
@@ -62,6 +66,8 @@ use crate::costs::{CloudCostMeter, RailwayUsageClient, RailwayUsageConfig};
 use crate::expense_crypto::{
     EXPENSE_EXPECTED_KEY_FINGERPRINT_ENV, ExpenseCrypto, ExpenseCryptoError,
 };
+use crate::mail_api::MailConfig;
+use crate::mail_crypto::{MailCrypto, MailCryptoError};
 use crate::openai::{
     OpenAiClient, OpenAiConfig, OpenAiError, OpenAiProbeResult, PROBE_MAXIMUM_COST_MICROUSD,
 };
@@ -269,6 +275,7 @@ pub struct ServerConfig {
     pub task_report_enabled: bool,
     pub stock: StockConfig,
     pub railway_usage: RailwayUsageConfig,
+    pub mail: MailConfig,
 }
 
 impl ServerConfig {
@@ -455,6 +462,13 @@ impl ServerConfig {
             expense_classification_ai_enabled,
             &openai,
         )?;
+        let mail = MailConfig::from_env(profile == ServerProfile::CloudAuthenticated, ai_enabled)?;
+        if mail.ai_enabled() && !openai.configured() {
+            return Err(format!(
+                "OPENAI_API_KEY is required when {}=true",
+                mail_api::MAIL_AI_ENABLED_ENV
+            ));
+        }
 
         Ok(Self {
             profile,
@@ -471,6 +485,7 @@ impl ServerConfig {
             task_report_enabled,
             stock,
             railway_usage,
+            mail,
         })
     }
 }
@@ -510,6 +525,9 @@ struct AppState {
     stock: StockConfig,
     railway_usage: RailwayUsageClient,
     security: SecurityMonitor,
+    mail: MailConfig,
+    mail_crypto: Result<MailCrypto, MailCryptoError>,
+    mail_key_fingerprint: Option<String>,
 }
 
 impl AppState {
@@ -566,6 +584,9 @@ impl AppState {
             stock: StockConfig::default(),
             railway_usage: RailwayUsageClient::disabled(),
             security,
+            mail: MailConfig::default(),
+            mail_crypto: Err(MailCryptoError::MissingKey),
+            mail_key_fingerprint: None,
         }
     }
 
@@ -606,6 +627,8 @@ impl AppState {
         expense_rollout: ExpenseRolloutConfig,
     ) -> Self {
         let loaded_expense_crypto = load_expense_crypto_with_rollout(&core, &expense_rollout);
+        let mail = MailConfig::default();
+        let loaded_mail_crypto = load_mail_crypto(&core, &mail);
         Self {
             core,
             openai,
@@ -625,8 +648,50 @@ impl AppState {
             stock,
             railway_usage,
             security,
+            mail,
+            mail_key_fingerprint: loaded_mail_crypto
+                .as_ref()
+                .ok()
+                .map(MailCrypto::key_fingerprint),
+            mail_crypto: loaded_mail_crypto,
         }
     }
+
+    fn enable_mail(mut self, mail: MailConfig) -> Self {
+        let loaded = load_mail_crypto(&self.core, &mail);
+        self.mail_key_fingerprint = loaded.as_ref().ok().map(MailCrypto::key_fingerprint);
+        self.mail_crypto = loaded;
+        self.mail = mail;
+        self
+    }
+}
+
+const MAIL_CRYPTO_PROBE_PLAINTEXT: &str = "tm-mail-key-probe-v1";
+
+fn load_mail_crypto(core: &TmCore, config: &MailConfig) -> Result<MailCrypto, MailCryptoError> {
+    if !config.enabled() {
+        return Err(MailCryptoError::MissingKey);
+    }
+    let crypto = MailCrypto::from_env()?;
+    let existing = core
+        .mail_crypto_probe()
+        .map_err(|_| MailCryptoError::KeyVerificationFailed)?;
+    let probe = if let Some(existing) = existing {
+        existing
+    } else {
+        let encrypted = crypto.encrypt(
+            "key_probe",
+            b"tm-mail:key-probe:v1",
+            MAIL_CRYPTO_PROBE_PLAINTEXT,
+        )?;
+        core.initialize_mail_crypto_probe(&encrypted)
+            .map_err(|_| MailCryptoError::KeyVerificationFailed)?
+    };
+    let plaintext = crypto.decrypt(&probe, b"tm-mail:key-probe:v1")?;
+    if plaintext != MAIL_CRYPTO_PROBE_PLAINTEXT {
+        return Err(MailCryptoError::KeyVerificationFailed);
+    }
+    Ok(crypto)
 }
 
 const EXPENSE_CRYPTO_PROBE_PLAINTEXT: &str = "tm-expense-key-probe-v1";
@@ -1037,6 +1102,8 @@ struct OperationsStatus {
     ai_budget: AiBudgetStatus,
     expense_classification_budget: AiOperationBudgetStatus,
     expense_classification: ExpenseAiClassificationOpsStatus,
+    mail_budget: AiOperationBudgetStatus,
+    mail: MailOpsStatus,
     database: OperationsDatabaseStatus,
     scheduler: SchedulerStatus,
     local_backup: LocalBackupStatus,
@@ -1085,6 +1152,13 @@ struct OperationsControls {
     expense_key_initialized: bool,
     expense_key_initialization_allowed: bool,
     task_report_enabled: bool,
+    mail_enabled: bool,
+    gmail_enabled: bool,
+    naver_mail_enabled: bool,
+    mail_ai_enabled: bool,
+    mail_reports_enabled: bool,
+    mail_crypto_ready: bool,
+    mail_key_fingerprint: Option<String>,
     primary_failed_attempt_limit_per_minute: u32,
     authenticated_request_limit_per_minute: u32,
     maximum_request_target_bytes: usize,
@@ -1322,6 +1396,37 @@ pub fn build_cloud_authenticated_router_with_feature_controls_costs_stock_and_ex
     expense_classification_ai_enabled: bool,
     expense_rollout: ExpenseRolloutConfig,
 ) -> Router {
+    build_cloud_authenticated_router_with_feature_controls_costs_stock_expenses_and_mail(
+        core,
+        auth,
+        openai,
+        incident_mode,
+        ai_enabled,
+        task_report_enabled,
+        railway_usage,
+        stock,
+        expense_ai_enabled,
+        expense_classification_ai_enabled,
+        expense_rollout,
+        MailConfig::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_cloud_authenticated_router_with_feature_controls_costs_stock_expenses_and_mail(
+    core: TmCore,
+    auth: AuthConfig,
+    openai: OpenAiClient,
+    incident_mode: IncidentMode,
+    ai_enabled: bool,
+    task_report_enabled: bool,
+    railway_usage: RailwayUsageClient,
+    stock: StockConfig,
+    expense_ai_enabled: bool,
+    expense_classification_ai_enabled: bool,
+    expense_rollout: ExpenseRolloutConfig,
+    mail: MailConfig,
+) -> Router {
     let security = SecurityMonitor::new();
     let authenticator = TokenAuthenticator::new(auth);
     let auth_state = CloudAuthState {
@@ -1345,6 +1450,7 @@ pub fn build_cloud_authenticated_router_with_feature_controls_costs_stock_and_ex
         .route("/deployment-readyz", get(deployment_readyz))
         .merge(device_api::routes())
         .merge(expense_api::routes())
+        .merge(mail_api::routes())
         .merge(pwa::routes())
         .route("/api/v1/auth/status", get(auth_status))
         .route("/api/v1/ops/status", get(operations_status))
@@ -1437,7 +1543,7 @@ pub fn build_cloud_authenticated_router_with_feature_controls_costs_stock_and_ex
             state.expense_crypto_required = true;
             state.expense_ai_enabled = expense_ai_enabled;
             state.expense_classification_ai_enabled = expense_classification_ai_enabled;
-            state
+            state.enable_mail(mail)
         })
         .layer(write_api::body_limit())
         .layer(middleware::from_fn_with_state(
@@ -1507,6 +1613,7 @@ async fn readyz(
     Extension(request_id): Extension<RequestId>,
 ) -> Result<Json<ApiEnvelope<Readiness>>, ApiError> {
     ensure_expense_crypto_ready(&state, &request_id)?;
+    ensure_mail_crypto_ready(&state, &request_id)?;
     let error_request_id = request_id.0.clone();
     let health = tokio::task::spawn_blocking(move || state.core.health())
         .await
@@ -1556,6 +1663,7 @@ async fn cloud_readyz(
     Extension(request_id): Extension<RequestId>,
 ) -> Result<Json<ApiEnvelope<CloudReadiness>>, ApiError> {
     ensure_expense_crypto_ready(&state, &request_id)?;
+    ensure_mail_crypto_ready(&state, &request_id)?;
     let error_request_id = request_id.0.clone();
     let health = tokio::task::spawn_blocking(move || state.core.health())
         .await
@@ -1683,6 +1791,18 @@ fn ensure_expense_crypto_ready(state: &AppState, request_id: &RequestId) -> Resu
         });
     }
     Ok(())
+}
+
+fn ensure_mail_crypto_ready(state: &AppState, request_id: &RequestId) -> Result<(), ApiError> {
+    if !state.mail.enabled() || state.mail_crypto.is_ok() {
+        return Ok(());
+    }
+    Err(ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: "MAIL_CRYPTO_NOT_READY",
+        message: "mail data protection is not ready".to_owned(),
+        request_id: request_id.0.clone(),
+    })
 }
 
 async fn auth_status(
@@ -2468,6 +2588,11 @@ async fn operations_status(
             expense_classification::EXPENSE_CLASSIFICATION_MONTHLY_HARD_LIMIT_MICROUSD,
         )?;
         let expense_classification = state.core.expense_ai_classification_ops_status()?;
+        let mail_budget = state.core.ai_operation_budget_status(
+            MAIL_TRIAGE_OPERATION,
+            MAIL_TRIAGE_MONTHLY_HARD_LIMIT_MICROUSD,
+        )?;
+        let mail = state.core.mail_ops_status()?;
         let stock_budget = state
             .core
             .ai_operation_budget_status(STOCK_AI_OPERATION, STOCK_AI_MONTHLY_HARD_LIMIT_MICROUSD)?;
@@ -2558,7 +2683,7 @@ async fn operations_status(
                 retry_after_seconds: None,
             }
         };
-        let (overall_status, alerts) = operations_alerts(
+        let (_, mut alerts) = operations_alerts(
             &health,
             &scheduler,
             &remote_backup,
@@ -2570,6 +2695,47 @@ async fn operations_status(
             state.expense_rollout_mode,
             checked_at,
         );
+        if state.mail.enabled() && state.mail_crypto.is_err() {
+            alerts.push(OperationsAlert {
+                severity: "critical",
+                code: "MAIL_CRYPTO_NOT_READY",
+                message: "Mail data protection key verification failed",
+            });
+        }
+        if state.mail.enabled()
+            && (mail.dead_letter_count > 0
+                || mail.reconnect_required_count > 0
+                || mail.accounts.iter().any(|account| {
+                    account.next_expected_at.as_deref().is_some_and(|value| {
+                        DateTime::parse_from_rfc3339(value).is_ok_and(|expected| {
+                            checked_at
+                                .signed_duration_since(expected.with_timezone(&Utc))
+                                .num_minutes()
+                                > 10
+                        })
+                    })
+                }))
+        {
+            alerts.push(OperationsAlert {
+                severity: "warning",
+                code: "MAIL_MONITORING_DEGRADED",
+                message: "Mail synchronization or account authorization needs operator review",
+            });
+        }
+        if state.mail.ai_enabled() && mail_budget.hard_stop_reached {
+            alerts.push(OperationsAlert {
+                severity: "warning",
+                code: "MAIL_AI_HARD_STOP_REACHED",
+                message: "Mail AI triage reached its dedicated monthly hard stop",
+            });
+        }
+        let overall_status = if alerts.iter().any(|alert| alert.severity == "critical") {
+            "critical"
+        } else if alerts.iter().any(|alert| alert.severity == "warning") {
+            "warning"
+        } else {
+            "healthy"
+        };
         Ok::<_, CoreError>(OperationsStatus {
             service_version: env!("CARGO_PKG_VERSION"),
             deployment_provenance: operations_deployment_provenance(),
@@ -2597,6 +2763,13 @@ async fn operations_status(
                 expense_key_initialized: expense_key_status.key_initialized,
                 expense_key_initialization_allowed: expense_key_status.key_initialization_allowed,
                 task_report_enabled: state.task_report_enabled,
+                mail_enabled: state.mail.enabled(),
+                gmail_enabled: state.mail.gmail_enabled(),
+                naver_mail_enabled: state.mail.naver_enabled(),
+                mail_ai_enabled: state.mail.ai_enabled(),
+                mail_reports_enabled: state.mail.reports_enabled(),
+                mail_crypto_ready: !state.mail.enabled() || state.mail_crypto.is_ok(),
+                mail_key_fingerprint: state.mail_key_fingerprint.clone(),
                 primary_failed_attempt_limit_per_minute: FAILED_ATTEMPT_LIMIT,
                 authenticated_request_limit_per_minute: AUTHENTICATED_REQUEST_LIMIT,
                 maximum_request_target_bytes: MAX_REQUEST_TARGET_BYTES,
@@ -2610,6 +2783,8 @@ async fn operations_status(
             ai_budget,
             expense_classification_budget,
             expense_classification,
+            mail_budget,
+            mail,
             database: OperationsDatabaseStatus {
                 ok: health.ok,
                 schema_version: health.schema_version,
@@ -3093,7 +3268,9 @@ async fn authenticate_cloud_request(
         request.uri().path(),
         "/healthz" | "/readyz" | "/deployment-readyz"
     ) || (auth_state.allow_public_device_routes
-        && device_api::is_public_path(request.uri().path()))
+        && mail_api::is_public_path(request.uri().path()))
+        || (auth_state.allow_public_device_routes
+            && device_api::is_public_path(request.uri().path()))
     {
         return next.run(request).await;
     }
@@ -3525,6 +3702,14 @@ fn safe_route_family(path: &str) -> &'static str {
         "/api/v1/expenses/reports" => "/api/v1/expenses/reports",
         "/api/v1/expenses/reports/latest" => "/api/v1/expenses/reports/latest",
         "/api/v1/expenses/classifications:run" => "/api/v1/expenses/classifications:run",
+        "/api/v1/mail/accounts" => "/api/v1/mail/accounts",
+        "/api/v1/mail/summary" => "/api/v1/mail/summary",
+        "/api/v1/mail/items" => "/api/v1/mail/items",
+        "/api/v1/mail/reports" => "/api/v1/mail/reports",
+        "/api/v1/mail/accounts/gmail/oauth/start" => "/api/v1/mail/accounts/gmail/oauth/start",
+        "/api/v1/mail/accounts/naver" => "/api/v1/mail/accounts/naver",
+        "/api/v1/mail/oauth/google/callback" => "/api/v1/mail/oauth/google/callback",
+        "/api/v1/mail/webhooks/google" => "/api/v1/mail/webhooks/google",
         "/api/v1/ai/probe" => "/api/v1/ai/probe",
         "/api/v1/assistant/query" => "/api/v1/assistant/query",
         "/api/v1/assistant/task-report" => "/api/v1/assistant/task-report",
@@ -3579,6 +3764,8 @@ fn safe_route_family(path: &str) -> &'static str {
         value if value.starts_with("/api/v1/expenses/reports/") && value.ends_with("/feedback") => {
             "/api/v1/expenses/reports/{id}/feedback"
         }
+        value if value.starts_with("/api/v1/mail/accounts/") => "/api/v1/mail/accounts/{id}",
+        value if value.starts_with("/api/v1/mail/items/") => "/api/v1/mail/items/{id}/{action}",
         value if value.starts_with("/api/v1/tasks/") => "/api/v1/tasks/{id}",
         value if value.starts_with("/api/v1/checklist/") => "/api/v1/checklist/{id}",
         value if value.starts_with("/api/v1/notes/") => "/api/v1/notes/{id}",
@@ -6812,7 +6999,7 @@ mod tests {
                 .to_vec(),
         )
         .expect("service worker is UTF-8");
-        assert!(service_worker.contains(r#"tm-mobile-shell-v16-simple-ui-v1"#));
+        assert!(service_worker.contains(r#"tm-mobile-shell-v17-mail-v1"#));
         assert!(service_worker.contains(r#"request.method !== "GET""#));
 
         let stock_catalog = router

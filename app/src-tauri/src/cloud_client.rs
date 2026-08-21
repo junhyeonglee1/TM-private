@@ -617,6 +617,128 @@ impl CloudClient {
         .await
     }
 
+    pub(crate) async fn mail_feature(&self, command: &str, args: Value) -> CloudResult<Value> {
+        if self.mode != DataMode::Cloud {
+            return Err("TM mail features require cloud mode".to_owned());
+        }
+        let mut path = Vec::<String>::new();
+        let mut query = Vec::<(&'static str, String)>::new();
+        let mut confirmation = None;
+        let mut create_precondition = false;
+        let mut expected_version = None;
+        let mut body = None;
+        let method = match command {
+            "get_mail_accounts" => {
+                path.extend(["mail".to_owned(), "accounts".to_owned()]);
+                Method::GET
+            }
+            "get_mail_summary" => {
+                path.extend(["mail".to_owned(), "summary".to_owned()]);
+                query.push(("date", required_day(&args, "date")?.to_owned()));
+                Method::GET
+            }
+            "list_mail_items" => {
+                path.extend(["mail".to_owned(), "items".to_owned()]);
+                if let Some(status) = optional_enum(
+                    &args,
+                    "status",
+                    &["important", "review", "not_important", "excluded"],
+                )? {
+                    query.push(("status", status.to_owned()));
+                }
+                if let Some(account_id) = args.get("accountId").and_then(Value::as_str) {
+                    query.push(("accountId", account_id.to_owned()));
+                }
+                append_optional_page_query(&args, &mut query)?;
+                Method::GET
+            }
+            "get_mail_reports" => {
+                path.extend(["mail".to_owned(), "reports".to_owned()]);
+                query.push(("date", required_day(&args, "date")?.to_owned()));
+                Method::GET
+            }
+            "start_gmail_oauth" => {
+                path.extend([
+                    "mail".to_owned(),
+                    "accounts".to_owned(),
+                    "gmail".to_owned(),
+                    "oauth".to_owned(),
+                    "start".to_owned(),
+                ]);
+                confirmation = Some("mail-gmail-oauth-start");
+                create_precondition = true;
+                Method::POST
+            }
+            "connect_naver_mail" => {
+                path.extend(["mail".to_owned(), "accounts".to_owned(), "naver".to_owned()]);
+                confirmation = Some("mail-naver-connect");
+                create_precondition = true;
+                body = Some(copy_object_fields(
+                    &args,
+                    &["email", "displayName", "appPassword"],
+                )?);
+                Method::POST
+            }
+            "disconnect_mail_account" => {
+                let account_id = required_resource_id(&args, "accountId")?;
+                path.extend([
+                    "mail".to_owned(),
+                    "accounts".to_owned(),
+                    account_id.to_owned(),
+                ]);
+                confirmation = Some("mail-account-disconnect");
+                expected_version = Some(required_version(&args, "expectedVersion")?);
+                Method::DELETE
+            }
+            "acknowledge_mail_item" => {
+                let item_id = required_resource_id(&args, "itemId")?;
+                path.extend([
+                    "mail".to_owned(),
+                    "items".to_owned(),
+                    item_id.to_owned(),
+                    "acknowledge".to_owned(),
+                ]);
+                confirmation = Some("mail-item-acknowledge");
+                expected_version = Some(required_version(&args, "expectedVersion")?);
+                Method::POST
+            }
+            "feedback_mail_item" => {
+                let item_id = required_resource_id(&args, "itemId")?;
+                let important = args
+                    .get("important")
+                    .and_then(Value::as_bool)
+                    .ok_or_else(|| "TM mail feedback must be a boolean".to_owned())?;
+                path.extend([
+                    "mail".to_owned(),
+                    "items".to_owned(),
+                    item_id.to_owned(),
+                    "feedback".to_owned(),
+                ]);
+                confirmation = Some("mail-item-feedback");
+                expected_version = Some(required_version(&args, "expectedVersion")?);
+                body = Some(serde_json::json!({ "important": important }));
+                Method::POST
+            }
+            _ => return Err("TM mail feature command is not allowed".to_owned()),
+        };
+        self.send_expense_request(
+            method,
+            &path,
+            &query,
+            confirmation,
+            None,
+            if confirmation.is_some() {
+                Some(required_mail_idempotency_key(&args)?)
+            } else {
+                None
+            },
+            create_precondition,
+            expected_version,
+            body,
+        )
+        .await
+    }
+
     pub(crate) async fn import_expenses(
         &self,
         body: Value,
@@ -819,6 +941,19 @@ impl CloudClient {
     }
 }
 
+fn required_mail_idempotency_key(args: &Value) -> CloudResult<String> {
+    let value = args
+        .get("idempotencyKey")
+        .and_then(Value::as_str)
+        .and_then(|value| value.strip_prefix("desktop-mail:"))
+        .and_then(|value| {
+            let parsed = uuid::Uuid::parse_str(value).ok()?;
+            (parsed.hyphenated().to_string() == value).then_some(value)
+        })
+        .ok_or_else(|| "TM mail idempotency key is invalid".to_owned())?;
+    Ok(format!("desktop-mail:{value}"))
+}
+
 fn required_object<'a>(args: &'a Value, field: &str) -> CloudResult<&'a Value> {
     args.get(field)
         .filter(|value| value.is_object())
@@ -847,6 +982,21 @@ fn required_month<'a>(args: &'a Value, field: &str) -> CloudResult<&'a str> {
         .filter(|value| valid_month(value))
         .ok_or_else(|| format!("TM expense month is invalid: {field}"))?;
     Ok(value)
+}
+
+fn required_day<'a>(args: &'a Value, field: &str) -> CloudResult<&'a str> {
+    args.get(field)
+        .and_then(Value::as_str)
+        .filter(|value| {
+            value.len() == 10
+                && value.as_bytes()[4] == b'-'
+                && value.as_bytes()[7] == b'-'
+                && value
+                    .bytes()
+                    .enumerate()
+                    .all(|(index, byte)| matches!(index, 4 | 7) || byte.is_ascii_digit())
+        })
+        .ok_or_else(|| format!("TM mail date is invalid: {field}"))
 }
 
 fn optional_month<'a>(args: &'a Value, field: &str) -> CloudResult<Option<&'a str>> {

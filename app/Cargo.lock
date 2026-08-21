@@ -319,6 +319,7 @@ dependencies = [
  "serde_urlencoded",
  "sync_wrapper",
  "tokio",
+ "tokio-rustls",
  "tower",
  "tower-layer",
  "tower-service",
@@ -4661,11 +4662,13 @@ dependencies = [
  "tempfile",
  "tm-core",
  "tokio",
+ "tokio-rustls",
  "tower",
  "tracing",
  "tracing-subscriber",
  "url",
  "uuid",
+ "webpki-roots",
  "zeroize",
 ]
 

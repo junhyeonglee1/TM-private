@@ -18,6 +18,9 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::{
+    mail_api::MailConfig,
+    mail_crypto::MailCrypto,
+    mail_worker,
     openai::{OpenAiClient, estimate_model_cost_microusd},
     stock::{
         STOCK_AI_MAX_CANDIDATES, STOCK_UNIVERSE_MAX_AGE_DAYS, StockAiCandidate, StockAiErrorKind,
@@ -55,14 +58,37 @@ pub fn spawn(
     stock_data: StockDataClient,
     stock_config: StockConfig,
     openai: OpenAiClient,
+    mail_config: MailConfig,
 ) -> JoinHandle<()> {
     let worker_id = format!("tm-server-{}", Uuid::now_v7());
     tokio::spawn(async move {
+        let mail_crypto = if mail_config.enabled() {
+            match MailCrypto::from_env() {
+                Ok(crypto) => Some(crypto),
+                Err(error) => {
+                    tracing::error!(worker_id, %error, "mail scheduler encryption setup failed");
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         let configured = {
             let core = core.clone();
             let enabled = stock_config.screen_enabled();
-            tokio::task::spawn_blocking(move || core.configure_stock_scheduler(enabled, Utc::now()))
-                .await
+            let scheduler_mail_config = mail_config.clone();
+            tokio::task::spawn_blocking(move || {
+                core.configure_stock_scheduler(enabled, Utc::now())?;
+                core.configure_mail_scheduler(
+                    scheduler_mail_config.enabled(),
+                    scheduler_mail_config.gmail_enabled(),
+                    scheduler_mail_config.naver_enabled(),
+                    scheduler_mail_config.ai_enabled(),
+                    scheduler_mail_config.reports_enabled(),
+                    Utc::now(),
+                )
+            })
+            .await
         };
         match configured {
             Ok(Ok(())) => {}
@@ -80,8 +106,16 @@ pub fn spawn(
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
-            if let Err(error) =
-                run_cycle(&core, &stock_data, &stock_config, &openai, &worker_id).await
+            if let Err(error) = run_cycle(
+                &core,
+                &stock_data,
+                &stock_config,
+                &openai,
+                &mail_config,
+                mail_crypto.as_ref(),
+                &worker_id,
+            )
+            .await
             {
                 tracing::error!(worker_id, %error, "scheduler cycle failed");
             }
@@ -94,6 +128,8 @@ async fn run_cycle(
     stock_data: &StockDataClient,
     stock_config: &StockConfig,
     openai: &OpenAiClient,
+    mail_config: &MailConfig,
+    mail_crypto: Option<&MailCrypto>,
     worker_id: &str,
 ) -> Result<(), CoreError> {
     let reconcile_core = core.clone();
@@ -123,6 +159,15 @@ async fn run_cycle(
                 core.clone(),
                 stock_data.clone(),
                 stock_config.clone(),
+                openai.clone(),
+                claim.clone(),
+            )
+            .await
+        } else if claim.job_kind.starts_with("mail.") {
+            execute_mail_claim(
+                core.clone(),
+                mail_config.clone(),
+                mail_crypto.cloned(),
                 openai.clone(),
                 claim.clone(),
             )
@@ -184,6 +229,87 @@ async fn run_cycle(
         );
     }
     Ok(())
+}
+
+async fn execute_mail_claim(
+    core: TmCore,
+    config: MailConfig,
+    crypto: Option<MailCrypto>,
+    openai: OpenAiClient,
+    claim: SchedulerClaim,
+) -> Result<(), CoreError> {
+    let (stop_heartbeat, mut claim_lost, heartbeat) = spawn_heartbeat(core.clone(), claim.clone());
+    let operation = run_mail_job(&core, &config, crypto.as_ref(), &openai, &claim);
+    tokio::pin!(operation);
+    let result = tokio::select! {
+        result = &mut operation => result,
+        changed = claim_lost.changed() => {
+            let _ = changed;
+            Err(CoreError::Conflict(
+                "scheduler claim is no longer active for mail work".to_owned(),
+            ))
+        }
+    };
+    let _ = stop_heartbeat.send(true);
+    let _ = heartbeat.await;
+    if *claim_lost.borrow() {
+        return Err(CoreError::Conflict(
+            "scheduler claim is no longer active before mail completion".to_owned(),
+        ));
+    }
+    let result = result?;
+    let verify_core = core.clone();
+    let verify_claim = claim.clone();
+    tokio::task::spawn_blocking(move || {
+        verify_core.heartbeat_scheduler_claim(&verify_claim, Utc::now())
+    })
+    .await
+    .map_err(|_| {
+        CoreError::Invariant("mail scheduler final heartbeat worker failed".to_owned())
+    })??;
+    tokio::task::spawn_blocking(move || {
+        core.complete_scheduler_claim_with_result(&claim, &result, Utc::now())
+    })
+    .await
+    .map_err(|_| CoreError::Invariant("mail scheduler completion worker failed".to_owned()))??;
+    Ok(())
+}
+
+async fn run_mail_job(
+    core: &TmCore,
+    config: &MailConfig,
+    crypto: Option<&MailCrypto>,
+    openai: &OpenAiClient,
+    claim: &SchedulerClaim,
+) -> Result<Value, CoreError> {
+    if !config.enabled() {
+        return Ok(json!({
+            "status": "disabled",
+            "kind": claim.job_kind,
+            "openAiCalls": 0,
+            "providerMutations": 0,
+        }));
+    }
+    let crypto = crypto.ok_or_else(|| {
+        CoreError::Invariant("mail scheduler encryption is unavailable".to_owned())
+    })?;
+    match mail_worker::execute(core, config, crypto, openai, claim).await {
+        Ok(result) => Ok(result),
+        Err(_error) if claim.job_kind == "mail.triage" => {
+            tracing::warn!(
+                run_id = %claim.run_id,
+                "mail AI triage fell back to the existing rule decision"
+            );
+            Ok(json!({
+                "status": "rule_fallback",
+                "failureCode": "mail_triage_failed",
+                "openAiCalls": 0,
+                "providerMutations": 0,
+                "fallbackActive": true,
+            }))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 async fn execute_stock_claim(
@@ -250,12 +376,12 @@ fn spawn_heartbeat(
                     }).await {
                         Ok(Ok(_)) => last_success = Instant::now(),
                         Ok(Err(CoreError::Conflict(error))) => {
-                            tracing::warn!(run_id = %claim.run_id, %error, "stock scheduler heartbeat failed");
+                            tracing::warn!(run_id = %claim.run_id, %error, "scheduler heartbeat failed");
                             let _ = lost_sender.send(true);
                             break;
                         }
                         Ok(Err(error)) => {
-                            tracing::warn!(run_id = %claim.run_id, %error, "stock scheduler heartbeat transient failure");
+                            tracing::warn!(run_id = %claim.run_id, %error, "scheduler heartbeat transient failure");
                             if last_success.elapsed()
                                 >= Duration::from_secs(STOCK_HEARTBEAT_MAX_GAP_SECONDS)
                             {
@@ -264,7 +390,7 @@ fn spawn_heartbeat(
                             }
                         }
                         Err(error) => {
-                            tracing::warn!(run_id = %claim.run_id, %error, "stock scheduler heartbeat worker failed");
+                            tracing::warn!(run_id = %claim.run_id, %error, "scheduler heartbeat worker failed");
                             let _ = lost_sender.send(true);
                             break;
                         }

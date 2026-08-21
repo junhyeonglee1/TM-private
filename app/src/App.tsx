@@ -9,6 +9,7 @@ import { SessionPage } from "./components/SessionPage";
 import { StockPage } from "./components/StockPage";
 import { DeviceManagementPage } from "./components/DeviceManagementPage";
 import { ExpensesPage, TodayExpenseDueCards } from "./components/ExpensesPage";
+import { MailPage, TodayMailCards } from "./components/MailPage";
 import { TaskDetail } from "./components/TaskDetail";
 import { HistoryPage, InboxPage, ProjectsPage, TodayPage } from "./components/TaskPages";
 import {
@@ -44,6 +45,7 @@ type PageId =
   | "notes"
   | "stocks"
   | "expenses"
+  | "mail"
   | "search"
   | "change-requests"
   | "trash"
@@ -410,6 +412,7 @@ export function App({ api = defaultApi }: AppProps) {
       title: "생활",
       items: [
         { id: "expenses", label: "지출", icon: "chart" },
+        { id: "mail", label: "메일", icon: "mail" },
         { id: "stocks", label: "주식", icon: "chart" },
       ],
     },
@@ -438,7 +441,7 @@ export function App({ api = defaultApi }: AppProps) {
       case "inbox":
         return <InboxPage />;
       case "today":
-        return <TodayPage expenseDueCards={<TodayExpenseDueCards api={api} onOpenExpenses={openExpenses} today={snapshot.today} />} onComplete={completeTask} onGenerateReport={generateTaskReport} onOpen={(task) => setSelectedTaskId(task.id)} onOpenStocks={() => navigate("stocks")} onRateReport={rateTaskReport} onResolve={resolveDayEntry} report={taskReport} reportLoading={taskReportLoading} stockScreen={stockScreen} stockScreenError={stockScreenError} stockScreenLoading={stockScreenLoading} tasks={snapshot.tasks} today={snapshot.today} view={snapshot.todayView} />;
+        return <TodayPage expenseDueCards={<><TodayExpenseDueCards api={api} onOpenExpenses={openExpenses} today={snapshot.today} /><TodayMailCards api={api} onOpenMail={() => navigate("mail")} today={snapshot.today} /></>} onComplete={completeTask} onGenerateReport={generateTaskReport} onOpen={(task) => setSelectedTaskId(task.id)} onOpenStocks={() => navigate("stocks")} onRateReport={rateTaskReport} onResolve={resolveDayEntry} report={taskReport} reportLoading={taskReportLoading} stockScreen={stockScreen} stockScreenError={stockScreenError} stockScreenLoading={stockScreenLoading} tasks={snapshot.tasks} today={snapshot.today} view={snapshot.todayView} />;
       case "calendar":
         return <CalendarPage onCreate={api.createCalendarEvent} onDelete={api.deleteCalendarEvent} onLoad={api.getCalendarMonth} onNotify={notify} onOpenExpense={(recurringExpenseId) => openExpenses(recurringExpenseId)} onUpdate={api.updateCalendarEvent} today={snapshot.today} />;
       case "projects":
@@ -455,6 +458,8 @@ export function App({ api = defaultApi }: AppProps) {
         return <StockPage onDelete={api.deleteStockWatchlistItem} onListScreenResults={api.listStockScreenResults} onLoad={api.getStockWatchlist} onNotify={notify} onRefreshScreen={loadStockScreen} onUpsert={api.upsertStockWatchlistItem} screen={stockScreen} screenError={stockScreenError} screenLoading={stockScreenLoading} />;
       case "expenses":
         return <ExpensesPage api={api} initialRecurringExpenseId={selectedRecurringExpenseId} onNotify={notify} today={snapshot.today} />;
+      case "mail":
+        return <MailPage api={api} onNotify={notify} today={snapshot.today} />;
       case "search":
         return <SearchPage onOpenTask={(taskId) => setSelectedTaskId(taskId)} onSearch={(query) => api.search(query)} />;
       case "change-requests":

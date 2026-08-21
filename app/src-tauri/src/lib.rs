@@ -98,6 +98,21 @@ async fn invoke_cloud_expense_feature(
 }
 
 #[tauri::command]
+async fn invoke_cloud_mail_feature(
+    command: String,
+    args: Option<Value>,
+    state: tauri::State<'_, AppState>,
+) -> Result<Value, String> {
+    let cloud = state.cloud.clone();
+    cloud
+        .mail_feature(
+            &command,
+            args.unwrap_or_else(|| Value::Object(serde_json::Map::new())),
+        )
+        .await
+}
+
+#[tauri::command]
 async fn get_cost_status(state: tauri::State<'_, AppState>) -> Result<Value, String> {
     let cloud = state.cloud.clone();
     cloud.cost_status().await
@@ -168,6 +183,7 @@ pub fn run() {
             invoke_cloud_device_admin,
             invoke_cloud_assistant_feature,
             invoke_cloud_expense_feature,
+            invoke_cloud_mail_feature,
             get_cost_status,
             expense_commands::preview_expense_import,
             expense_commands::commit_expense_import,

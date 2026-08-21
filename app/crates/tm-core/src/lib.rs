@@ -14,6 +14,7 @@ mod error;
 mod expense;
 mod export;
 mod home;
+mod mail;
 mod memory;
 mod migration;
 mod model;
@@ -34,6 +35,7 @@ pub use digest::{DigestDelivery, DigestFacts, DigestKind, DigestPreparation, Dig
 pub use error::{Error, Result};
 pub use expense::*;
 pub use home::{DEFAULT_TM_HOME, TmHome};
+pub use mail::*;
 pub use memory::*;
 pub use migration::{MigrationDryRun, MigrationManifest, MigrationTableManifest};
 pub use model::*;

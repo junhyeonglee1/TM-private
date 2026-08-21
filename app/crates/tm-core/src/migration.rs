@@ -83,6 +83,21 @@ pub(crate) const MANIFEST_TABLES: &[&str] = &[
     "expense_ai_classification_batches",
     "expense_ai_classification_items",
     "expense_ai_classification_receipts",
+    "mail_crypto_metadata",
+    "mail_accounts",
+    "mail_credentials",
+    "mail_sync_state",
+    "mail_items",
+    "mail_feedback",
+    "mail_rules",
+    "mail_oauth_states",
+    "mail_webhook_events",
+    "mail_triage_batches",
+    "mail_triage_items",
+    "mail_reports",
+    "mail_report_items",
+    "mail_sync_events",
+    "mail_mutation_receipts",
 ];
 
 /// The schema 14 durability boundary ends at `app_state`. Schema 15 appends
@@ -91,6 +106,8 @@ pub(crate) const SCHEMA_14_MANIFEST_TABLE_COUNT: usize = 45;
 /// Schema 16 appends the AI classification batch ledger after the complete
 /// schema 15 expense durability boundary.
 pub(crate) const SCHEMA_15_MANIFEST_TABLE_COUNT: usize = 65;
+/// Schema 17 appends the mail monitoring durability boundary after schema 16.
+pub(crate) const SCHEMA_16_MANIFEST_TABLE_COUNT: usize = 68;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

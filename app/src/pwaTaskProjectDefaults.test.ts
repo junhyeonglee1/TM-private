@@ -33,7 +33,7 @@ describe("모바일 PWA Task 프로젝트 기본값", () => {
   });
 
   it("변경된 모바일 shell을 즉시 갱신하도록 캐시 버전을 올린다", () => {
-    expect(serviceWorker).toContain('const CACHE_NAME = "tm-mobile-shell-v16-simple-ui-v1"');
+    expect(serviceWorker).toContain('const CACHE_NAME = "tm-mobile-shell-v17-mail-v1"');
   });
 
   it("모바일 첫 화면은 한 줄 Task 목록이고 프로젝트 관리는 접어서 제공한다", () => {
@@ -44,5 +44,15 @@ describe("모바일 PWA Task 프로젝트 기본값", () => {
     expect(app).toContain('void loadTaskWorkspace();');
     expect(app).toContain('const card = text("article", "", "item-card task-card")');
     expect(app).toContain('const open = text("button", "", "task-card-main")');
+  });
+
+  it("모바일 메일은 조회·피드백만 제공하고 실패 재시도에는 같은 멱등성 키를 유지한다", () => {
+    expect(shell).toContain('<button data-tab="mail">메일</button>');
+    expect(shell).toContain('id="mail-important-list"');
+    expect(app).toContain('const pendingMailMutationKeys = new Map()');
+    expect(app).toContain('headers: mutationHeaders(operation, item.version, pending.key)');
+    expect(app).toContain('open.rel = "noopener noreferrer"');
+    expect(app).not.toContain("startGmailOAuth");
+    expect(app).not.toContain("connectNaverMail");
   });
 });

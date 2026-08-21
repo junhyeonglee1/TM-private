@@ -837,3 +837,67 @@ export interface ExpenseReportResult {
   }>;
   helpful: boolean | null;
 }
+
+export type MailProvider = "gmail" | "naver";
+export type MailClassification = "important" | "review" | "not_important" | "excluded";
+
+export interface MailAccount {
+  id: string;
+  provider: MailProvider;
+  email: string;
+  displayName: string | null;
+  status: "connected" | "reconnect_required" | "disabled";
+  lastSuccessAt: string | null;
+  nextExpectedAt: string | null;
+  watchExpiresAt: string | null;
+  lastErrorCode: string | null;
+  consecutiveFailures: number;
+  createdAt: string;
+  updatedAt: string;
+  version: number;
+}
+
+export interface MailItem {
+  id: string;
+  accountId: string;
+  provider: MailProvider;
+  sender: string;
+  senderDomain: string | null;
+  subject: string;
+  summary: string | null;
+  action: string | null;
+  deadline: string | null;
+  receivedAt: string;
+  classification: MailClassification;
+  importanceScore: number;
+  confidence: number;
+  decisionSource: "rule" | "ai" | "manual";
+  decisionReason: string;
+  sensitiveKind: "otp" | "password_reset" | "security_alert" | null;
+  acknowledgedAt: string | null;
+  originalUrl: string;
+  version: number;
+}
+
+export interface MailItemPage {
+  items: MailItem[];
+  nextCursor: string | null;
+}
+
+export interface MailReport {
+  id: string;
+  reportDate: string;
+  slot: "morning" | "evening";
+  summary: string;
+  importantCount: number;
+  reviewCount: number;
+  generatedAt: string;
+}
+
+export interface MailSummary {
+  date: string;
+  unacknowledgedImportant: number;
+  reviewCount: number;
+  latestReport: MailReport | null;
+  presentationEnabled: boolean;
+}

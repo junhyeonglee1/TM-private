@@ -42,6 +42,12 @@ import type {
   UpdateExpenseSourceStatusInput,
   UpsertStockWatchlistItemInput,
   CreateRecurringExpenseInput,
+  MailAccount,
+  MailClassification,
+  MailItem,
+  MailItemPage,
+  MailReport,
+  MailSummary,
 } from "../types";
 import { createMemoryTransport } from "./mock-transport";
 
@@ -118,6 +124,7 @@ export interface CostStatus {
 
 export interface TmApi {
   readonly canImportExpenses: boolean;
+  readonly canManageMailAccounts: boolean;
   getSnapshot(): Promise<AppSnapshot>;
   getCostStatus(): Promise<CostStatus>;
   getCalendarMonth(month: string): Promise<CalendarMonth>;
@@ -212,6 +219,20 @@ export interface TmApi {
   latestExpenseReport(month: string): Promise<ExpenseReportResult | null>;
   rateExpenseReport(reportId: string, helpful: boolean): Promise<ExpenseReportResult>;
   discardExpenseMutation(command: ExpenseMutationCommandName, resourceId?: string): void;
+  getMailAccounts(): Promise<MailAccount[]>;
+  getMailSummary(date: string): Promise<MailSummary>;
+  listMailItems(input: {
+    status?: MailClassification;
+    accountId?: string;
+    cursor?: string;
+    limit?: number;
+  }): Promise<MailItemPage>;
+  getMailReports(date: string): Promise<MailReport[]>;
+  startGmailOAuth(): Promise<{ authorizationUrl: string; expiresInSeconds: number }>;
+  connectNaverMail(input: { email: string; displayName?: string; appPassword: string }): Promise<MailAccount>;
+  disconnectMailAccount(accountId: string, expectedVersion: number): Promise<MailAccount>;
+  acknowledgeMailItem(itemId: string, expectedVersion: number): Promise<MailItem>;
+  feedbackMailItem(itemId: string, important: boolean, expectedVersion: number): Promise<MailItem>;
 }
 
 export type ExpenseMutationCommandName =
@@ -226,6 +247,13 @@ export type ExpenseMutationCommandName =
   | "match_recurring_expense_occurrence"
   | "generate_expense_report"
   | "rate_expense_report";
+
+type MailMutationCommandName =
+  | "start_gmail_oauth"
+  | "connect_naver_mail"
+  | "disconnect_mail_account"
+  | "acknowledge_mail_item"
+  | "feedback_mail_item";
 
 class TauriTransport implements CommandTransport {
   private readonly mode = tauriInvoke<"local" | "cloud">("data_mode");
@@ -246,6 +274,12 @@ class TauriTransport implements CommandTransport {
       }
       if (command.includes("expense")) {
         return tauriInvoke<T>("invoke_cloud_expense_feature", {
+          command,
+          args: args ?? {},
+        });
+      }
+      if (command.includes("mail") || command === "start_gmail_oauth") {
+        return tauriInvoke<T>("invoke_cloud_mail_feature", {
           command,
           args: args ?? {},
         });
@@ -340,9 +374,37 @@ export const createApi = (
     }
     return result;
   };
+  const pendingMailMutations = new Map<string, { fingerprint: string; key: string }>();
+  const mailMutationFingerprint = async (value: unknown): Promise<string> => {
+    const bytes = new TextEncoder().encode(JSON.stringify(value));
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  };
+  const invokeMailMutation = async <T>(
+    command: MailMutationCommandName,
+    args: Record<string, unknown>,
+    resourceId = "",
+  ): Promise<T> => {
+    const scope = `${command}:${await mailMutationFingerprint(resourceId)}`;
+    const fingerprint = await mailMutationFingerprint(args);
+    let pending = pendingMailMutations.get(scope);
+    if (!pending || pending.fingerprint !== fingerprint) {
+      pending = { fingerprint, key: `desktop-mail:${crypto.randomUUID()}` };
+      pendingMailMutations.set(scope, pending);
+    }
+    const result = await transport.invoke<T>(command, {
+      ...args,
+      idempotencyKey: pending.key,
+    });
+    if (pendingMailMutations.get(scope)?.key === pending.key) {
+      pendingMailMutations.delete(scope);
+    }
+    return result;
+  };
 
   return {
   canImportExpenses: options.canImportExpenses ?? false,
+  canManageMailAccounts: options.canImportExpenses ?? false,
   getSnapshot: () => transport.invoke<AppSnapshot>("get_app_snapshot"),
   getCostStatus: () => transport.invoke<CostStatus>("get_cost_status"),
   getCalendarMonth: (month) => transport.invoke<CalendarMonth>("get_calendar_month", { month }),
@@ -483,6 +545,18 @@ export const createApi = (
       reportId,
     ),
   discardExpenseMutation,
+  getMailAccounts: () => transport.invoke<MailAccount[]>("get_mail_accounts"),
+  getMailSummary: (date) => transport.invoke<MailSummary>("get_mail_summary", { date }),
+  listMailItems: (input) => transport.invoke<MailItemPage>("list_mail_items", { ...input }),
+  getMailReports: (date) => transport.invoke<MailReport[]>("get_mail_reports", { date }),
+  startGmailOAuth: () => invokeMailMutation<{ authorizationUrl: string; expiresInSeconds: number }>("start_gmail_oauth", {}),
+  connectNaverMail: (input) => invokeMailMutation<MailAccount>("connect_naver_mail", { ...input }, input.email),
+  disconnectMailAccount: (accountId, expectedVersion) =>
+    invokeMailMutation<MailAccount>("disconnect_mail_account", { accountId, expectedVersion }, accountId),
+  acknowledgeMailItem: (itemId, expectedVersion) =>
+    invokeMailMutation<MailItem>("acknowledge_mail_item", { itemId, expectedVersion }, itemId),
+  feedbackMailItem: (itemId, important, expectedVersion) =>
+    invokeMailMutation<MailItem>("feedback_mail_item", { itemId, important, expectedVersion }, itemId),
   };
 };
 

@@ -101,6 +101,20 @@ pub(super) fn device_route_allowed(method: &Method, path: &str) -> bool {
     }
     if matches!(
         path,
+        "/api/v1/mail/accounts"
+            | "/api/v1/mail/summary"
+            | "/api/v1/mail/items"
+            | "/api/v1/mail/reports"
+    ) {
+        return method == Method::GET;
+    }
+    if path.starts_with("/api/v1/mail/items/")
+        && (path.ends_with("/acknowledge") || path.ends_with("/feedback"))
+    {
+        return method == Method::POST;
+    }
+    if matches!(
+        path,
         "/api/v1/auth/status" | "/api/v1/device/self" | "/api/v1/costs/status"
     ) {
         return method == Method::GET;

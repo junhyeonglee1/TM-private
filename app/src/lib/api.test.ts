@@ -13,6 +13,34 @@ const archiveMockProject = (
 };
 
 describe("Tauri invoke payload 계약", () => {
+  it("메일 mutation은 응답 유실에는 같은 키를 쓰고 같은 길이의 새 비밀번호에는 새 키를 쓴다", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    let fail = true;
+    const transport: CommandTransport = {
+      async invoke<T>(command: string, args: Record<string, unknown> = {}): Promise<T> {
+        expect(command).toBe("connect_naver_mail");
+        calls.push(args);
+        if (fail) throw new Error("합성 응답 유실");
+        return {} as T;
+      },
+    };
+    const api = createApi(transport);
+    const first = { email: "owner@naver.com", appPassword: "abcdefgh" };
+
+    await expect(api.connectNaverMail(first)).rejects.toThrow("합성 응답 유실");
+    fail = false;
+    await api.connectNaverMail(first);
+    expect(calls[0].idempotencyKey).toMatch(/^desktop-mail:/);
+    expect(calls[1].idempotencyKey).toBe(calls[0].idempotencyKey);
+
+    fail = true;
+    await expect(api.connectNaverMail(first)).rejects.toThrow("합성 응답 유실");
+    const failedKey = calls.at(-1)?.idempotencyKey;
+    fail = false;
+    await api.connectNaverMail({ ...first, appPassword: "ijklmnop" });
+    expect(calls.at(-1)?.idempotencyKey).not.toBe(failedKey);
+  });
+
   it("AI 자동 분류는 월과 안정적인 멱등성 키를 전용 command로 전달한다", async () => {
     const calls: Array<Record<string, unknown>> = [];
     let fail = true;

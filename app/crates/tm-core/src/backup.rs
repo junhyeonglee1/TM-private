@@ -20,7 +20,10 @@ use crate::{
         Database, SCHEMA_VERSION, database_lock, now_utc, register_runtime_functions,
         validate_schema_semantics,
     },
-    migration::{MANIFEST_TABLES, SCHEMA_14_MANIFEST_TABLE_COUNT, SCHEMA_15_MANIFEST_TABLE_COUNT},
+    migration::{
+        MANIFEST_TABLES, SCHEMA_14_MANIFEST_TABLE_COUNT, SCHEMA_15_MANIFEST_TABLE_COUNT,
+        SCHEMA_16_MANIFEST_TABLE_COUNT,
+    },
 };
 
 const DATABASE_BACKUP_LIMIT: usize = 30;
@@ -170,6 +173,7 @@ pub(crate) fn restore_database(
         merge_scheduler_ledger(&destination, Path::new(&safety_backup.path))?;
         merge_device_auth_ledger(&destination, Path::new(&safety_backup.path))?;
         merge_expense_ledger(&destination, Path::new(&safety_backup.path))?;
+        merge_mail_ledger(&destination, Path::new(&safety_backup.path))?;
         destination.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
         Ok(())
     })();
@@ -405,6 +409,14 @@ fn has_complete_schema_tables(connection: &Connection, version: i64) -> rusqlite
                 tables.last() == Some(&"expense_mutation_receipts")
                     && MANIFEST_TABLES.get(SCHEMA_15_MANIFEST_TABLE_COUNT)
                         == Some(&"expense_ai_classification_batches")
+            }),
+        16 => MANIFEST_TABLES
+            .get(..SCHEMA_16_MANIFEST_TABLE_COUNT)
+            .and_then(|tables| {
+                (tables.len() == SCHEMA_16_MANIFEST_TABLE_COUNT
+                    && MANIFEST_TABLES.get(SCHEMA_16_MANIFEST_TABLE_COUNT)
+                        == Some(&"mail_crypto_metadata"))
+                .then_some(tables)
             }),
         SCHEMA_VERSION => Some(MANIFEST_TABLES),
         _ => Some(&[]),
@@ -1424,6 +1436,257 @@ fn merge_expense_ledger(connection: &Connection, preserved_database: &Path) -> R
     Ok(())
 }
 
+fn merge_mail_ledger(connection: &Connection, preserved_database: &Path) -> Result<()> {
+    connection.execute(
+        "ATTACH DATABASE ?1 AS mail_preserved",
+        [preserved_database.to_string_lossy().as_ref()],
+    )?;
+    let merge_result = (|| -> Result<()> {
+        connection.execute_batch("BEGIN IMMEDIATE;")?;
+        merge_immutable_mail_tables(connection, &["mail_crypto_metadata"])?;
+        for table in [
+            "mail_accounts",
+            "mail_credentials",
+            "mail_sync_state",
+            "mail_items",
+            "mail_rules",
+            "mail_oauth_states",
+            "mail_webhook_events",
+        ] {
+            let (columns, primary_key) = expense_table_columns(connection, table)?;
+            let table_name = quote_sql_identifier(table);
+            let column_list = columns
+                .iter()
+                .map(|column| quote_sql_identifier(column))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let conflict_target = primary_key
+                .iter()
+                .map(|column| quote_sql_identifier(column))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let updates = columns
+                .iter()
+                .filter(|column| !primary_key.contains(column))
+                .map(|column| {
+                    let quoted = quote_sql_identifier(column);
+                    format!("{quoted} = excluded.{quoted}")
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            if primary_key.is_empty() || updates.is_empty() {
+                return Err(Error::Invariant(format!(
+                    "mail merge table lacks a usable primary key: {table}"
+                )));
+            }
+            connection.execute_batch(&format!(
+                "INSERT INTO main.{table_name}({column_list})
+                 SELECT {column_list} FROM mail_preserved.{table_name} WHERE true
+                 ON CONFLICT({conflict_target}) DO UPDATE SET {updates};"
+            ))?;
+        }
+        merge_immutable_mail_tables(
+            connection,
+            &[
+                "mail_feedback",
+                "mail_sync_events",
+                "mail_mutation_receipts",
+            ],
+        )?;
+        merge_mail_triage_ledger(connection)?;
+        connection.execute_batch(
+            "DELETE FROM main.mail_report_items;
+             DELETE FROM main.mail_reports;
+             INSERT INTO main.mail_reports
+             SELECT * FROM mail_preserved.mail_reports;
+             INSERT INTO main.mail_report_items
+             SELECT * FROM mail_preserved.mail_report_items;
+             DELETE FROM main.mail_credentials
+             WHERE account_id IN (
+                SELECT id FROM main.mail_accounts WHERE status = 'disabled'
+             );",
+        )?;
+        let cutoff = now_utc();
+        connection.execute(
+            "DELETE FROM main.mail_report_items
+             WHERE report_id IN (
+                 SELECT id FROM main.mail_reports WHERE expires_at <= ?1
+             ) OR mail_item_id IN (
+                 SELECT id FROM main.mail_items WHERE expires_at <= ?1
+             )",
+            [&cutoff],
+        )?;
+        connection.execute(
+            "DELETE FROM main.mail_feedback
+             WHERE mail_item_id IN (
+                 SELECT id FROM main.mail_items WHERE expires_at <= ?1
+             )",
+            [&cutoff],
+        )?;
+        connection.execute(
+            "DELETE FROM main.mail_items WHERE expires_at <= ?1",
+            [&cutoff],
+        )?;
+        connection.execute(
+            "DELETE FROM main.mail_reports WHERE expires_at <= ?1",
+            [&cutoff],
+        )?;
+        connection.execute(
+            "DELETE FROM main.mail_oauth_states WHERE expires_at <= ?1",
+            [&cutoff],
+        )?;
+        connection.execute_batch("COMMIT;")?;
+        Ok(())
+    })();
+    if merge_result.is_err() {
+        let _ = connection.execute_batch("ROLLBACK;");
+    }
+    let detach_result = connection.execute_batch("DETACH DATABASE mail_preserved;");
+    merge_result?;
+    detach_result?;
+    Ok(())
+}
+
+fn merge_mail_triage_ledger(connection: &Connection) -> Result<()> {
+    connection.execute_batch(
+        "INSERT OR IGNORE INTO main.mail_triage_batches
+         SELECT * FROM mail_preserved.mail_triage_batches;
+         INSERT OR IGNORE INTO main.mail_triage_items
+         SELECT * FROM mail_preserved.mail_triage_items;
+
+         UPDATE main.mail_triage_items AS current
+         SET importance_score = (
+                 SELECT preserved.importance_score
+                 FROM mail_preserved.mail_triage_items AS preserved
+                 WHERE preserved.batch_id = current.batch_id
+                   AND preserved.mail_item_id = current.mail_item_id
+             ),
+             confidence = (
+                 SELECT preserved.confidence
+                 FROM mail_preserved.mail_triage_items AS preserved
+                 WHERE preserved.batch_id = current.batch_id
+                   AND preserved.mail_item_id = current.mail_item_id
+             ),
+             classification = (
+                 SELECT preserved.classification
+                 FROM mail_preserved.mail_triage_items AS preserved
+                 WHERE preserved.batch_id = current.batch_id
+                   AND preserved.mail_item_id = current.mail_item_id
+             ),
+             reason_code = (
+                 SELECT preserved.reason_code
+                 FROM mail_preserved.mail_triage_items AS preserved
+                 WHERE preserved.batch_id = current.batch_id
+                   AND preserved.mail_item_id = current.mail_item_id
+             )
+         WHERE current.importance_score IS NULL
+           AND current.confidence IS NULL
+           AND current.classification IS NULL
+           AND current.reason_code IS NULL
+           AND EXISTS(
+               SELECT 1 FROM mail_preserved.mail_triage_items AS preserved
+               WHERE preserved.batch_id = current.batch_id
+                 AND preserved.mail_item_id = current.mail_item_id
+                 AND preserved.importance_score IS NOT NULL
+                 AND preserved.confidence IS NOT NULL
+                 AND preserved.classification IS NOT NULL
+                 AND preserved.reason_code IS NOT NULL
+           );
+
+         INSERT INTO main.mail_triage_batches
+         SELECT * FROM mail_preserved.mail_triage_batches WHERE true
+         ON CONFLICT(id) DO UPDATE SET
+             status = excluded.status,
+             response_id = excluded.response_id,
+             upstream_request_id = excluded.upstream_request_id,
+             input_tokens = excluded.input_tokens,
+             cached_input_tokens = excluded.cached_input_tokens,
+             output_tokens = excluded.output_tokens,
+             total_tokens = excluded.total_tokens,
+             cost_microusd = excluded.cost_microusd,
+             failure_code = excluded.failure_code,
+             completed_at = excluded.completed_at
+         WHERE mail_triage_batches.status = 'claimed'
+           AND excluded.status <> 'claimed';",
+    )?;
+    assert_preserved_mail_table_equal(connection, "mail_triage_batches")?;
+    assert_preserved_mail_table_equal(connection, "mail_triage_items")?;
+    Ok(())
+}
+
+fn assert_preserved_mail_table_equal(connection: &Connection, table: &str) -> Result<()> {
+    let (columns, _) = expense_table_columns(connection, table)?;
+    let table_name = quote_sql_identifier(table);
+    let equality = columns
+        .iter()
+        .map(|column| {
+            let quoted = quote_sql_identifier(column);
+            format!("current.{quoted} IS preserved.{quoted}")
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let conflicting: bool = connection.query_row(
+        &format!(
+            "SELECT EXISTS(
+                SELECT 1 FROM mail_preserved.{table_name} AS preserved
+                WHERE NOT EXISTS(
+                    SELECT 1 FROM main.{table_name} AS current WHERE {equality}
+                )
+             )"
+        ),
+        [],
+        |row| row.get(0),
+    )?;
+    if conflicting {
+        return Err(Error::Conflict(format!(
+            "restore contains a conflicting mail triage row in {table}"
+        )));
+    }
+    Ok(())
+}
+
+fn merge_immutable_mail_tables(connection: &Connection, tables: &[&str]) -> Result<()> {
+    for table in tables {
+        let (columns, _) = expense_table_columns(connection, table)?;
+        let table_name = quote_sql_identifier(table);
+        let column_list = columns
+            .iter()
+            .map(|column| quote_sql_identifier(column))
+            .collect::<Vec<_>>()
+            .join(", ");
+        connection.execute_batch(&format!(
+            "INSERT OR IGNORE INTO main.{table_name}({column_list})
+             SELECT {column_list} FROM mail_preserved.{table_name};"
+        ))?;
+        let equality = columns
+            .iter()
+            .map(|column| {
+                let quoted = quote_sql_identifier(column);
+                format!("current.{quoted} IS preserved.{quoted}")
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let conflicting: bool = connection.query_row(
+            &format!(
+                "SELECT EXISTS(
+                    SELECT 1 FROM mail_preserved.{table_name} AS preserved
+                    WHERE NOT EXISTS(
+                        SELECT 1 FROM main.{table_name} AS current WHERE {equality}
+                    )
+                 )"
+            ),
+            [],
+            |row| row.get(0),
+        )?;
+        if conflicting {
+            return Err(Error::Conflict(format!(
+                "restore contains a conflicting immutable mail row in {table}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn expense_table_columns(
     connection: &Connection,
     table: &str,
@@ -1873,7 +2136,10 @@ mod tests {
     use super::{backup_file_evidence, should_skip};
     use crate::{
         Result,
-        migration::{SCHEMA_14_MANIFEST_TABLE_COUNT, SCHEMA_15_MANIFEST_TABLE_COUNT},
+        migration::{
+            SCHEMA_14_MANIFEST_TABLE_COUNT, SCHEMA_15_MANIFEST_TABLE_COUNT,
+            SCHEMA_16_MANIFEST_TABLE_COUNT,
+        },
     };
 
     #[test]
@@ -1927,6 +2193,23 @@ mod tests {
         assert_eq!(
             super::MANIFEST_TABLES.get(SCHEMA_15_MANIFEST_TABLE_COUNT + 2),
             Some(&"expense_ai_classification_receipts")
+        );
+    }
+
+    #[test]
+    fn schema_sixteen_manifest_boundary_precedes_mail_tables() {
+        assert_eq!(SCHEMA_16_MANIFEST_TABLE_COUNT, 68);
+        assert_eq!(
+            super::MANIFEST_TABLES.get(SCHEMA_16_MANIFEST_TABLE_COUNT - 1),
+            Some(&"expense_ai_classification_receipts")
+        );
+        assert_eq!(
+            super::MANIFEST_TABLES.get(SCHEMA_16_MANIFEST_TABLE_COUNT),
+            Some(&"mail_crypto_metadata")
+        );
+        assert_eq!(
+            super::MANIFEST_TABLES.last(),
+            Some(&"mail_mutation_receipts")
         );
     }
 
